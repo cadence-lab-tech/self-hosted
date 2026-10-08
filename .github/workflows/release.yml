@@ -1,0 +1,84 @@
+# A new version of Cadence Lab.
+#
+#   pull-request  on the cadence-release event, sent by the release of the
+#                 backend and frontend images (or run by hand), opens the pull
+#                 request "VERSION -> vX.Y.Z" (ci/release-pr.sh). The event may
+#                 arrive twice; the second run finds the open pull request.
+#   tag           when VERSION changes on main, tags that commit vX.Y.Z:
+#                 ./upgrade.sh vX.Y.Z switches an installation to the tag.
+#
+# The pull request is opened with the secret RELEASE_PR_TOKEN, not with
+# GITHUB_TOKEN: a pull request opened by GITHUB_TOKEN starts no workflows, and
+# the stack check would never run on it. RELEASE_PR_TOKEN is a fine-grained
+# personal access token (or a GitHub App token) for this repository only,
+# with Contents: read and write and Pull requests: read and write.
+name: release
+
+on:
+  repository_dispatch:
+    types: [cadence-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version, vX.Y.Z"
+        required: true
+  push:
+    branches: [main]
+    paths: [VERSION]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.client_payload.version || inputs.version || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  pull-request:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VERSION: ${{ github.event.client_payload.version || inputs.version }}
+      BACKEND_IMAGE: ${{ github.event.client_payload.backend_image }}
+      FRONTEND_IMAGE: ${{ github.event.client_payload.frontend_image }}
+      GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+    steps:
+      - name: inputs
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version '$VERSION' is not vX.Y.Z"
+            exit 1
+          fi
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::secret RELEASE_PR_TOKEN is not set: a fine-grained token for this repository with Contents and Pull requests read and write."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.RELEASE_PR_TOKEN }}
+      - name: pull request with the new VERSION
+        run: ci/release-pr.sh
+
+  tag:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag the version
+        run: |
+          v="$(tr -d '[:space:]' < VERSION)"
+          if ! [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::VERSION holds '$v', expected vX.Y.Z"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$v" >/dev/null; then
+            echo "tag $v already exists"
+            exit 0
+          fi
+          git tag "$v" "$GITHUB_SHA"
+          git push origin "refs/tags/$v"

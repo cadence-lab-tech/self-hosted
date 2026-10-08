@@ -1,0 +1,54 @@
+# One entry point for the UI, the REST API, MCP and webhooks. The UI and the
+# API share one origin: the browser needs no CORS, agents and the CLI need no
+# second address.
+#
+# Two modes, picked by CADENCE_MODE in .env:
+#
+#   tls    Caddy serves SDLC_DOMAIN over HTTPS and obtains the certificate
+#          from Let's Encrypt itself (ports 80 and 443, compose.tls.yml).
+#   proxy  plain HTTP on port 80 inside the container, published on
+#          CADENCE_HTTP_ADDR (compose.proxy.yml); TLS is the job of your
+#          reverse proxy. No certificates, no ACME.
+{
+	# Global options must come first, and the block must exist: without it
+	# Caddy would read the imported site block at the bottom as global
+	# options. Let in-flight requests (MCP streams) finish on reload.
+	grace_period 10s
+}
+# The routes are the same in both modes.
+(routes) {
+	encode zstd gzip
+
+	# What the service handles: /v1 is REST, /mcp is agents, /webhooks is
+	# GitHub, /healthz and /readyz are probes. Everything else is the UI.
+	@backend path /v1/* /mcp/* /webhooks/* /healthz /readyz
+	handle @backend {
+		# MCP answers with a stream (SSE): buffering the response would
+		# break it.
+		reverse_proxy api:8080 {
+			flush_interval -1
+		}
+	}
+
+	# The UI image serves its own static files and falls back to index.html:
+	# routes such as /projects/ACME/tasks/42 live in the browser router.
+	handle {
+		reverse_proxy ui:80
+	}
+}
+
+(mode-tls) {
+	{$SDLC_DOMAIN} {
+		# Let's Encrypt writes here when renewal starts failing.
+		tls {$ACME_EMAIL}
+		import routes
+	}
+}
+
+(mode-proxy) {
+	http:// {
+		import routes
+	}
+}
+
+import mode-{$CADENCE_MODE:tls}

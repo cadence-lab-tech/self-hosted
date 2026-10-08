@@ -1,0 +1,4 @@
+.env
+backups/
+secrets/
+docker-compose.override.yml
