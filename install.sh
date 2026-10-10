@@ -173,10 +173,18 @@ fi
 # --- 4. .env ---------------------------------------------------------------------------
 info "writing .env"
 # set_kv writes KEY=VALUE over the template line; values go through ENVIRON,
-# so no character in them needs escaping.
+# so awk needs no escaping. compose reads .env and the scripts source it as
+# shell, so a value with spaces or shell characters is single-quoted, which
+# both read the same way.
 set_kv() {
+  case "$2" in
+  *"'"* | *$'\n'*) die "the value of $1 must not contain a single quote or a line break" ;;
+  esac
   KEY="$1" VALUE="$2" awk '
-    BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]; done = 0 }
+    BEGIN {
+      k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]; done = 0
+      if (v ~ /[^A-Za-z0-9_.,:\/@+=-]/) v = "\047" v "\047"
+    }
     index($0, k "=") == 1 { print k "=" v; done = 1; next }
     { print }
     END { if (!done) print k "=" v }
