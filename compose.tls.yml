@@ -1,0 +1,8 @@
+# CADENCE_MODE=tls: Caddy terminates TLS for SDLC_DOMAIN with a certificate
+# from Let's Encrypt. Ports 80 and 443 must be reachable from the internet:
+# 80 answers the ACME challenge and redirects to HTTPS.
+services:
+  caddy:
+    ports:
+      - "80:80"
+      - "443:443"

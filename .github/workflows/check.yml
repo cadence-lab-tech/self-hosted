@@ -1,0 +1,101 @@
+# Checks of the package. On every pull request and push to main:
+#
+#   lint   shell linter, compose and Caddyfile in both modes, secret scan
+#   stack  the stack on the published images of VERSION, in proxy mode:
+#          install, sign-in, clab, MCP, backup and restore (ci/check-stack.sh)
+#
+# Run by hand with two versions, it also checks the upgrade between them
+# (ci/check-upgrade.sh).
+#
+# While the images in GHCR are private, `stack` logs in with the secret
+# GHCR_READ_TOKEN: a token with read:packages only. Once the images are
+# public the login step goes away.
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upgrade_from:
+        description: "Also check the upgrade from this version (vX.Y.Z), empty to skip"
+        required: false
+      upgrade_to:
+        description: "...to this version (vX.Y.Z)"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: shellcheck
+        run: shellcheck *.sh ci/*.sh
+      - name: compose, Caddyfile, layout
+        run: ci/check-config.sh
+      - name: no secrets in the history
+        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest git /repo --redact
+
+  stack:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: log in to ghcr.io (until the images are public)
+        env:
+          TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::secret GHCR_READ_TOKEN is not set: the images of $(cat VERSION) are private during the beta. Add a token with read:packages as GHCR_READ_TOKEN."
+            exit 1
+          fi
+          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: images of VERSION exist
+        run: |
+          v="$(cat VERSION)"
+          for image in sdlc-pipeline-backend sdlc-pipeline-frontend; do
+            if ! docker manifest inspect "ghcr.io/cadence-lab-tech/$image:$v" >/dev/null; then
+              echo "::error::ghcr.io/cadence-lab-tech/$image:$v is not published (or not readable with GHCR_READ_TOKEN)"
+              exit 1
+            fi
+          done
+      - name: stack on the images of VERSION
+        run: ci/check-stack.sh
+
+  upgrade:
+    if: github.event_name == 'workflow_dispatch' && inputs.upgrade_from != ''
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: log in to ghcr.io (until the images are public)
+        env:
+          TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::secret GHCR_READ_TOKEN is not set: the images are private during the beta."
+            exit 1
+          fi
+          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: upgrade between the versions
+        env:
+          FROM: ${{ inputs.upgrade_from }}
+          TO: ${{ inputs.upgrade_to }}
+        run: ci/check-upgrade.sh "$FROM" "$TO"

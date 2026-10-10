@@ -1,0 +1,177 @@
+# Cadence Lab on a single machine.
+#
+# Only Caddy is reachable from outside. Postgres, the API, the worker and the
+# UI talk over the internal Docker network and publish no ports: exposing
+# 5432 on a machine with a public address means handing the database to the
+# internet.
+#
+# The version of both images comes from the VERSION file. The scripts
+# (install.sh, upgrade.sh, backup.sh, restore.sh) export it as
+# CADENCE_VERSION; for a direct `docker compose ...` run
+#
+#   export CADENCE_VERSION=$(cat VERSION)
+#
+# Which ports Caddy publishes depends on the mode (TLS on a domain or plain
+# HTTP behind your proxy): COMPOSE_FILE in .env adds compose.tls.yml or
+# compose.proxy.yml on top of this file.
+
+name: cadence
+
+x-image-backend: &image-backend
+  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set - use the scripts in this directory or export it from the VERSION file}
+
+# Settings the API and the worker must agree on.
+x-shared-env: &shared-env
+  SDLC_DATABASE_URL: postgres://${POSTGRES_USER:-sdlc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sdlc}?sslmode=disable
+  SDLC_ENV: production
+  SDLC_LOG_LEVEL: ${SDLC_LOG_LEVEL:-info}
+  # The worker decides that a lease has expired by the same rules the API
+  # uses to grant it.
+  SDLC_LEASE_TTL: ${SDLC_LEASE_TTL:-30m}
+  SDLC_HEARTBEAT_INTERVAL: ${SDLC_HEARTBEAT_INTERVAL:-5m}
+  # Artifact content: an S3 bucket, or the `blobs` volume when the bucket is
+  # empty.
+  SDLC_BLOB_DIR: /blobs
+  SDLC_BLOB_S3_BUCKET: ${SDLC_BLOB_S3_BUCKET:-}
+  SDLC_BLOB_S3_ENDPOINT: ${SDLC_BLOB_S3_ENDPOINT:-}
+  SDLC_BLOB_S3_REGION: ${SDLC_BLOB_S3_REGION:-}
+  SDLC_BLOB_S3_PREFIX: ${SDLC_BLOB_S3_PREFIX:-}
+  SDLC_BLOB_S3_ACCESS_KEY_ID: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-}
+  SDLC_BLOB_S3_SECRET_ACCESS_KEY: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-}
+  # Repository access: a GitHub App (private key in ./secrets) or a token.
+  SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
+  SDLC_GITHUB_APP_ID: ${SDLC_GITHUB_APP_ID:-}
+  SDLC_GITHUB_APP_KEY_FILE: ${SDLC_GITHUB_APP_KEY_FILE:-}
+  SDLC_GITHUB_TOKEN: ${SDLC_GITHUB_TOKEN:-}
+  # Embeddings: `none` keeps search full-text and makes no external calls.
+  # The model must be the same for the API (queries) and the worker
+  # (indexing), so both read the same variables.
+  SDLC_EMBEDDINGS_PROVIDER: ${SDLC_EMBEDDINGS_PROVIDER:-none}
+  SDLC_EMBEDDINGS_MODEL: ${SDLC_EMBEDDINGS_MODEL:-}
+  SDLC_EMBEDDINGS_URL: ${SDLC_EMBEDDINGS_URL:-}
+  SDLC_EMBEDDINGS_API_KEY: ${SDLC_EMBEDDINGS_API_KEY:-}
+  SDLC_EMBEDDINGS_BATCH: ${SDLC_EMBEDDINGS_BATCH:-96}
+  SDLC_EMBEDDINGS_SEND_DIMENSIONS: ${SDLC_EMBEDDINGS_SEND_DIMENSIONS:-true}
+  SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
+
+services:
+  postgres:
+    # The schema needs pgvector.
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sdlc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-sdlc}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # The API applies the schema on start (SDLC_AUTO_MIGRATE): migrations are
+  # built into the binary and cannot drift from the service version.
+  api:
+    <<: *image-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *shared-env
+      SDLC_HTTP_ADDR: ":8080"
+      SDLC_AUTO_MIGRATE: "true"
+      SDLC_SEED: ${SDLC_SEED:-}
+      # A gate of an unknown type must fail the transition.
+      SDLC_STRICT_GATES: "true"
+      SDLC_MCP_ENABLED: "true"
+      # Dedicated instance: no personal teams, projects live in teams.
+      SDLC_TENANCY: ${SDLC_TENANCY:-single}
+      SDLC_PROJECT_CREATION: ${SDLC_PROJECT_CREATION:-teams}
+      SDLC_AUTH_MODE: ${SDLC_AUTH_MODE:-token}
+      SDLC_ADMIN_HANDLE: ${SDLC_ADMIN_HANDLE:-admin}
+      SDLC_ADMIN_TOKEN: ${SDLC_ADMIN_TOKEN:-}
+      SDLC_BOOTSTRAP_TEAM: ${SDLC_BOOTSTRAP_TEAM:-}
+      SDLC_BOOTSTRAP_TEAM_NAME: ${SDLC_BOOTSTRAP_TEAM_NAME:-}
+      SDLC_SESSION_TTL: ${SDLC_SESSION_TTL:-12h}
+      # Sign-in for people: GitHub and/or your OIDC provider.
+      SDLC_GITHUB_URL: ${SDLC_GITHUB_URL:-https://github.com}
+      SDLC_GITHUB_APP_CLIENT_ID: ${SDLC_GITHUB_APP_CLIENT_ID:-}
+      SDLC_GITHUB_APP_CLIENT_SECRET: ${SDLC_GITHUB_APP_CLIENT_SECRET:-}
+      SDLC_GITHUB_APP_SLUG: ${SDLC_GITHUB_APP_SLUG:-}
+      SDLC_GITHUB_WEBHOOK_SECRET: ${SDLC_GITHUB_WEBHOOK_SECRET:-}
+      SDLC_OIDC_ISSUER: ${SDLC_OIDC_ISSUER:-}
+      SDLC_OIDC_CLIENT_ID: ${SDLC_OIDC_CLIENT_ID:-}
+      SDLC_OIDC_GROUPS_CLAIM: ${SDLC_OIDC_GROUPS_CLAIM:-groups}
+    volumes:
+      - blobs:/blobs
+      - ./secrets:/secrets:ro
+    healthcheck:
+      # The image has no shell and no curl: the binary probes /readyz itself.
+      test: ["CMD", "/api", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Background jobs: leases, repository indexing with drift detection, pull
+  # request state, embeddings. Same image, another entrypoint; it does not
+  # run migrations.
+  worker:
+    <<: *image-backend
+    restart: unless-stopped
+    entrypoint: ["/worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      <<: *shared-env
+      SDLC_AUTO_MIGRATE: "false"
+      SDLC_LEASE_SWEEP_INTERVAL: ${SDLC_LEASE_SWEEP_INTERVAL:-1m}
+      SDLC_INDEX_ENABLED: ${SDLC_INDEX_ENABLED:-true}
+      SDLC_INDEX_INTERVAL: ${SDLC_INDEX_INTERVAL:-5m}
+      SDLC_INDEX_POLL_INTERVAL: ${SDLC_INDEX_POLL_INTERVAL:-15s}
+      SDLC_INDEX_RETAIN_RUNS: ${SDLC_INDEX_RETAIN_RUNS:-5}
+      SDLC_BLOB_GC_ENABLED: ${SDLC_BLOB_GC_ENABLED:-true}
+      SDLC_BLOB_GC_INTERVAL: ${SDLC_BLOB_GC_INTERVAL:-1h}
+      SDLC_BLOB_GC_MIN_AGE: ${SDLC_BLOB_GC_MIN_AGE:-24h}
+      SDLC_EMBEDDING_CACHE_GC_ENABLED: ${SDLC_EMBEDDING_CACHE_GC_ENABLED:-true}
+      SDLC_EMBEDDING_CACHE_TTL: ${SDLC_EMBEDDING_CACHE_TTL:-720h}
+      SDLC_EMBEDDING_CACHE_MAX_ROWS: ${SDLC_EMBEDDING_CACHE_MAX_ROWS:-1000000}
+    volumes:
+      - blobs:/blobs
+      - ./secrets:/secrets:ro
+
+  # The UI: static files served by Caddy inside the image.
+  ui:
+    image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set - use the scripts in this directory or export it from the VERSION file}
+    restart: unless-stopped
+
+  # The single entry point: the UI, /v1, /mcp, /webhooks, /healthz, /readyz.
+  # CADENCE_MODE picks the site block in the Caddyfile; the published ports
+  # come from compose.tls.yml or compose.proxy.yml.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      CADENCE_MODE: ${CADENCE_MODE:-tls}
+      SDLC_DOMAIN: ${SDLC_DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Issued certificates live here. Without this volume every
+      # `docker compose down` makes Let's Encrypt issue them again, and it has
+      # weekly limits per domain.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, ui]
+
+volumes:
+  pgdata:
+  # Artifact content when SDLC_BLOB_S3_BUCKET is empty; shared by the API and
+  # the worker.
+  blobs:
+  caddy_data:
+  caddy_config:

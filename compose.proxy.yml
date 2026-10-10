@@ -1,0 +1,9 @@
+# CADENCE_MODE=proxy: plain HTTP behind your own reverse proxy or load
+# balancer, which terminates TLS. Caddy listens on CADENCE_HTTP_ADDR only;
+# the default binds the loopback interface, for a proxy on the same machine.
+# A proxy on another machine needs e.g. CADENCE_HTTP_ADDR=0.0.0.0:8080 and a
+# firewall that admits only the proxy.
+services:
+  caddy:
+    ports:
+      - "${CADENCE_HTTP_ADDR:-127.0.0.1:8080}:80"
