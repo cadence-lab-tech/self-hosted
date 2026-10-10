@@ -4,11 +4,13 @@
 #
 #   ci/check-upgrade.sh v0.5.0 v0.5.1
 #
-# Installs the stack at tag FROM (proxy mode), creates a team, a project and
-# a project document, runs ./upgrade.sh TO, and checks that the backup was
-# taken, the instance reports TO and the data is still there. Then checks that
-# going back down is refused. Both tags must exist in the remote, with their
-# images published. The stack is torn down with its volumes at the end.
+# Installs the stack at tag FROM (proxy mode), creates a team, a project, a
+# project document and a task with an artifact (on a minimal cycle imported
+# as a bundle), runs ./upgrade.sh TO, and checks that the backup was taken,
+# the instance reports TO and the data is still there, artifact content
+# included. Then checks that going back down is refused. Both tags must exist
+# in the remote, with their images published. The stack is torn down with its
+# volumes at the end.
 #
 #   CHECK_HTTP_PORT  host port of the stack, default 8080
 #   CLAB_BIN         clab to use; default: the CLI of FROM from the public tap
@@ -75,6 +77,40 @@ main() {
   "$clab" --host "$base" project create UPG --name "Upgrade check" --team upgrade >/dev/null
   SDLC_PROJECT=UPG "$clab" --host "$base" doc put --kind guideline --title "Upgrade check" --file "$clab_dir/doc.md" >/dev/null
 
+  # A new project has no cycle: a minimal one (one role, one working status)
+  # comes as a bundle, then a task is taken on it and an artifact submitted.
+  cat >"$clab_dir/bundle.json" <<'JSON'
+{
+  "version": 2,
+  "roles": [{
+    "key": "upgrade",
+    "name": "Upgrade check",
+    "instructions": "Write a note.",
+    "output_contract": [{"kind": "upgrade.note", "title": "Note", "format": "markdown", "required": true}]
+  }],
+  "workflows": [{
+    "name": "Upgrade check",
+    "statuses": [
+      {"key": "work", "name": "Work", "category": "active", "is_initial": true, "role": "upgrade"},
+      {"key": "done", "name": "Done", "category": "done", "is_terminal": true}
+    ],
+    "transitions": [{"key": "finish", "name": "Finish", "from": "work", "to": "done", "kind": "advance"}]
+  }]
+}
+JSON
+  local workflow_id task_key artifact_id
+  workflow_id="$(SDLC_PROJECT=UPG "$clab" --host "$base" import --file "$clab_dir/bundle.json" --json | jq -r '.workflows[0].id')"
+  SDLC_PROJECT=UPG "$clab" --host "$base" workflow activate "$workflow_id" >/dev/null
+  task_key="$(SDLC_PROJECT=UPG "$clab" --host "$base" create --title "Upgrade check task" --json | jq -r '.key')"
+  SDLC_PROJECT=UPG "$clab" --host "$base" claim "$task_key" >/dev/null
+  printf 'Artifact written on %s before the upgrade.\n' "$from" >"$clab_dir/note.md"
+  artifact_id="$(SDLC_PROJECT=UPG "$clab" --host "$base" submit "$task_key" --kind upgrade.note \
+    --title "Upgrade check note" --file "$clab_dir/note.md" --json | jq -r '.artifact.id // .id')"
+  case "$task_key/$artifact_id" in
+    /* | */ | null/* | */null) die "could not create the task and its artifact on $from" ;;
+  esac
+  info "task $task_key with artifact $artifact_id on $from"
+
   info "./upgrade.sh $to"
   ./upgrade.sh "$to"
 
@@ -97,6 +133,24 @@ main() {
     pass "the document created on $from is there"
   else
     fail "the document created on $from is gone"
+  fi
+
+  if "$clab" --host "$base" show "$task_key" | grep -qF "Upgrade check task"; then
+    pass "the task $task_key created on $from is there"
+  else
+    fail "the task $task_key created on $from is gone"
+  fi
+  if curl -sf -H "Authorization: Bearer $admin_token" "$base/v1/tasks/$task_key/artifacts" |
+    jq -e --arg id "$artifact_id" '.artifacts[] | select(.id == $id and .kind == "upgrade.note")' >/dev/null; then
+    pass "the artifact of $task_key is listed"
+  else
+    fail "the artifact of $task_key is not listed"
+  fi
+  if curl -sf -H "Authorization: Bearer $admin_token" "$base/v1/artifacts/$artifact_id/content" |
+    cmp -s - "$clab_dir/note.md"; then
+    pass "the content of the artifact is unchanged"
+  else
+    fail "the content of the artifact differs or is gone"
   fi
 
   info "./upgrade.sh $from must refuse"
