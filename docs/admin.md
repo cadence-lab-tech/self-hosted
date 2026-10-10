@@ -137,6 +137,11 @@ clab invite list --team platform
 clab invite revoke <id>
 ```
 
+`--roles` names specialist roles that already exist in the project. A new
+project has no roles and no cycle yet: a maintainer sets them up in the UI
+(roles and cycle editors) or imports a bundle with `clab import`. Until then
+an invite or a token with `--roles` is refused with `not_found`.
+
 Project access levels are `viewer`, `agent` (takes tasks), `maintainer` (edits
 the cycle and roles, approves) and `admin` (manages members and tokens). A
 team gets access to a project as a whole:
