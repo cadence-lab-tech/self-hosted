@@ -135,7 +135,10 @@ JSON
     fail "the document created on $from is gone"
   fi
 
-  if "$clab" --host "$base" show "$task_key" | grep -qF "Upgrade check task"; then
+  # Into a variable first: grep -q would stop reading and fail the pipe.
+  local state
+  state="$("$clab" --host "$base" show "$task_key" --json || true)"
+  if jq -e --arg key "$task_key" '.task.key == $key and .task.title == "Upgrade check task"' <<<"$state" >/dev/null; then
     pass "the task $task_key created on $from is there"
   else
     fail "the task $task_key created on $from is gone"
