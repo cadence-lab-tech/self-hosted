@@ -50,6 +50,27 @@ Without a terminal it asks nothing:
 GitHub has to reach `https://<host>/webhooks/github` if you connect a GitHub
 App.
 
+## Evaluating on a laptop
+
+To try Cadence Lab before giving it a server, run the same package on a
+laptop with Docker Desktop (macOS, Windows with WSL 2, Linux), in `proxy`
+mode on a local port, and sign in at `http://127.0.0.1:8080`:
+
+```bash
+git clone https://github.com/cadence-lab-tech/self-hosted.git cadence-lab
+cd cadence-lab
+./install.sh --mode proxy --bind 127.0.0.1:8080 --team acme
+```
+
+On Apple Silicon and other arm64 machines the images, built for
+linux/amd64, run under emulation (Rosetta or QEMU in Docker Desktop); the
+compose file pins the platform, so nothing has to be configured. The
+stack is slower that way and is not meant for production: deploy on an
+x86_64 server. `brew install cadence-lab-tech/tap/clab` gives a native
+CLI; `clab auth login --host http://127.0.0.1:8080` signs it in. When
+done, `docker compose down -v` in the clone removes the containers and
+the data.
+
 ## What is in here
 
 | | |

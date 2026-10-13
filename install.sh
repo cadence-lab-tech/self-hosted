@@ -84,7 +84,7 @@ require_docker
 load_version
 case "$(uname -m)" in
 x86_64 | amd64) ;;
-*) warn "this machine is $(uname -m); the images are built for linux/amd64 (x86_64)" ;;
+*) warn "this machine is $(uname -m); the images are built for linux/amd64 and will run under emulation - fine for an evaluation on a laptop, not for production (README, \"Evaluating on a laptop\")" ;;
 esac
 
 gen_hex() {

@@ -149,10 +149,13 @@ done
 active="$("$clab" --host "$base" workflow list --project CHECK --json |
   jq -r '(if type == "array" then . else (.workflows // .items) end)[] | select(.state == "active") | .task_types[]' | sort | tr '\n' ' ')"
 check "active cycles cover task and epic ($active)" [ "$active" = "epic task " ]
-# Roles are idempotent; cycles come back as new drafts on every import (CLAB-108).
+# A second import changes nothing. Cycles report unchanged since v0.5.2
+# (CLAB-108); v0.5.1 and older create a new draft of each cycle every time.
 again="$("$clab" --host "$base" import --project CHECK --file bundles/starter.json --json)"
 check "a second import leaves the roles unchanged" [ "$(jq -r '[.roles[].outcome] | unique | join(",")' <<<"$again")" = unchanged ]
-check "a second import does not touch the active cycles" [ "$(jq -r '[.workflows[].outcome] | unique | join(",")' <<<"$again")" = draft_created ]
+cycles_again=unchanged
+if version_lt "$version" v0.5.2; then cycles_again=draft_created; fi
+check "a second import leaves the cycles $cycles_again" [ "$(jq -r '[.workflows[].outcome] | unique | join(",")' <<<"$again")" = "$cycles_again" ]
 
 info "first task"
 check "clab create a task" "$clab" --host "$base" create --project CHECK --title "First task"
@@ -166,6 +169,11 @@ check "the agent sees CHECK-1 in its queue" contains "$queue" '"CHECK-1"'
 check "the agent claims CHECK-1 as analyst" env SDLC_API_URL="$base" SDLC_TOKEN="$agent_token" SDLC_PROJECT=CHECK "$clab" claim CHECK-1
 gates="$(env SDLC_PROJECT=CHECK "$clab" --host "$base" gates CHECK-1 --json)"
 check "analysis_done waits for the artifacts and a human approval" contains "$gates" 'human_approval'
+# Order of tasks (CLAB-107): a task blocked by an open one does not start.
+check "clab create a second task" "$clab" --host "$base" create --project CHECK --title "Second task"
+check "clab relate CHECK-1 blocks CHECK-3" env SDLC_PROJECT=CHECK "$clab" --host "$base" relate CHECK-1 --to CHECK-3 --rel blocks
+blocked="$(env SDLC_PROJECT=CHECK "$clab" --host "$base" transition CHECK-3 --to start 2>&1 || true)"
+check "the start of a blocked task is held by dependencies_closed" contains "$blocked" 'dependencies_closed'
 
 # --- backup and restore ----------------------------------------------------------------------------
 info "backup.sh"

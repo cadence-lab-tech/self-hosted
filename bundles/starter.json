@@ -225,7 +225,19 @@
           "name": "Start",
           "from": "new",
           "to": "analysis",
-          "kind": "advance"
+          "kind": "advance",
+          "gates": [
+            {
+              "key": "blockers_closed",
+              "name": "Blocking tasks are closed",
+              "type": "dependencies_closed",
+              "config": {
+                "scope": "blockers",
+                "allow_cancelled": true
+              },
+              "blocking": true
+            }
+          ]
         },
         {
           "key": "analysis_done",

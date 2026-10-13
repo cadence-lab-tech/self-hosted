@@ -171,17 +171,20 @@ clab workflow activate <id of Starter epics>
 Imported cycles arrive as drafts, because an active cycle is never changed
 in place: activation is a separate, deliberate step. Activating "Starter"
 declares the task type `task`, "Starter epics" the type `epic`; from then on
-tasks and epics can be created. Importing the same bundle again leaves the
-roles untouched (a changed role instruction becomes a new version of the
-role), but a cycle always arrives as a new draft version: activate it if
-you meant to change the cycle, otherwise leave the draft alone.
+tasks and epics can be created. Importing the same bundle again changes
+nothing: roles report `unchanged` (a changed role instruction becomes a new
+version of the role), and a cycle that matches an existing version, active
+or draft, reports `unchanged` too. A changed cycle arrives as a new draft:
+activate it if you meant to change the cycle. On v0.5.1 and older every
+import creates a new draft of each cycle, whether it changed or not; leave
+those drafts alone or activate the one you meant.
 
 **What the starter contains.** Agents work as specialists, each on its own
 status; a transition to the next status is closed by gates:
 
 | status | role | leaves through | gates |
 |---|---|---|---|
-| New | — | Start | — |
+| New | — | Start | the tasks that block this one are closed (`clab relate A --to B --rel blocks`) |
 | Analysis | `analyst` | Analysis done | `analysis.brief` and `analysis.acceptance_criteria` submitted; a human approval |
 | Development | `developer` | Development done | `dev.change_summary` and `dev.test_report` submitted; an open pull request linked in every repository of the task |
 | Review | `reviewer` | Review passed | `review.verdict` submitted and its `verdict` is `pass` |
@@ -190,7 +193,10 @@ status; a transition to the next status is closed by gates:
 
 Every backward transition (back to analysis, back to development, QA
 failed) requires a `problem.report` artifact, so a task never goes back
-without a stated reason, and `cancel` is available from any status. Epics
+without a stated reason, and `cancel` is available from any status. A
+task linked as blocked by another (`clab relate A --to B --rel blocks`, or
+the orchestrator's breakdown of an epic) cannot start until the blocking
+task is done or cancelled. Epics
 run on "Starter epics": Planning → Breakdown (`orchestrator` splits the epic
 into tasks, a human approves the breakdown) → In progress → Done, which is
 held until every child task is closed.
@@ -362,8 +368,11 @@ curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/
   | CLAB_VERSION=v0.5.0 sh                   # the VERSION of your server
 ```
 
-`clab version` shows both versions. Release archives for Windows are on the
-tap's releases page.
+`clab version` shows both versions and warns when the CLI is older than
+the server; the check needs clab v0.5.0 or newer, an older CLI shows only
+its own version. Homebrew does not update the CLI by itself:
+`brew upgrade clab` after a server upgrade. Release archives for Windows
+are on the tap's releases page.
 
 Sign in and connect an agent:
 
