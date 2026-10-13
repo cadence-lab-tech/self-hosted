@@ -86,8 +86,7 @@ frontend and the CLI. A release opens a pull request here that changes only
 commit is tagged `vX.Y.Z`. The pull request is opened with the repository
 secret `RELEASE_PR_TOKEN` — a fine-grained token for this repository with
 Contents and Pull requests read and write — because pull requests opened by
-`GITHUB_TOKEN` do not start CI. While the images are private, CI also needs
-`GHCR_READ_TOKEN` (read:packages).
+`GITHUB_TOKEN` do not start CI.
 
 ## License and beta terms
 

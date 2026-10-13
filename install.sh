@@ -222,10 +222,8 @@ load_env
 check_mode
 info "pulling images of $CADENCE_VERSION"
 if ! docker compose pull --quiet; then
-  die "could not pull the images of $CADENCE_VERSION.
-  During the beta the images may not be public yet; with access granted, log in first:
-    echo <token with read:packages> | docker login ghcr.io -u <github user> --password-stdin
-  then start the stack: export CADENCE_VERSION=\$(cat VERSION) && docker compose up -d"
+  die "could not pull the images of $CADENCE_VERSION: check that ghcr.io is reachable from this host.
+  Then start the stack: export CADENCE_VERSION=\$(cat VERSION) && docker compose up -d"
 fi
 info "starting the stack"
 docker compose up -d --remove-orphans

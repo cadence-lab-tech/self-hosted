@@ -57,9 +57,6 @@ Further changes go into `.env` by hand; apply them with
 `docker compose up -d`, which recreates only the containers whose settings
 changed.
 
-While images are private (beta), log in to the registry before installing:
-`docker login ghcr.io`.
-
 ## Behind your reverse proxy
 
 In the `proxy` mode Caddy serves plain HTTP on `CADENCE_HTTP_ADDR`. Your proxy

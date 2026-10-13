@@ -114,8 +114,7 @@ main() {
   if ! docker compose pull --quiet; then
     # Nothing has changed yet but the files: put them back.
     git -c advice.detachedHead=false checkout --quiet "$old_ref"
-    die "could not pull the images of $new_version (see above); the package files are back on $old_version ($(git rev-parse --short HEAD)) and the running stack is untouched.
-  During the beta the images may need a registry login: docker login ghcr.io"
+    die "could not pull the images of $new_version (see above); the package files are back on $old_version ($(git rev-parse --short HEAD)) and the running stack is untouched."
   fi
   info "starting $new_version"
   if ! docker compose up -d --remove-orphans; then

@@ -6,10 +6,6 @@
 #
 # Run by hand with two versions, it also checks the upgrade between them
 # (ci/check-upgrade.sh).
-#
-# While the images in GHCR are private, `stack` logs in with the secret
-# GHCR_READ_TOKEN: a token with read:packages only. Once the images are
-# public the login step goes away.
 name: check
 
 on:
@@ -53,22 +49,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: log in to ghcr.io (until the images are public)
-        env:
-          TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::secret GHCR_READ_TOKEN is not set: the images of $(cat VERSION) are private during the beta. Add a token with read:packages as GHCR_READ_TOKEN."
-            exit 1
-          fi
-          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
       - name: images of VERSION exist
         run: |
           v="$(cat VERSION)"
           for image in sdlc-pipeline-backend sdlc-pipeline-frontend; do
             if ! docker manifest inspect "ghcr.io/cadence-lab-tech/$image:$v" >/dev/null; then
-              echo "::error::ghcr.io/cadence-lab-tech/$image:$v is not published (or not readable with GHCR_READ_TOKEN)"
+              echo "::error::ghcr.io/cadence-lab-tech/$image:$v is not published"
               exit 1
             fi
           done
@@ -84,16 +70,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: log in to ghcr.io (until the images are public)
-        env:
-          TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::secret GHCR_READ_TOKEN is not set: the images are private during the beta."
-            exit 1
-          fi
-          printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
       - name: upgrade between the versions
         env:
           FROM: ${{ inputs.upgrade_from }}
