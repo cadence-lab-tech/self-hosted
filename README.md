@@ -59,7 +59,7 @@ mode on a local port, and sign in at `http://127.0.0.1:8080`:
 ```bash
 git clone https://github.com/cadence-lab-tech/self-hosted.git cadence-lab
 cd cadence-lab
-./install.sh --mode proxy --bind 127.0.0.1:8080 --team acme
+./install.sh --mode proxy --http-addr 127.0.0.1:8080 --team acme
 ```
 
 On Apple Silicon and other arm64 machines the images, built for

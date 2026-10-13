@@ -41,6 +41,34 @@ for p in .env backups/ secrets/; do
   check ".gitignore has $p" grep -qxF "$p" .gitignore
 done
 
+info "documented flags"
+# The flags install.sh takes are the labels of the case in its argument loop
+# ("--mode) ...", "-y | --yes | --non-interactive) ..."), not its usage
+# comment: that comment is documentation too and drifts the same way.
+install_flags="$(sed -n '/^while \[ \$# -gt 0 \]; do$/,/^done$/p' install.sh |
+  sed -n 's/^ *\(-[^)]*\)).*/\1/p' | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u || true)"
+if [ -n "$install_flags" ]; then
+  pass "install.sh takes $(tr '\n' ' ' <<<"$install_flags")"
+else
+  fail "install.sh: no flags found in its argument loop"
+fi
+# Every ./install.sh command of the documentation, on a line of a code block
+# or inline up to the closing backtick, uses only those flags.
+documented=0
+for f in README.md docs/admin.md; do
+  while IFS=: read -r line command; do
+    for flag in $(grep -oE -- ' -{1,2}[a-z][a-z-]*' <<<"$command" | tr -d ' ' || true); do
+      documented=$((documented + 1))
+      if grep -qxF -- "$flag" <<<"$install_flags"; then
+        pass "$f:$line: install.sh takes $flag"
+      else
+        fail "$f:$line: install.sh has no flag $flag"
+      fi
+    done
+  done < <(grep -noE -- '\./install\.sh[^`]*' "$f" || true)
+done
+check "the documentation shows install.sh with flags" [ "$documented" -gt 0 ]
+
 info "bundles/starter.json"
 bundle=bundles/starter.json
 check "$bundle exists" [ -f "$bundle" ]
