@@ -149,7 +149,10 @@ done
 active="$("$clab" --host "$base" workflow list --project CHECK --json |
   jq -r '(if type == "array" then . else (.workflows // .items) end)[] | select(.state == "active") | .task_types[]' | sort | tr '\n' ' ')"
 check "active cycles cover task and epic ($active)" [ "$active" = "epic task " ]
-check "a second import changes nothing" lacks "$("$clab" --host "$base" import --project CHECK --file bundles/starter.json --json)" '"created"'
+# Roles are idempotent; cycles come back as new drafts on every import (CLAB-108).
+again="$("$clab" --host "$base" import --project CHECK --file bundles/starter.json --json)"
+check "a second import leaves the roles unchanged" [ "$(jq -r '[.roles[].outcome] | unique | join(",")' <<<"$again")" = unchanged ]
+check "a second import does not touch the active cycles" [ "$(jq -r '[.workflows[].outcome] | unique | join(",")' <<<"$again")" = draft_created ]
 
 info "first task"
 check "clab create a task" "$clab" --host "$base" create --project CHECK --title "First task"

@@ -171,9 +171,10 @@ clab workflow activate <id of Starter epics>
 Imported cycles arrive as drafts, because an active cycle is never changed
 in place: activation is a separate, deliberate step. Activating "Starter"
 declares the task type `task`, "Starter epics" the type `epic`; from then on
-tasks and epics can be created. The import is idempotent: running it again
-changes nothing, and a changed role instruction becomes a new version of
-the role.
+tasks and epics can be created. Importing the same bundle again leaves the
+roles untouched (a changed role instruction becomes a new version of the
+role), but a cycle always arrives as a new draft version: activate it if
+you meant to change the cycle, otherwise leave the draft alone.
 
 **What the starter contains.** Agents work as specialists, each on its own
 status; a transition to the next status is closed by gates:
