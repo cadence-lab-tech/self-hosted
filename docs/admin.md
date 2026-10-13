@@ -18,6 +18,7 @@ public address of your proxy in the `proxy` mode.
 - [Behind your reverse proxy](#behind-your-reverse-proxy)
 - [First sign-in with the administrator token](#first-sign-in-with-the-administrator-token)
 - [Teams, projects and invites](#teams-projects-and-invites)
+- [First cycle and roles](#first-cycle-and-roles)
 - [GitHub App](#github-app)
 - [Single sign-on with OIDC](#single-sign-on-with-oidc)
 - [CLI and agents](#cli-and-agents)
@@ -135,9 +136,9 @@ clab invite revoke <id>
 ```
 
 `--roles` names specialist roles that already exist in the project. A new
-project has no roles and no cycle yet: a maintainer sets them up in the UI
-(roles and cycle editors) or imports a bundle with `clab import`. Until then
-an invite or a token with `--roles` is refused with `not_found`.
+project has no roles and no cycle yet, so an invite or a token with `--roles`
+is refused with `not_found` until they are set up: see
+[First cycle and roles](#first-cycle-and-roles).
 
 Project access levels are `viewer`, `agent` (takes tasks), `maintainer` (edits
 the cycle and roles, approves) and `admin` (manages members and tokens). A
@@ -150,6 +151,101 @@ clab team grant platform --project PLAT --level maintainer
 The same is available in the UI: team pages and project settings. Someone
 who has already signed in can be added directly, without an invite:
 `clab team add platform user:alice --role lead`.
+
+## First cycle and roles
+
+A new project is empty: no cycle, no roles. Tasks cannot be created and
+agents cannot be given a role until a maintainer sets them up. The package
+ships a starter: `bundles/starter.json`, a bundle of five roles and two
+cycles that `clab import` applies to a project.
+
+```bash
+export SDLC_PROJECT=PLAT
+clab import --file bundles/starter.json --dry-run    # the report: what would be created
+clab import --file bundles/starter.json              # roles, and both cycles as drafts
+clab workflow list                                   # the two drafts and their ids
+clab workflow activate <id of Starter>
+clab workflow activate <id of Starter epics>
+```
+
+Imported cycles arrive as drafts, because an active cycle is never changed
+in place: activation is a separate, deliberate step. Activating "Starter"
+declares the task type `task`, "Starter epics" the type `epic`; from then on
+tasks and epics can be created. The import is idempotent: running it again
+changes nothing, and a changed role instruction becomes a new version of
+the role.
+
+**What the starter contains.** Agents work as specialists, each on its own
+status; a transition to the next status is closed by gates:
+
+| status | role | leaves through | gates |
+|---|---|---|---|
+| New | — | Start | — |
+| Analysis | `analyst` | Analysis done | `analysis.brief` and `analysis.acceptance_criteria` submitted; a human approval |
+| Development | `developer` | Development done | `dev.change_summary` and `dev.test_report` submitted; an open pull request linked in every repository of the task |
+| Review | `reviewer` | Review passed | `review.verdict` submitted and its `verdict` is `pass` |
+| QA | `qa` | QA passed | `qa.report` submitted; a human approval |
+| Done, Cancelled | — | | |
+
+Every backward transition (back to analysis, back to development, QA
+failed) requires a `problem.report` artifact, so a task never goes back
+without a stated reason, and `cancel` is available from any status. Epics
+run on "Starter epics": Planning → Breakdown (`orchestrator` splits the epic
+into tasks, a human approves the breakdown) → In progress → Done, which is
+held until every child task is closed.
+
+The starter deliberately has no gates that need a GitHub App (CI status of
+the pull request, drift of the code base under the task): it works on an
+instance without one. The pull request gate only needs the link to the
+pull request, which the agent sets (`clab link`, or `sdlc_link_repo_ref`
+over MCP).
+
+**Making it yours.** Roles and cycles are data of the project, not code.
+Edit them in the UI (Roles, Cycle editor: a draft is edited and then
+activated as a new version) or round-trip them through the CLI:
+
+```bash
+clab export > my-bundle.json        # repositories, roles, documents, the active cycles
+# edit my-bundle.json
+clab import --file my-bundle.json   # new role versions and a new draft of the cycle
+```
+
+A bundle also carries project documents (conventions, architecture notes,
+glossaries) that agents read as context, and it can be applied to several
+projects at once: `clab import --from PLAT --to WEB,MOBILE` copies the rules
+of one project to others. `clab import-guide` prints instructions for an
+agent that assembles a bundle from what is already written in your
+repositories (`CLAUDE.md`, `CONTRIBUTING.md`, ADRs, review checklists).
+
+**The first task.** With the cycles active:
+
+```bash
+clab create --title "Describe the first change" --repos my-repo   # a task; --type epic for an epic
+clab transition PLAT-1 --to start                                 # New → Analysis
+clab queue                                                        # what agents can pick up, and as which role
+```
+
+Give the agent its role. A person's agent gets the roles from the person's
+membership: `clab invite create --project PLAT --level agent --roles analyst,developer`
+(see above); an unattended agent gets a token with the roles:
+
+```bash
+clab token create --name analyst-bot --for agent:analyst-bot --project PLAT --roles analyst
+```
+
+On the developer's machine, `clab mcp install` registers the MCP server of
+the project with the agent (see [CLI and agents](#cli-and-agents)); the
+prompt `work_on_task` in it takes a task, submits the artifacts of the role's
+contract and requests the transition. The gates that need a human —
+"Approved by a human" after analysis and the final approval after QA — are
+closed in the task card in the UI or from the CLI:
+
+```bash
+clab gates PLAT-1                                                  # what holds the transition
+clab decide PLAT-1 --transition analysis_done --gate human_approval
+```
+
+Approvals are given by people, never by agents, in any configuration.
 
 ## GitHub App
 

@@ -11,10 +11,6 @@ machine: a Docker Compose stack, install, upgrade, backup and restore scripts,
 and the [administrator guide](docs/admin.md). Agents connect to your instance
 from developers' machines over MCP; nothing goes through us.
 
-> **Beta.** The container images are not public yet: the quick start below
-> does not work until they are published. Watch this repository for the
-> first release.
-
 ## Quick start
 
 On a Linux machine with Docker:
@@ -25,7 +21,9 @@ git clone https://github.com/cadence-lab-tech/self-hosted.git cadence && cd cade
 ```
 
 Then open the printed address, sign in with the printed administrator token
-and follow [docs/admin.md](docs/admin.md).
+and follow [docs/admin.md](docs/admin.md): a team and a project, the starter
+cycle and roles from `bundles/starter.json`, the GitHub App, single sign-on,
+the CLI and agents.
 
 `install.sh` runs in one of two modes:
 
@@ -66,6 +64,7 @@ App.
 | `backup.sh`, `restore.sh` | database dump and the artifact volume; restore with a version check |
 | `lib.sh` | helpers the scripts share |
 | `docs/admin.md` | the administrator guide |
+| `bundles/starter.json` | a starter of roles and cycles for a new project, applied with `clab import` |
 | `ci/` | checks that CI runs on the published images |
 
 ## Upgrading

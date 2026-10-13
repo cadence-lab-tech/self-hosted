@@ -129,6 +129,41 @@ mcp="$(curl -s "${auth[@]}" -H 'Content-Type: application/json' -H 'Accept: appl
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$base/mcp/projects/CHECK")"
 check "MCP tools/list on /mcp/projects/CHECK lists sdlc_claim_task" contains "$mcp" '"sdlc_claim_task"'
 
+# --- first cycle and roles: the starter bundle (docs/admin.md, "First cycle and roles") ------
+info "starter bundle"
+if "$clab" --host "$base" token create --project CHECK --name before-bundle --for agent:check-bot --roles developer >/dev/null 2>&1; then
+  fail "a token with --roles on a project without roles must be refused"
+else
+  pass "a token with --roles on a project without roles is refused"
+fi
+check "clab import --dry-run reports the bundle" "$clab" --host "$base" import --project CHECK --file bundles/starter.json --dry-run
+check "clab import applies the bundle" "$clab" --host "$base" import --project CHECK --file bundles/starter.json
+roles="$("$clab" --host "$base" role show analyst --project CHECK --json 2>/dev/null || true)"
+check "the project has the analyst role" contains "$roles" '"analyst"'
+drafts="$("$clab" --host "$base" workflow list --project CHECK --json |
+  jq -r '(if type == "array" then . else (.workflows // .items) end)[] | select(.state == "draft") | .id')"
+check "the bundle brings two draft cycles (tasks and epics)" [ "$(grep -c . <<<"$drafts")" = 2 ]
+for id in $drafts; do
+  check "clab workflow activate $id" "$clab" --host "$base" workflow activate "$id" --project CHECK
+done
+active="$("$clab" --host "$base" workflow list --project CHECK --json |
+  jq -r '(if type == "array" then . else (.workflows // .items) end)[] | select(.state == "active") | .task_types[]' | sort | tr '\n' ' ')"
+check "active cycles cover task and epic ($active)" [ "$active" = "epic task " ]
+check "a second import changes nothing" lacks "$("$clab" --host "$base" import --project CHECK --file bundles/starter.json --json)" '"created"'
+
+info "first task"
+check "clab create a task" "$clab" --host "$base" create --project CHECK --title "First task"
+check "clab create an epic" "$clab" --host "$base" create --project CHECK --title "First epic" --type epic
+check "clab transition start" env SDLC_PROJECT=CHECK "$clab" --host "$base" transition CHECK-1 --to start
+agent_token="$("$clab" --host "$base" token create --project CHECK --name check-agent --for agent:check-bot --roles analyst --json | jq -r .token)"
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$agent_token"; fi
+check "a token with --roles analyst is issued" [ "${agent_token#sdlc_}" != "$agent_token" ]
+queue="$(env SDLC_API_URL="$base" SDLC_TOKEN="$agent_token" SDLC_PROJECT=CHECK "$clab" queue --json)"
+check "the agent sees CHECK-1 in its queue" contains "$queue" '"CHECK-1"'
+check "the agent claims CHECK-1 as analyst" env SDLC_API_URL="$base" SDLC_TOKEN="$agent_token" SDLC_PROJECT=CHECK "$clab" claim CHECK-1
+gates="$(env SDLC_PROJECT=CHECK "$clab" --host "$base" gates CHECK-1 --json)"
+check "analysis_done waits for the artifacts and a human approval" contains "$gates" 'human_approval'
+
 # --- backup and restore ----------------------------------------------------------------------------
 info "backup.sh"
 ./backup.sh

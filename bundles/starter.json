@@ -1,0 +1,571 @@
+{
+  "version": 1,
+  "roles": [
+    {
+      "key": "analyst",
+      "name": "Analyst",
+      "summary": "Turns a request into requirements that can be checked",
+      "instructions": "You are the analyst. Turn the request into requirements that can be checked.\n\n- Read the task, its parent epic and the linked ticket of your tracker, if any.\n- Search the project knowledge (sdlc_search_context) for existing behaviour on the subject before writing anything.\n- State each requirement so that it can be verified by a fact, not by taste.\n- List explicitly what is out of scope.\n- A requirement you cannot verify goes into the open questions, not into the criteria.\n- Submit the artifacts of your contract and request the transition. A human approves the analysis before development starts.",
+      "output_contract": [
+        {
+          "kind": "analysis.brief",
+          "title": "Requirements",
+          "format": "markdown",
+          "required": true
+        },
+        {
+          "kind": "analysis.acceptance_criteria",
+          "title": "Acceptance criteria",
+          "format": "markdown",
+          "required": true
+        },
+        {
+          "kind": "analysis.open_questions",
+          "title": "Open questions",
+          "format": "markdown",
+          "required": false
+        }
+      ],
+      "context_budget": {
+        "rag_top_k": 12,
+        "include_project_docs": true
+      }
+    },
+    {
+      "key": "developer",
+      "name": "Developer",
+      "summary": "Implements what the analysis approved, in a pull request",
+      "instructions": "You are the developer. Implement exactly what the analysis approved.\n\n- Take the acceptance criteria as the input; do not reinterpret them. A criterion that cannot be met is a reason to return the task with a problem report, not to change it quietly.\n- Work in a branch named after the task key and open a pull request with the key in its title; link it to the task (sdlc_link_repo_ref). Code lives in the pull request, the task gets the summary.\n- Stay inside the repositories of the task; widening the scope is a human decision.\n- Cover every acceptance criterion with a test or a reproducible check and report what was run.\n- Submit the change summary and the test report, then request the transition.",
+      "input_kinds": [
+        "analysis.brief",
+        "analysis.acceptance_criteria"
+      ],
+      "output_contract": [
+        {
+          "kind": "dev.change_summary",
+          "title": "Change summary",
+          "format": "markdown",
+          "required": true
+        },
+        {
+          "kind": "dev.test_report",
+          "title": "Test report",
+          "format": "markdown",
+          "required": true
+        }
+      ],
+      "context_budget": {
+        "rag_top_k": 20
+      }
+    },
+    {
+      "key": "reviewer",
+      "name": "Reviewer",
+      "summary": "Independent check of someone else's result",
+      "instructions": "You are the reviewer. You do not do the work of the stage: you check someone else's result.\n\n- Check the pull request against the acceptance criteria and the change summary, not against your preferences.\n- Back every finding with a file and line, or with the criterion it violates.\n- The verdict is pass or fail, nothing in between. On fail, say exactly what must be fixed; the task goes back to development with your findings as the problem report.\n- Submit the verdict as JSON by the contract, then request the transition: review_passed on pass, reject_to_development on fail.",
+      "input_kinds": [
+        "analysis.acceptance_criteria",
+        "dev.change_summary"
+      ],
+      "output_contract": [
+        {
+          "kind": "review.verdict",
+          "title": "Review verdict",
+          "format": "json",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "required": [
+              "verdict",
+              "findings"
+            ],
+            "properties": {
+              "verdict": {
+                "enum": [
+                  "pass",
+                  "fail"
+                ]
+              },
+              "findings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "text"
+                  ],
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    },
+                    "location": {
+                      "type": "string"
+                    },
+                    "criterion": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "context_budget": {
+        "rag_top_k": 15
+      }
+    },
+    {
+      "key": "qa",
+      "name": "QA",
+      "summary": "Verifies the result against the acceptance criteria",
+      "instructions": "You are QA. Verify the result against the acceptance criteria of the analysis.\n\n- Mark every criterion as met or not met, with the evidence: what was run, what was observed.\n- Do not test what is not in the criteria; anything missing from them is an open question for the analyst.\n- Submit the test report. On failure request qa_failed with a problem report; on success request qa_passed — a human gives the final approval.",
+      "input_kinds": [
+        "analysis.acceptance_criteria",
+        "dev.change_summary",
+        "dev.test_report"
+      ],
+      "output_contract": [
+        {
+          "kind": "qa.report",
+          "title": "QA report",
+          "format": "markdown",
+          "required": true
+        }
+      ],
+      "context_budget": {
+        "rag_top_k": 10
+      }
+    },
+    {
+      "key": "orchestrator",
+      "name": "Orchestrator",
+      "summary": "Splits an epic into tasks and sets their order",
+      "instructions": "You are the orchestrator. Split the epic into tasks that can be worked on one at a time.\n\n- Every child task must be verifiable on its own and live inside the repositories of the epic.\n- Express the order with blocks links (sdlc_link_tasks), not with the order of creation: the engine reads links, not intentions.\n- Create the tasks with sdlc_create_task and parent set to this epic; do not do the work of the sub-agents.\n- Do not create tasks outside the scope of the epic and do not widen it: that is a human decision.\n- In the breakdown explain why the boundaries between tasks run where they do. A human approves the breakdown before agents pick the tasks up.",
+      "output_contract": [
+        {
+          "kind": "planning.breakdown",
+          "title": "Epic breakdown",
+          "format": "markdown",
+          "required": true
+        }
+      ],
+      "context_budget": {
+        "rag_top_k": 15,
+        "include_project_docs": true
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "name": "Starter",
+      "task_types": [
+        "task"
+      ],
+      "statuses": [
+        {
+          "key": "new",
+          "name": "New",
+          "category": "backlog",
+          "is_initial": true,
+          "description": "Created, not started",
+          "color": "#9ca3af"
+        },
+        {
+          "key": "analysis",
+          "name": "Analysis",
+          "category": "active",
+          "role": "analyst",
+          "description": "Requirements and acceptance criteria",
+          "color": "#3b82f6"
+        },
+        {
+          "key": "development",
+          "name": "Development",
+          "category": "active",
+          "role": "developer",
+          "description": "Implementation in a pull request",
+          "color": "#8b5cf6"
+        },
+        {
+          "key": "review",
+          "name": "Review",
+          "category": "active",
+          "role": "reviewer",
+          "description": "Independent review of the pull request",
+          "color": "#f59e0b"
+        },
+        {
+          "key": "qa",
+          "name": "QA",
+          "category": "active",
+          "role": "qa",
+          "description": "Verification against the acceptance criteria",
+          "color": "#10b981"
+        },
+        {
+          "key": "done",
+          "name": "Done",
+          "category": "done",
+          "is_terminal": true,
+          "description": "Finished",
+          "color": "#22c55e"
+        },
+        {
+          "key": "cancelled",
+          "name": "Cancelled",
+          "category": "cancelled",
+          "is_terminal": true,
+          "description": "Dropped",
+          "color": "#6b7280"
+        }
+      ],
+      "transitions": [
+        {
+          "key": "start",
+          "name": "Start",
+          "from": "new",
+          "to": "analysis",
+          "kind": "advance"
+        },
+        {
+          "key": "analysis_done",
+          "name": "Analysis done",
+          "from": "analysis",
+          "to": "development",
+          "kind": "advance",
+          "gates": [
+            {
+              "key": "artifacts",
+              "name": "Requirements and acceptance criteria submitted",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "analysis.brief",
+                  "analysis.acceptance_criteria"
+                ]
+              },
+              "blocking": true
+            },
+            {
+              "key": "human_approval",
+              "name": "Approved by a human",
+              "type": "human_approval",
+              "config": {
+                "min_approvals": 1
+              },
+              "blocking": true
+            },
+            {
+              "key": "repo_scope",
+              "name": "Artifacts stay inside the task's repositories",
+              "type": "repo_scope",
+              "config": {
+                "allow_expansion_when_multi_repo": true
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "dev_done",
+          "name": "Development done",
+          "from": "development",
+          "to": "review",
+          "kind": "advance",
+          "gates": [
+            {
+              "key": "artifacts",
+              "name": "Change summary and test report submitted",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "dev.change_summary",
+                  "dev.test_report"
+                ]
+              },
+              "blocking": true
+            },
+            {
+              "key": "pull_request",
+              "name": "Open pull request linked in every repository of the task",
+              "type": "repo_ref_required",
+              "config": {
+                "ref_type": "pull_request",
+                "min_count": 1,
+                "require_open": true,
+                "per_repository": true
+              },
+              "blocking": true
+            },
+            {
+              "key": "repo_scope",
+              "name": "Artifacts stay inside the task's repositories",
+              "type": "repo_scope",
+              "config": {
+                "allow_expansion_when_multi_repo": true
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "review_passed",
+          "name": "Review passed",
+          "from": "review",
+          "to": "qa",
+          "kind": "advance",
+          "gates": [
+            {
+              "key": "artifacts",
+              "name": "Review verdict submitted",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "review.verdict"
+                ]
+              },
+              "blocking": true
+            },
+            {
+              "key": "verdict",
+              "name": "Verdict is pass",
+              "type": "schema_validation",
+              "config": {
+                "artifact_kind": "review.verdict",
+                "expect": {
+                  "verdict": "pass"
+                }
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "qa_passed",
+          "name": "QA passed",
+          "from": "qa",
+          "to": "done",
+          "kind": "advance",
+          "gates": [
+            {
+              "key": "artifacts",
+              "name": "QA report submitted",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "qa.report"
+                ]
+              },
+              "blocking": true
+            },
+            {
+              "key": "human_approval",
+              "name": "Final approval by a human",
+              "type": "human_approval",
+              "config": {
+                "min_approvals": 1
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "reject_to_analysis",
+          "name": "Back to analysis",
+          "from": "development",
+          "to": "analysis",
+          "kind": "reject",
+          "gates": [
+            {
+              "key": "problem_report",
+              "name": "Problem report attached",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "problem.report"
+                ]
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "reject_to_development",
+          "name": "Back to development",
+          "from": "review",
+          "to": "development",
+          "kind": "reject",
+          "gates": [
+            {
+              "key": "problem_report",
+              "name": "Problem report attached",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "problem.report"
+                ]
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "qa_failed",
+          "name": "QA failed",
+          "from": "qa",
+          "to": "development",
+          "kind": "reject",
+          "gates": [
+            {
+              "key": "problem_report",
+              "name": "Problem report attached",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "problem.report"
+                ]
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "cancel",
+          "name": "Cancel",
+          "to": "cancelled",
+          "kind": "cancel"
+        }
+      ]
+    },
+    {
+      "name": "Starter epics",
+      "task_types": [
+        "epic"
+      ],
+      "statuses": [
+        {
+          "key": "planning",
+          "name": "Planning",
+          "category": "backlog",
+          "is_initial": true,
+          "description": "Created, scope not settled",
+          "color": "#9ca3af"
+        },
+        {
+          "key": "breakdown",
+          "name": "Breakdown",
+          "category": "active",
+          "role": "orchestrator",
+          "description": "The orchestrator splits the epic into tasks",
+          "color": "#3b82f6"
+        },
+        {
+          "key": "in_progress",
+          "name": "In progress",
+          "category": "waiting",
+          "description": "Child tasks run their own cycles",
+          "color": "#8b5cf6"
+        },
+        {
+          "key": "done",
+          "name": "Done",
+          "category": "done",
+          "is_terminal": true,
+          "description": "All child tasks closed",
+          "color": "#22c55e"
+        },
+        {
+          "key": "cancelled",
+          "name": "Cancelled",
+          "category": "cancelled",
+          "is_terminal": true,
+          "description": "Dropped",
+          "color": "#6b7280"
+        }
+      ],
+      "transitions": [
+        {
+          "key": "start",
+          "name": "Start",
+          "from": "planning",
+          "to": "breakdown",
+          "kind": "advance"
+        },
+        {
+          "key": "breakdown_done",
+          "name": "Breakdown done",
+          "from": "breakdown",
+          "to": "in_progress",
+          "kind": "advance",
+          "gates": [
+            {
+              "key": "artifacts",
+              "name": "Breakdown submitted",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "planning.breakdown"
+                ]
+              },
+              "blocking": true
+            },
+            {
+              "key": "human_approval",
+              "name": "Breakdown approved by a human",
+              "type": "human_approval",
+              "config": {
+                "min_approvals": 1
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "children_done",
+          "name": "Close the epic",
+          "from": "in_progress",
+          "to": "done",
+          "kind": "advance",
+          "gates": [
+            {
+              "key": "children",
+              "name": "All child tasks closed",
+              "type": "dependencies_closed",
+              "config": {
+                "scope": "children",
+                "allow_cancelled": true
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "replan",
+          "name": "Back to breakdown",
+          "from": "in_progress",
+          "to": "breakdown",
+          "kind": "reject",
+          "gates": [
+            {
+              "key": "problem_report",
+              "name": "Problem report attached",
+              "type": "artifacts_required",
+              "config": {
+                "kinds": [
+                  "problem.report"
+                ]
+              },
+              "blocking": true
+            }
+          ]
+        },
+        {
+          "key": "cancel",
+          "name": "Cancel",
+          "to": "cancelled",
+          "kind": "cancel"
+        }
+      ]
+    }
+  ]
+}

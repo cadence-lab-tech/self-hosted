@@ -41,6 +41,19 @@ for p in .env backups/ secrets/; do
   check ".gitignore has $p" grep -qxF "$p" .gitignore
 done
 
+info "bundles/starter.json"
+bundle=bundles/starter.json
+check "$bundle exists" [ -f "$bundle" ]
+check "$bundle is JSON of bundle version 1" [ "$(jq -r .version "$bundle")" = 1 ]
+check "$bundle has no repositories, documents or project of ours" [ "$(jq -r '[.repositories, .documents, .project] | map(select(. != null)) | length' "$bundle")" = 0 ]
+check "$bundle has a cycle for task and one for epic" [ "$(jq -r '[.workflows[].task_types[]] | sort | join(" ")' "$bundle")" = "epic task" ]
+check "every status role of $bundle is a role of the bundle" [ "$(jq -r '[.roles[].key] as $roles | [.workflows[].statuses[].role // empty] | map(select(. as $r | $roles | index($r) | not)) | length' "$bundle")" = 0 ]
+check "every artifact kind a gate requires is produced by a role" [ "$(jq -r '
+  ([.roles[].output_contract[].kind] + ["problem.report"]) as $kinds
+  | [.workflows[].transitions[].gates[]? | select(.type == "artifacts_required") | .config.kinds[]]
+  | map(select(. as $k | $kinds | index($k) | not)) | length' "$bundle")" = 0 ]
+check "every role of $bundle stands on a status" [ "$(jq -r '[.workflows[].statuses[].role // empty] as $used | [.roles[].key] | map(select(. as $r | $used | index($r) | not)) | length' "$bundle")" = 0 ]
+
 info ".env.example"
 env_example="$(cat .env.example)"
 for kv in SDLC_TENANCY=single SDLC_PROJECT_CREATION=teams SDLC_AUTH_MODE=token SDLC_EMBEDDINGS_PROVIDER=none \
