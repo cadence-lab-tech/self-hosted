@@ -82,9 +82,11 @@ fi
 info "checking the environment"
 require_docker
 load_version
+# The images are built for linux/amd64 and linux/arm64 (uname -m says
+# aarch64 on Linux and arm64 on macOS); anything else has no image to pull.
 case "$(uname -m)" in
-x86_64 | amd64) ;;
-*) warn "this machine is $(uname -m); the images are built for linux/amd64 and will run under emulation - fine for an evaluation on a laptop, not for production (README, \"Evaluating on a laptop\")" ;;
+x86_64 | amd64 | aarch64 | arm64) ;;
+*) warn "this machine is $(uname -m); the images are built for linux/amd64 and linux/arm64 only, so pulling them here will most likely fail" ;;
 esac
 
 gen_hex() {

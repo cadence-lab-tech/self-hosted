@@ -84,6 +84,20 @@ check "a second install.sh leaves .env untouched" [ "$before" = "$(sha256sum .en
 
 load_env
 
+# --- platform ------------------------------------------------------------------------
+# The images are built for linux/amd64 and linux/arm64 and compose pins no
+# platform: the containers must run natively, not under emulation.
+info "platform"
+case "$(docker info --format '{{.Architecture}}')" in
+x86_64 | amd64) host_platform=linux/amd64 ;;
+aarch64 | arm64) host_platform=linux/arm64 ;;
+*) host_platform="linux/$(docker info --format '{{.Architecture}}')" ;;
+esac
+for service in api ui; do
+  check "$service runs natively ($host_platform)" \
+    [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$(docker compose images -q "$service")")" = "$host_platform" ]
+done
+
 # --- proxy mode and routing ----------------------------------------------------------
 info "proxy mode"
 check "/readyz answers 200" [ "$(http_code "$base/readyz")" = 200 ]

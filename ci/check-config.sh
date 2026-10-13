@@ -100,6 +100,9 @@ for mode in tls proxy; do
   check "[$mode] backend image is :$version" contains "$config" "\"ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version\""
   check "[$mode] frontend image is :$version" contains "$config" "\"ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version\""
   check "[$mode] no build: sections" lacks "$config" '"build"'
+  # The images are multi-arch since v0.5.3: a platform pin would put arm64
+  # machines back under emulation.
+  check "[$mode] compose pins no platform" lacks "$config" '"platform"'
   published="$(jq -r '.services | to_entries[] | .key as $s | (.value.ports // [])[] | "\($s) \(.published)"' <<<"$config")"
   check "[$mode] only caddy publishes ports" lacks "$(grep -v '^caddy ' <<<"$published" || true)" " "
   case "$mode" in

@@ -40,7 +40,7 @@ Without a terminal it asks nothing:
 
 | | minimum | for a few teams |
 |---|---|---|
-| OS | Linux x86_64 (amd64) | |
+| OS | Linux x86_64 (amd64) or arm64 (aarch64: Graviton, Ampere and the like) | |
 | CPU | 2 vCPU | 4 vCPU |
 | RAM | 4 GB | 8 GB |
 | Disk | 20 GB SSD | 50 GB SSD; code indexes and backups grow with repositories |
@@ -62,14 +62,14 @@ cd cadence-lab
 ./install.sh --mode proxy --http-addr 127.0.0.1:8080 --team acme
 ```
 
-On Apple Silicon and other arm64 machines the images, built for
-linux/amd64, run under emulation (Rosetta or QEMU in Docker Desktop); the
-compose file pins the platform, so nothing has to be configured. The
-stack is slower that way and is not meant for production: deploy on an
-x86_64 server. `brew install cadence-lab-tech/tap/clab` gives a native
-CLI; `clab auth login --host http://127.0.0.1:8080` signs it in. When
-done, `docker compose down -v` in the clone removes the containers and
-the data.
+The images are built for linux/amd64 and linux/arm64, so on Apple Silicon
+and other arm64 machines the stack runs natively since v0.5.3 (older
+versions shipped amd64-only images and ran under emulation; see
+`docs/admin.md`, "Upgrades and rollback"). A laptop is still not
+production: when the evaluation is over, deploy on a server.
+`brew install cadence-lab-tech/tap/clab` gives a native CLI;
+`clab auth login --host http://127.0.0.1:8080` signs it in. When done,
+`docker compose down -v` in the clone removes the containers and the data.
 
 ## What is in here
 
