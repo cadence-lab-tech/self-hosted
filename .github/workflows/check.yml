@@ -2,7 +2,9 @@
 #
 #   lint   shell linter, compose and Caddyfile in both modes, secret scan
 #   stack  the stack on the published images of VERSION, in proxy mode:
-#          install, sign-in, clab, MCP, backup and restore (ci/check-stack.sh)
+#          install, sign-in, clab, MCP, backup and restore (ci/check-stack.sh);
+#          once on an amd64 runner and once on an arm64 runner, the two
+#          platforms the images are built for
 #
 # Run by hand with two versions, it also checks the upgrade between them
 # (ci/check-upgrade.sh).
@@ -43,22 +45,56 @@ jobs:
       - name: no secrets in the history
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest git /repo --redact
 
+  # The same check on both architectures the images are built for. GitHub's
+  # arm64 runners are free for public repositories; the two runs are
+  # independent, so one architecture failing does not hide the other.
   stack:
     needs: lint
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: images of VERSION exist
+      # Both images of VERSION must be published with a manifest for the
+      # platform of this runner. Versions before v0.5.3 are amd64-only: for
+      # them the arm64 runner prints a notice and skips the stack instead of
+      # failing, so main stays green until VERSION moves on. From v0.5.3 a
+      # missing platform is an error on either runner - a release that
+      # dropped one would be caught here.
+      - id: images
+        name: images of VERSION exist for this runner
         run: |
-          v="$(cat VERSION)"
+          . ./lib.sh
+          v="$(tr -d '[:space:]' <VERSION)"
+          case "$(uname -m)" in
+          x86_64) platform=linux/amd64 ;;
+          aarch64) platform=linux/arm64 ;;
+          *) echo "::error::unexpected runner architecture $(uname -m)"; exit 1 ;;
+          esac
+          skip=false
           for image in sdlc-pipeline-backend sdlc-pipeline-frontend; do
-            if ! docker manifest inspect "ghcr.io/cadence-lab-tech/$image:$v" >/dev/null; then
-              echo "::error::ghcr.io/cadence-lab-tech/$image:$v is not published"
+            ref="ghcr.io/cadence-lab-tech/$image:$v"
+            if ! manifest="$(docker manifest inspect --verbose "$ref" 2>&1)"; then
+              echo "::error::$ref is not published: $manifest"
+              exit 1
+            fi
+            platforms="$(jq -r 'if type == "array" then .[] else . end | .Descriptor.platform // empty | "\(.os)/\(.architecture)"' <<<"$manifest")"
+            if grep -qxF "$platform" <<<"$platforms"; then
+              echo "$ref has $platform"
+            elif [ "$platform" = linux/arm64 ] && version_lt "$v" v0.5.3; then
+              echo "::notice::$ref has no $platform manifest: images before v0.5.3 are amd64-only, the stack check on this runner is skipped"
+              skip=true
+            else
+              echo "::error::$ref has no $platform manifest (published: $(tr '\n' ' ' <<<"$platforms"))"
               exit 1
             fi
           done
+          echo "skip=$skip" >>"$GITHUB_OUTPUT"
       - name: stack on the images of VERSION
+        if: steps.images.outputs.skip != 'true'
         run: ci/check-stack.sh
 
   upgrade:

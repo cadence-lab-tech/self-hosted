@@ -537,9 +537,12 @@ images. The script:
 6. starts the stack (the API applies migrations itself), reloads Caddy and
    waits for readiness (`CADENCE_READY_TIMEOUT`, 300 s).
 
-Skipping versions is fine. If the new version does not become ready, the
-script exits with an error, shows the logs and prints the rollback with the
-exact commit and backup, for example:
+Skipping versions is fine. On an arm64 machine (Apple Silicon, Graviton,
+Ampere) the upgrade to v0.5.3 or later recreates `api`, `worker` and `ui`
+from native linux/arm64 images instead of the amd64 ones that ran under
+emulation before; `postgres`, `caddy` and the data are not affected. If the
+new version does not become ready, the script exits with an error, shows the
+logs and prints the rollback with the exact commit and backup, for example:
 
 ```
 ✗ v0.6.0 did not become ready in 300s (logs above). The database may already be migrated.
