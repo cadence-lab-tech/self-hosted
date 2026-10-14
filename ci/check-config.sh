@@ -79,6 +79,17 @@ no_entry() {
 for p in ci/ .github/ .git .gitignore .env backups/ secrets/ compose.override.yml docker-compose.override.yml get-cadence.sh; do
   check "the package has no $p" no_entry "$p"
 done
+# only_known: every entry is a required file or lies under bundles/ or docs/ -
+# a file added to the list of ci/package.sh goes into the list above too.
+only_known() {
+  local e known
+  known="$(tr -s ' ' '\n' <<<"$required_files")"
+  while IFS= read -r e; do
+    case "$e" in bundles/* | docs/*) continue ;; esac
+    grep -qxF -- "$e" <<<"$known" || return 1
+  done <<<"$listing"
+}
+check "the package has nothing but the required files, bundles/ and docs/" only_known
 check "the package has no ._ metadata files of macOS" [ -z "$(grep -E '(^|/)\._' <<<"$listing" || true)" ]
 check "the package has no top directory" [ -z "$(grep -E '^[^/]+/$' <<<"$listing" || true)" ]
 mkdir -p "$dist/unpacked"
