@@ -104,9 +104,12 @@ if [ "$(tr -d '[:space:]' <"$work/flag/there/VERSION" 2>/dev/null)" = "$older" ]
 else
   fail "--version $older --dir there: $out"
 fi
-out="$(mkdir -p "$work/env" && cd "$work/env" && PATH="$stubs:$PATH" CADENCE_RELEASES_URL="file://$releases" \
+mkdir -p "$work/env"
+if ! out="$(cd "$work/env" && PATH="$stubs:$PATH" CADENCE_RELEASES_URL="file://$releases" \
   CADENCE_INSTALL_VERSION="$older" CADENCE_INSTALL_DIR=viaenv "$shell" -s -- --mode proxy --http-addr 127.0.0.1:1 --yes \
-  <"$OLDPWD/get-cadence.sh" 2>&1 || true)"
+  <"$OLDPWD/get-cadence.sh" 2>&1)"; then
+  : # install.sh stops at the image pull; what matters is what was unpacked
+fi
 if [ "$(tr -d '[:space:]' <"$work/env/viaenv/VERSION" 2>/dev/null)" = "$older" ]; then
   pass "CADENCE_INSTALL_VERSION and CADENCE_INSTALL_DIR do the same"
 else

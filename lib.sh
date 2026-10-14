@@ -181,7 +181,9 @@ download_package() {
   fetch "$base/checksums.txt" "$dir/checksums.txt" || return 2
   fetch "$base/$name" "$dir/$name" || return 2
   want="$(awk -v f="$name" '$2 == f {print $1}' "$dir/checksums.txt")"
-  [ -n "$want" ] && [ "$want" = "$(sha256_of "$dir/$name")" ] || return 3
+  if [ -z "$want" ] || [ "$want" != "$(sha256_of "$dir/$name")" ]; then
+    return 3
+  fi
 }
 
 # package_files_hint VERSION prints the command that puts the package files

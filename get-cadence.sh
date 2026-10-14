@@ -126,8 +126,9 @@ main() {
   fetch "$base/$name" "$tmp/$name" || die "the release $version has no $name"
   want="$(awk -v f="$name" '$2 == f {print $1}' "$tmp/checksums.txt")"
   have="$(sha256_of "$tmp/$name")"
-  [ -n "$want" ] && [ "$want" = "$have" ] ||
+  if [ -z "$want" ] || [ "$want" != "$have" ]; then
     die "the checksum of $name does not match checksums.txt of $version: the download is broken or altered; nothing was installed"
+  fi
 
   mkdir -p "$dir"
   tar -xpzf "$tmp/$name" -C "$dir"
