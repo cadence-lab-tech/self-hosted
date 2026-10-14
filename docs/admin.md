@@ -4,8 +4,9 @@ This guide takes a Cadence Lab installation from `./install.sh` to teams
 working with agents: first sign-in, teams and invites, GitHub, single sign-on,
 the CLI and agents, embeddings, backups and upgrades.
 
-Commands below run in the directory of the package (the clone of this
-repository). For a direct `docker compose` command export the version first:
+Commands below run in the directory of the installation: where the package
+of a release is unpacked (`./cadence` by default). For a direct
+`docker compose` command export the version first:
 
 ```bash
 export CADENCE_VERSION=$(cat VERSION)
@@ -25,20 +26,56 @@ public address of your proxy in the `proxy` mode.
 - [Embeddings](#embeddings)
 - [Backups](#backups)
 - [Upgrades and rollback](#upgrades-and-rollback)
+  ([releases and mirrors](#releases-and-mirrors),
+  [moving a git installation](#moving-a-git-installation-to-release-packages))
 - [Troubleshooting](#troubleshooting)
 
 ## Install
 
+One line downloads the package of the latest release, verifies it against
+the `checksums.txt` of the release, unpacks it into `./cadence` and runs
+`./install.sh` there with the flags after `sh -s --`:
+
 ```bash
-git clone https://github.com/cadence-lab-tech/self-hosted.git cadence && cd cadence
+curl -fsSL https://github.com/cadence-lab-tech/self-hosted/releases/latest/download/get-cadence.sh | sh -s -- --domain cadence.example.com
+```
+
+`get-cadence.sh` is a POSIX `sh` script and needs `curl`, `tar`,
+`sha256sum` (or `shasum`), `bash` and Docker; git is not needed. Its own
+flags:
+
+| flag | variable | |
+|---|---|---|
+| `--version vX.Y.Z` | `CADENCE_INSTALL_VERSION` | the release to install, default the latest |
+| `--dir DIR` | `CADENCE_INSTALL_DIR` | where to unpack, default `./cadence`; must not exist or be empty |
+| | `CADENCE_RELEASES_URL` | a mirror of the releases, see [Releases and mirrors](#releases-and-mirrors) |
+
+It stops before unpacking anything if the checksum does not match, if there
+is no such release, or if the directory already has a `.env` (then
+`./upgrade.sh` there is what you want). The checksum protects against a
+broken or altered download, not against a release replaced at its source;
+signatures of the package and the images are planned.
+
+By hand, the same steps:
+
+```bash
+v=v0.6.0   # the release to install
+curl -fsSLO https://github.com/cadence-lab-tech/self-hosted/releases/download/$v/cadence-self-hosted-$v.tar.gz
+curl -fsSLO https://github.com/cadence-lab-tech/self-hosted/releases/download/$v/checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+mkdir cadence && tar -xpzf cadence-self-hosted-$v.tar.gz -C cadence && cd cadence
 ./install.sh
 ```
 
-The script checks Docker, compose v2, free ports and the domain, asks for the
-mode, writes `.env` (mode 600) with a generated database password,
-administrator token and webhook secret, pulls the images of `VERSION`, starts
-the stack and waits until it is ready. It prints the address and the
-administrator token once; the token stays in `.env`.
+`install.sh` checks Docker, compose v2, free ports and the domain, asks for
+the mode, writes `.env` (mode 600) with a generated database password,
+administrator token and webhook secret, creates an empty
+`compose.override.yml` for [local compose changes](#local-compose-changes),
+pulls the images of `VERSION`, starts the stack and waits until it is ready.
+It prints the address and the administrator token once; the token stays in
+`.env`. With the one-line installer the flags below go after `sh -s --`, for
+example `get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:8080 --team acme`;
+through the pipe it has no terminal and asks nothing.
 
 Flags and environment variables for an unattended run:
 
@@ -508,33 +545,44 @@ waits until it is ready. **Everything written after the backup is lost.** It
 asks for confirmation; `--yes` skips it.
 
 The backup must match the running version (`VERSION`). If it was taken on
-another version, `restore.sh` refuses and says which one; switch the package
-files to it first:
+another version, `restore.sh` refuses, says which one and prints the command
+that puts the package files of that version in place first: the copy
+`upgrade.sh` kept when it left that version, or else the package of its
+release:
 
 ```bash
-git checkout v0.5.0 && ./restore.sh backups/cadence-v0.5.0-20261008-030000.sql.gz
+tar -xpzf backups/package-v0.6.0-20261008-030000.tar.gz && ./restore.sh backups/cadence-v0.6.0-20261008-030000.sql.gz
 ```
 
 ## Upgrades and rollback
 
 ```bash
-./upgrade.sh            # fast-forward to the latest main
-./upgrade.sh v0.6.0     # the package files of the tag v0.6.0
+./upgrade.sh            # the latest release
+./upgrade.sh v0.6.0     # the release v0.6.0
 ```
 
-Each version is a tag `vX.Y.Z` of this repository; `VERSION` in it names the
-images. The script:
+Each version is a release `vX.Y.Z` of this repository with the package of
+that version; `VERSION` in it names the images. git is not needed. The
+script:
 
-1. checks that tracked files are not modified (keep your settings in `.env`
-   and local compose changes in `docker-compose.override.yml`, see below);
-2. finds the target and refuses to go to an older version — migrations only go
-   forward;
-3. takes a backup of the current version;
-4. switches the package files (`git checkout` of the tag, or
-   `git pull --ff-only`);
-5. pulls the images of the new version — if that fails, it puts the files
+1. finds the target — the latest release, or the one given — and refuses to
+   go to an older version: migrations only go forward;
+2. downloads the package of the release and verifies it against the
+   `checksums.txt` of the release;
+3. compares the package files here with `package.sha256` of the running
+   version and stops, listing them, if any was edited (keep your settings in
+   `.env` and local compose changes in `compose.override.yml`, see below);
+   `./upgrade.sh --force v0.6.0` replaces the edited files, and their edited
+   copies stay in the package copy of step 5;
+4. takes a backup of the current version;
+5. keeps the current package files in
+   `backups/package-<version>-<date>.tar.gz`, then replaces them with the new
+   ones and removes the files the new package no longer has; `.env`,
+   `compose.override.yml`, `backups/`, `secrets/` and files of your own are
+   never touched;
+6. pulls the images of the new version — if that fails, it puts the files
    back and the running stack is untouched;
-6. starts the stack (the API applies migrations itself), reloads Caddy and
+7. starts the stack (the API applies migrations itself), reloads Caddy and
    waits for readiness (`CADENCE_READY_TIMEOUT`, 300 s).
 
 Skipping versions is fine. On an arm64 machine (Apple Silicon, Graviton,
@@ -542,37 +590,74 @@ Ampere) the upgrade to v0.5.3 or later recreates `api`, `worker` and `ui`
 from native linux/arm64 images instead of the amd64 ones that ran under
 emulation before; `postgres`, `caddy` and the data are not affected. If the
 new version does not become ready, the script exits with an error, shows the
-logs and prints the rollback with the exact commit and backup, for example:
+logs and prints the rollback with the exact package copy and backup, for
+example:
 
 ```
-✗ v0.6.0 did not become ready in 300s (logs above). The database may already be migrated.
-  To return to v0.5.0 and its backup:
-  git -c advice.detachedHead=false checkout 1a2b3c4…   # package files of v0.5.0
-  ./restore.sh --yes backups/cadence-v0.5.0-20261008-030000.sql.gz   # data as of the backup, starts v0.5.0
+✗ v0.7.0 did not become ready in 300s (logs above). The database may already be migrated.
+  To return to v0.6.0 and its backup:
+  tar -xpzf backups/package-v0.6.0-20261008-030000.tar.gz   # package files of v0.6.0
+  ./restore.sh --yes backups/cadence-v0.6.0-20261008-030000.sql.gz   # data as of the backup, starts v0.6.0
 ```
 
-Releases are announced as pull requests "Release vX.Y.Z" in this repository;
-watch it (Releases or all activity) to hear about them.
+Releases are published as GitHub Releases of this repository; watch it
+(Releases) to hear about them.
+
+### Releases and mirrors
+
+Each release `vX.Y.Z` carries three assets with names that do not change:
+`cadence-self-hosted-vX.Y.Z.tar.gz` (the package: compose files, Caddyfile,
+`.env.example`, `VERSION`, the scripts, `bundles/`, `docs/`, `README.md`,
+`LICENSE` and `package.sha256`), `checksums.txt` and `get-cadence.sh`. A
+machine that cannot reach GitHub takes them from a mirror:
+`CADENCE_RELEASES_URL` points `get-cadence.sh` and `upgrade.sh` at any
+HTTP(S) address or directory (`file:///srv/cadence-releases`) with the
+layout
+
+```
+download/v0.6.0/cadence-self-hosted-v0.6.0.tar.gz
+download/v0.6.0/checksums.txt
+download/v0.6.0/get-cadence.sh
+latest/download/…              # a copy of the latest release, for "the latest"
+```
+
+### Moving a git installation to release packages
+
+Installations made before v0.6.0 are git clones of this repository, and
+their `upgrade.sh` works with git. The first upgrade to v0.6.0 or later runs
+that old script as before — `./upgrade.sh v0.6.0` checks out the tag
+`v0.6.0` — and brings in the new scripts. From then on `upgrade.sh` takes
+release packages: it does not need git, does not mind `.git` either, and
+`.git` can be removed (`rm -rf .git .gitignore .github ci`, all of them
+leftovers of the clone).
+
+The old script refuses to run over edited tracked files. If you edited any
+(the usual one is `docker-compose.yml`), move the change into
+`compose.override.yml` (below), put the file back with
+`git checkout -- docker-compose.yml`, then upgrade. If you had
+`docker-compose.override.yml` listed in `COMPOSE_FILE`, it keeps working;
+new installations name the file `compose.override.yml`.
 
 ### Local compose changes
 
-Do not edit the tracked files: `upgrade.sh` refuses to run over local
-changes. Put additions into `docker-compose.override.yml` (ignored by git) and
-add it to `COMPOSE_FILE` in `.env` — with `COMPOSE_FILE` set, compose does not
-pick the override up by itself:
-
-```bash
-COMPOSE_FILE=docker-compose.yml:compose.tls.yml:docker-compose.override.yml
-```
+Do not edit the package files: `upgrade.sh` stops over local edits of them.
+Put compose additions into `compose.override.yml`. `install.sh` creates it
+empty and lists it last in `COMPOSE_FILE` in `.env`, so `docker compose` and
+the scripts read it with no further edit, and `upgrade.sh` never touches it:
 
 ```yaml
-# docker-compose.override.yml
+# compose.override.yml
 services:
   api:
     extra_hosts: ["host.docker.internal:host-gateway"]
   worker:
     extra_hosts: ["host.docker.internal:host-gateway"]
 ```
+
+Apply it with `docker compose up -d`. An installation from before v0.6.0 has
+no such file and its `COMPOSE_FILE` does not list one: create the file and
+append `:compose.override.yml` to `COMPOSE_FILE` in `.env`. `upgrade.sh`
+warns when an override file exists but `COMPOSE_FILE` does not list it.
 
 ## Troubleshooting
 

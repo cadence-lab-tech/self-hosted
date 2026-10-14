@@ -109,3 +109,91 @@ check_mode() {
   *) die "COMPOSE_FILE in .env ('${COMPOSE_FILE:-}') does not include compose.${CADENCE_MODE:-tls}.yml for CADENCE_MODE=${CADENCE_MODE:-tls}" ;;
   esac
 }
+
+# --- releases ----------------------------------------------------------------------
+# Every release vX.Y.Z of this repository carries three assets:
+#
+#   cadence-self-hosted-vX.Y.Z.tar.gz   the package: the files of this
+#                                       directory without ci/ and .github/,
+#                                       and package.sha256 - the sha256 of
+#                                       each of them, against which upgrade.sh
+#                                       finds local edits
+#   checksums.txt                       sha256 of the other two assets
+#   get-cadence.sh                      the one-line installer
+#
+# The names are a contract: the scripts of every later version, clab and
+# the Helm chart download them by these names. Do not rename them.
+#
+# CADENCE_RELEASES_URL points the scripts at a mirror of the releases (or a
+# directory, file:///path) with the same layout: download/vX.Y.Z/<asset>
+# and latest/download/<asset>.
+CADENCE_RELEASES_DEFAULT=https://github.com/cadence-lab-tech/self-hosted/releases
+# shellcheck disable=SC2034 # used by the scripts that source lib.sh
+PACKAGE_MANIFEST=package.sha256
+
+releases_url() {
+  local url="${CADENCE_RELEASES_URL:-$CADENCE_RELEASES_DEFAULT}"
+  printf '%s\n' "${url%/}"
+}
+
+# package_name VERSION prints the name of the package archive of VERSION.
+package_name() {
+  printf 'cadence-self-hosted-%s.tar.gz\n' "$1"
+}
+
+# sha256_of FILE prints the sha256 of FILE.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# fetch URL FILE downloads URL into FILE; false when there is no such file.
+fetch() {
+  curl -fsL --retry 2 -o "$2" "$1"
+}
+
+# latest_version prints the version of the latest release: the name of the
+# package in its checksums.txt (GitHub redirects latest/download/ to the
+# latest release; a mirror keeps a copy there).
+latest_version() {
+  local tmp version
+  tmp="$(mktemp)"
+  if ! fetch "$(releases_url)/latest/download/checksums.txt" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  version="$(sed -n 's/^[0-9a-f]\{64\}  cadence-self-hosted-\(v[0-9]*\.[0-9]*\.[0-9]*\)\.tar\.gz$/\1/p' "$tmp" | head -n 1)"
+  rm -f "$tmp"
+  [ -n "$version" ] && printf '%s\n' "$version"
+}
+
+# download_package VERSION DIR downloads the package of VERSION with its
+# checksums.txt into DIR and verifies the checksum. Exit status: 0 - done,
+# 2 - there is no such release (or it has no package), 3 - the checksum does
+# not match.
+download_package() {
+  local version="$1" dir="$2" base name want
+  base="$(releases_url)/download/$version"
+  name="$(package_name "$version")"
+  fetch "$base/checksums.txt" "$dir/checksums.txt" || return 2
+  fetch "$base/$name" "$dir/$name" || return 2
+  want="$(awk -v f="$name" '$2 == f {print $1}' "$dir/checksums.txt")"
+  [ -n "$want" ] && [ "$want" = "$(sha256_of "$dir/$name")" ] || return 3
+}
+
+# package_files_hint VERSION prints the command that puts the package files
+# of VERSION into this directory: the copy upgrade.sh kept in backups/, or
+# the package of the release.
+package_files_hint() {
+  local version="$1" saved name
+  saved="$(find "${BACKUP_DIR:-backups}" -maxdepth 1 -name "package-$version-*.tar.gz" -print 2>/dev/null | sort | tail -n 1)"
+  if [ -n "$saved" ]; then
+    printf 'tar -xpzf %s\n' "$saved"
+  else
+    name="$(package_name "$version")"
+    printf 'curl -fsSLO %s/download/%s/%s && tar -xpzf %s && rm %s\n' "$(releases_url)" "$version" "$name" "$name" "$name"
+  fi
+}

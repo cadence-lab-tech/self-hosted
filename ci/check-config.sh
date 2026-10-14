@@ -2,8 +2,9 @@
 #
 # Static checks of the package that need no published images: the compose
 # configuration in both modes, the Caddyfile in both modes, the defaults of
-# .env.example and the file layout. CI runs it on every pull request next to
-# the shell linter; it needs Docker and jq.
+# .env.example, the file layout and the release package that ci/package.sh
+# builds. CI runs it on every pull request next to the shell linter; it needs
+# Docker and jq.
 #
 #   ci/check-config.sh
 set -euo pipefail
@@ -32,14 +33,75 @@ info "layout"
 for f in docker-compose.yml compose.tls.yml compose.proxy.yml .env.example Caddyfile README.md docs/admin.md LICENSE VERSION; do
   check "$f exists" [ -f "$f" ]
 done
-for f in install.sh upgrade.sh backup.sh restore.sh; do
+for f in install.sh upgrade.sh backup.sh restore.sh get-cadence.sh ci/package.sh; do
   check "$f is executable" [ -x "$f" ]
 done
 check "VERSION is vX.Y.Z" valid_version "$version"
 check "LICENSE is FSL-1.1-ALv2" grep -q '^FSL-1.1-ALv2$' LICENSE
-for p in .env backups/ secrets/; do
+for p in .env backups/ secrets/ compose.override.yml; do
   check ".gitignore has $p" grep -qxF "$p" .gitignore
 done
+check "get-cadence.sh is a POSIX sh script" [ "$(head -n 1 get-cadence.sh)" = "#!/bin/sh" ]
+
+info "release package"
+# What ci/package.sh builds for a release: the files an installation needs
+# and nothing of the repository around them. The required list is kept here,
+# apart from the list in ci/package.sh, so that a file dropped from the
+# package turns this check red.
+required_files="VERSION docker-compose.yml compose.tls.yml compose.proxy.yml Caddyfile .env.example
+  install.sh upgrade.sh backup.sh restore.sh lib.sh bundles/starter.json docs/admin.md README.md LICENSE
+  package.sha256"
+dist="$(mktemp -d)"
+trap 'rm -rf "$dist"' EXIT
+package="$(package_name "$version")"
+check "ci/package.sh builds the assets" ci/package.sh "$dist/out"
+check "the assets are $package, checksums.txt and get-cadence.sh" \
+  [ "$(find "$dist/out" -type f -exec basename {} \; 2>/dev/null | sort | tr '\n' ' ')" = "$(printf '%s\n' "$package" checksums.txt get-cadence.sh | sort | tr '\n' ' ')" ]
+verify_checksums() {
+  local sum file
+  while read -r sum file; do
+    [ "$(sha256_of "$dist/out/$file")" = "$sum" ] || return 1
+  done <"$dist/out/checksums.txt"
+  [ "$(grep -c . "$dist/out/checksums.txt")" = 2 ]
+}
+check "checksums.txt matches both assets" verify_checksums
+listing="$(tar -tzf "$dist/out/$package" 2>/dev/null | sed 's:^\./::' || true)"
+for f in $required_files; do
+  check "the package has $f" grep -qxF -- "$f" <<<"$listing"
+done
+# no_entry PATH: the package has neither the file PATH nor anything under it.
+no_entry() {
+  local p="${1%/}" e
+  while IFS= read -r e; do
+    case "$e" in "$p" | "$p"/*) return 1 ;; esac
+  done <<<"$listing"
+}
+for p in ci/ .github/ .git .gitignore .env backups/ secrets/ compose.override.yml docker-compose.override.yml get-cadence.sh; do
+  check "the package has no $p" no_entry "$p"
+done
+check "the package has no ._ metadata files of macOS" [ -z "$(grep -E '(^|/)\._' <<<"$listing" || true)" ]
+check "the package has no top directory" [ -z "$(grep -E '^[^/]+/$' <<<"$listing" || true)" ]
+mkdir -p "$dist/unpacked"
+(umask 077 && tar -xpzf "$dist/out/$package" -C "$dist/unpacked")
+check "VERSION in the package is $version" [ "$(tr -d '[:space:]' <"$dist/unpacked/VERSION")" = "$version" ]
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+for f in install.sh upgrade.sh backup.sh restore.sh; do
+  check "$f unpacks executable (755)" [ "$(mode_of "$dist/unpacked/$f")" = 755 ]
+done
+check "lib.sh and the other files unpack as 644 under umask 077" \
+  [ "$(mode_of "$dist/unpacked/lib.sh") $(mode_of "$dist/unpacked/docker-compose.yml")" = "644 644" ]
+verify_manifest() {
+  local sum file listed
+  listed="$(awk '{print $2}' "$dist/unpacked/package.sha256" | sort)"
+  # Every file of the package but the manifest itself, with its sum.
+  [ "$listed" = "$(grep -vxF package.sha256 <<<"$listing" | sort)" ] || return 1
+  while read -r sum file; do
+    [ "$(sha256_of "$dist/unpacked/$file")" = "$sum" ] || return 1
+  done <"$dist/unpacked/package.sha256"
+}
+check "package.sha256 lists every file of the package with its sha256" verify_manifest
+check "ci/package.sh --version sets VERSION in the package" ci/package.sh --version v99.0.0 "$dist/other"
+check "...and names the package by it" [ -f "$dist/other/$(package_name v99.0.0)" ]
 
 info "documented flags"
 # The flags install.sh takes are the labels of the case in its argument loop
@@ -68,6 +130,31 @@ for f in README.md docs/admin.md; do
   done < <(grep -noE -- '\./install\.sh[^`]*' "$f" || true)
 done
 check "the documentation shows install.sh with flags" [ "$documented" -gt 0 ]
+
+# The one-line installer: every flag after "sh -s --" in the documentation is
+# a flag of get-cadence.sh itself or one it hands to install.sh.
+# shellcheck disable=SC2016 # $n is the text of the loop, not a variable here
+get_flags="$(sed -n '/^  while \[ "\$n" -gt 0 \]; do$/,/^  done$/p' get-cadence.sh |
+  sed -n 's/^ *\(-[^)]*\)).*/\1/p' | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u || true)"
+if [ -n "$get_flags" ]; then
+  pass "get-cadence.sh takes $(tr '\n' ' ' <<<"$get_flags")"
+else
+  fail "get-cadence.sh: no flags found in its argument loop"
+fi
+documented=0
+for f in README.md docs/admin.md; do
+  while IFS=: read -r line command; do
+    for flag in $(grep -oE -- ' -{1,2}[a-z][a-z-]*' <<<"${command#sh -s --}" | tr -d ' ' || true); do
+      documented=$((documented + 1))
+      if grep -qxF -- "$flag" <<<"$get_flags"$'\n'"$install_flags"; then
+        pass "$f:$line: the one-line installer takes $flag"
+      else
+        fail "$f:$line: neither get-cadence.sh nor install.sh has the flag $flag"
+      fi
+    done
+  done < <(grep -noE -- 'get-cadence\.sh \| sh -s --[^`]*' "$f" | sed 's/get-cadence\.sh | //' || true)
+done
+check "the documentation shows the one-line installer with flags" [ "$documented" -gt 0 ]
 
 info "bundles/starter.json"
 bundle=bundles/starter.json

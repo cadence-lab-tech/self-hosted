@@ -11,9 +11,10 @@
 #
 # The backup must match the version in VERSION: migrations only go forward,
 # and a dump of one schema under images of another version is not a state
-# anybody tested. When they differ, switch the package files to the version
-# of the backup first (git checkout vX.Y.Z), or pass --ignore-version if you
-# know what you are doing.
+# anybody tested. When they differ, put the package files of the version of
+# the backup in place first - the command is printed: the copy upgrade.sh
+# kept in backups/package-vX.Y.Z-<date>.tar.gz, or the package of the
+# release - or pass --ignore-version if you know what you are doing.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -27,7 +28,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
   -y | --yes) assume_yes=true; shift ;;
   --ignore-version) ignore_version=true; shift ;;
-  -h | --help) sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h | --help) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   -*) die "unknown option: $1" ;;
   *) [ -z "$file" ] || die "one backup file at a time"; file="$1"; shift ;;
   esac
@@ -57,8 +58,8 @@ if [ "$backup_version" != "$CADENCE_VERSION" ] && [ "$ignore_version" = false ];
   Pass --ignore-version if you are sure it was taken on $CADENCE_VERSION."
   fi
   die "the backup was taken on $backup_version, the package is on $CADENCE_VERSION.
-  Switch the package to the version of the backup first, then restore:
-    git checkout $backup_version && ./restore.sh $file"
+  Put the package files of $backup_version in place first, then restore:
+    $(package_files_hint "$backup_version") && ./restore.sh $file"
 fi
 
 blobs="${file%.sql.gz}.blobs.tar.gz"
