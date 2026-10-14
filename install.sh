@@ -143,7 +143,7 @@ tls)
       warn "Fine behind NAT with ports 80/443 forwarded here; otherwise Let's Encrypt will fail - consider --mode proxy."
     fi
   fi
-  compose_file="docker-compose.yml:compose.tls.yml"
+  compose_file="docker-compose.yml:compose.tls.yml:compose.override.yml"
   ;;
 proxy)
   ask http_addr "Address Caddy listens on for your proxy ([ip:]port)" "127.0.0.1:8080"
@@ -155,7 +155,7 @@ proxy)
   if port_busy "$port" "$host"; then
     die "port $port is already in use on this machine; pick another with --http-addr 127.0.0.1:<port>"
   fi
-  compose_file="docker-compose.yml:compose.proxy.yml"
+  compose_file="docker-compose.yml:compose.proxy.yml:compose.override.yml"
   ;;
 *) die "mode must be tls or proxy, not '$mode'" ;;
 esac
@@ -212,6 +212,21 @@ set_kv SDLC_BOOTSTRAP_TEAM "$team"
 set_kv SDLC_BOOTSTRAP_TEAM_NAME "$team_name"
 mv .env.tmp .env
 trap - EXIT
+# Local compose changes live in compose.override.yml, which COMPOSE_FILE
+# lists from the start: compose reads it with no edit of .env, and upgrade.sh
+# never touches it.
+if [ ! -e compose.override.yml ]; then
+  cat >compose.override.yml <<'YAML'
+# Local changes of the compose configuration (docs/admin.md, "Local compose
+# changes"). COMPOSE_FILE in .env lists this file; upgrade.sh never touches it.
+#
+# services:
+#   api:
+#     extra_hosts: ["host.docker.internal:host-gateway"]
+services: {}
+YAML
+  chmod 644 compose.override.yml
+fi
 mkdir -p backups secrets
 # The service runs as uid 65532 and must traverse secrets/ to read the GitHub
 # App key; listing it is not needed.

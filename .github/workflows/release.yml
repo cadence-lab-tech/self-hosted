@@ -4,8 +4,14 @@
 #                 backend and frontend images (or run by hand), opens the pull
 #                 request "VERSION -> vX.Y.Z" (ci/release-pr.sh). The event may
 #                 arrive twice; the second run finds the open pull request.
-#   tag           when VERSION changes on main, tags that commit vX.Y.Z:
-#                 ./upgrade.sh vX.Y.Z switches an installation to the tag.
+#   tag           when VERSION changes on main, tags that commit vX.Y.Z and
+#                 publishes the GitHub Release vX.Y.Z with the package
+#                 (ci/package.sh): cadence-self-hosted-vX.Y.Z.tar.gz,
+#                 checksums.txt and get-cadence.sh. Installations download
+#                 these assets: get-cadence.sh installs, ./upgrade.sh vX.Y.Z
+#                 upgrades. A second run finds the tag and the release and
+#                 uploads only the assets that are missing; it never replaces
+#                 one.
 #
 # The pull request is opened with the secret RELEASE_PR_TOKEN, not with
 # GITHUB_TOKEN: a pull request opened by GITHUB_TOKEN starts no workflows, and
@@ -82,3 +88,32 @@ jobs:
           fi
           git tag "$v" "$GITHUB_SHA"
           git push origin "refs/tags/$v"
+      - name: release with the package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="$(tr -d '[:space:]' < VERSION)"
+          # The tag of an earlier run must be on this commit: the package is
+          # built from the checkout.
+          # An annotated tag peels to its commit (^{}), a lightweight one is it.
+          peeled="$(git ls-remote --tags origin "refs/tags/$v^{}" | cut -f1)"
+          tagged="${peeled:-$(git ls-remote --tags origin "refs/tags/$v" | cut -f1)}"
+          if [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "::error::tag $v is on $tagged, not on $GITHUB_SHA: the package of this commit is not the version $v"
+            exit 1
+          fi
+          ci/package.sh dist
+          if ! gh release view "$v" >/dev/null 2>&1; then
+            # Notes are generated for now; the notes of the version come with
+            # the annotated tag (CLAB-149).
+            gh release create "$v" --verify-tag --title "$v" --generate-notes dist/*
+            exit 0
+          fi
+          have="$(gh release view "$v" --json assets --jq '.assets[].name')"
+          for f in dist/*; do
+            if grep -qxF "$(basename "$f")" <<<"$have"; then
+              echo "release $v already has $(basename "$f")"
+            else
+              gh release upload "$v" "$f"
+            fi
+          done

@@ -1,13 +1,16 @@
 # Checks of the package. On every pull request and push to main:
 #
-#   lint   shell linter, compose and Caddyfile in both modes, secret scan
-#   stack  the stack on the published images of VERSION, in proxy mode:
-#          install, sign-in, clab, MCP, backup and restore (ci/check-stack.sh);
-#          once on an amd64 runner and once on an arm64 runner, the two
-#          platforms the images are built for
+#   lint   shell linter (get-cadence.sh as POSIX sh), compose and Caddyfile
+#          in both modes, the release package (ci/check-config.sh), the
+#          one-line installer under dash (ci/check-get-cadence.sh), secret scan
+#   stack  the stack on the published images of VERSION, in proxy mode,
+#          installed from the package of this commit with the one-line
+#          installer: sign-in, clab, MCP, backup and restore
+#          (ci/check-stack.sh); once on an amd64 runner and once on an arm64
+#          runner, the two platforms the images are built for
 #
 # Run by hand with two versions, it also checks the upgrade between them
-# (ci/check-upgrade.sh).
+# (ci/check-upgrade.sh): FROM as installed, TO as the package of this commit.
 name: check
 
 on:
@@ -39,9 +42,14 @@ jobs:
         with:
           fetch-depth: 0
       - name: shellcheck
-        run: shellcheck *.sh ci/*.sh
-      - name: compose, Caddyfile, layout
+        run: |
+          shellcheck *.sh ci/*.sh
+          # curl | sh runs it under dash on Debian and Ubuntu: no bashisms.
+          shellcheck -s sh get-cadence.sh
+      - name: compose, Caddyfile, layout, release package
         run: ci/check-config.sh
+      - name: one-line installer
+        run: ci/check-get-cadence.sh
       - name: no secrets in the history
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest git /repo --redact
 

@@ -1,31 +1,36 @@
 #!/usr/bin/env bash
 #
-# End-to-end check of the package on the images of VERSION: installs the
-# stack in proxy mode, exercises it the way an administrator and an agent
-# would, backs it up, restores it, and tears it down. CI runs it on every pull
+# End-to-end check of the package on the images of VERSION: builds the
+# release package of this checkout (ci/package.sh), installs it the way the
+# documentation says - the one-line installer piped into sh, from a local
+# copy of the releases, with git out of reach - in proxy mode into a scratch
+# directory, exercises the stack the way an administrator and an agent would,
+# backs it up, restores it, and tears it down. CI runs it on every pull
 # request; it runs the same way on any Linux machine with Docker.
 #
 #   ci/check-stack.sh
 #
-#   CHECK_HTTP_PORT  host port of the stack, default 8080
-#   CLAB_BIN         clab to use; default: install the CLI of VERSION from the
-#                    public tap (the path docs/admin.md describes)
-#   CHECK_KEEP=1     leave the stack running after the check
+#   CHECK_HTTP_PORT       host port of the stack, default 8080
+#   COMPOSE_PROJECT_NAME  compose project of the stack, default cadence-check
+#   CLAB_BIN              clab to use; default: install the CLI of VERSION
+#                         from the public tap (the path docs/admin.md describes)
+#   CHECK_KEEP=1          leave the stack (and its directory) after the check
 #
-# The stack is torn down with its volumes at the end: run it in a scratch
-# clone or set COMPOSE_PROJECT_NAME, never next to a production instance.
+# The stack is torn down with its volumes at the end: give it a
+# COMPOSE_PROJECT_NAME and a CHECK_HTTP_PORT of its own, never those of a
+# running instance.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 # shellcheck source=lib.sh
 . ./lib.sh
 
-[ ! -e .env ] || die "ci/check-stack.sh installs a fresh stack and deletes it afterwards: refusing to run next to an existing .env"
-
 port="${CHECK_HTTP_PORT:-8080}"
 base="http://127.0.0.1:$port"
 version="$(tr -d '[:space:]' <VERSION)"
 failures=0
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-cadence-check}"
+work="$(mktemp -d)"
 
 pass() { printf '  ✓ %s\n' "$*"; }
 fail() {
@@ -45,13 +50,14 @@ html() { curl -sf "$base/" | grep -qi '<html'; }
 client_error() { [ "$1" -ge 400 ] && [ "$1" -lt 500 ]; }
 
 cleanup() {
-  if [ "${CHECK_KEEP:-}" != 1 ] && [ -f .env ]; then
+  [ "${CHECK_KEEP:-}" != 1 ] || { info "kept: $work/cadence"; return; }
+  if [ -f "$work/cadence/.env" ]; then
     info "tearing the stack down"
-    export CADENCE_VERSION="$version"
-    docker compose down -v --remove-orphans >/dev/null 2>&1 || true
-    rm -f .env
-    rm -rf backups/cadence-* "${clab_dir:-}"
+    (cd "$work/cadence" && CADENCE_VERSION="$version" docker compose down -v --remove-orphans >/dev/null 2>&1) || true
   fi
+  # Files of the containers (backups of the blobs volume) may belong to
+  # another uid; the stack is gone, so what is left is ours to remove.
+  rm -rf "$work" "${clab_dir:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -61,8 +67,26 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$admin_token"; fi
 auth=(-H "Authorization: Bearer $admin_token")
 
 # --- install ---------------------------------------------------------------------
-info "install.sh --mode proxy on 127.0.0.1:$port"
-SDLC_ADMIN_TOKEN="$admin_token" ./install.sh --mode proxy --http-addr "127.0.0.1:$port" --yes </dev/null
+# The releases as the installer sees them: download/<version>/ and
+# latest/download/ (lib.sh, "releases").
+info "release package of this checkout"
+ci/package.sh "$work/releases/download/$version"
+mkdir -p "$work/releases/latest"
+cp -R "$work/releases/download/$version" "$work/releases/latest/download"
+# git must not be needed: a git that fails and leaves a trace stands first
+# in PATH.
+mkdir -p "$work/nogit"
+printf '#!/bin/sh\necho "git $*" >>"%s/git-calls"\nexit 1\n' "$work" >"$work/nogit/git"
+chmod 755 "$work/nogit/git"
+
+info "get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:$port --yes"
+(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" SDLC_ADMIN_TOKEN="$admin_token" \
+  sh -s -- --mode proxy --http-addr "127.0.0.1:$port" --yes <"$OLDPWD/get-cadence.sh")
+check "the stack is installed from the package into $work/cadence" [ -f "$work/cadence/.env" ]
+check "the installation is not a git clone" [ ! -e "$work/cadence/.git" ]
+check "git was never called" [ ! -s "$work/git-calls" ]
+check "VERSION of the installation is $version" [ "$(tr -d '[:space:]' <"$work/cadence/VERSION")" = "$version" ]
+cd "$work/cadence"
 
 check ".env has mode 600" [ "$(stat -c %a .env 2>/dev/null || stat -f %Lp .env)" = 600 ]
 secrets_distinct() {
@@ -83,6 +107,20 @@ fi
 check "a second install.sh leaves .env untouched" [ "$before" = "$(sha256sum .env 2>/dev/null || shasum -a 256 .env)" ]
 
 load_env
+
+# --- local compose changes -------------------------------------------------------
+info "compose.override.yml"
+check "COMPOSE_FILE lists compose.override.yml" contains "$COMPOSE_FILE" ":compose.override.yml"
+check "check_mode accepts COMPOSE_FILE with the override" bash -c '. ./lib.sh && load_env && check_mode'
+cp compose.override.yml "$work/override.orig"
+cat >>compose.override.yml <<'YAML'
+  api:
+    extra_hosts: ["host.docker.internal:host-gateway"]
+YAML
+sed -i.bak 's/^services: {}$/services:/' compose.override.yml && rm -f compose.override.yml.bak
+check "docker compose picks the override up with no edit of .env (extra_hosts of api)" \
+  contains "$(docker compose config --format json | jq -c '.services.api.extra_hosts')" "host.docker.internal"
+cp "$work/override.orig" compose.override.yml
 
 # --- platform ------------------------------------------------------------------------
 # The images are built for linux/amd64 and linux/arm64 and compose pins no
