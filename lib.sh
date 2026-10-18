@@ -186,16 +186,40 @@ download_package() {
   fi
 }
 
+# The first version released with a package. Earlier ones (v0.5.x) were
+# installed as git clones and have no package in their release.
+FIRST_PACKAGE_VERSION=v0.6.0
+# The repository of the package, for the source archive of a tag.
+CADENCE_REPO_URL=https://github.com/cadence-lab-tech/self-hosted
+
+# git_clone: this directory is a working git clone (git is there and knows it).
+git_clone() {
+  [ -e .git ] && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1
+}
+
 # package_files_hint VERSION prints the command that puts the package files
 # of VERSION into this directory: the copy upgrade.sh kept in backups/, or
-# the package of the release.
+# the package of the release. A version before FIRST_PACKAGE_VERSION has no
+# package: its files come from git in a clone (--force: the files of later
+# packages differ from the tag), or else from the source archive of its tag
+# on GitHub - mirrors carry only releases, so CADENCE_RELEASES_URL does not
+# apply to it.
 package_files_hint() {
-  local version="$1" saved name
+  local version="$1" saved name checkout
   saved="$(find "${BACKUP_DIR:-backups}" -maxdepth 1 -name "package-$version-*.tar.gz" -print 2>/dev/null | sort | tail -n 1)"
+  checkout="git -c advice.detachedHead=false checkout --force $version"
   if [ -n "$saved" ]; then
     printf 'tar -xpzf %s\n' "$saved"
-  else
+  elif ! version_lt "$version" "$FIRST_PACKAGE_VERSION"; then
     name="$(package_name "$version")"
     printf 'curl -fsSLO %s/download/%s/%s && tar -xpzf %s && rm %s\n' "$(releases_url)" "$version" "$name" "$name" "$name"
+  elif git_clone; then
+    if git rev-parse -q --verify "refs/tags/$version^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "$checkout"
+    else
+      printf 'git fetch --tags %s && %s\n' "${CADENCE_GIT_REMOTE:-origin}" "$checkout"
+    fi
+  else
+    printf 'curl -fsSL %s/archive/refs/tags/%s.tar.gz | tar -xpzf - --strip-components=1\n' "$CADENCE_REPO_URL" "$version"
   fi
 }

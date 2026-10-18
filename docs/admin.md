@@ -554,6 +554,37 @@ release:
 tar -xpzf backups/package-v0.6.0-20261008-030000.tar.gz && ./restore.sh backups/cadence-v0.6.0-20261008-030000.sql.gz
 ```
 
+Versions before v0.6.0 have no package in their release, and an
+installation that came from them with git has no copy of their files in
+`backups/` either: its first upgrade ran the old `upgrade.sh`, which checked
+the new tag out. For such a version the hint takes the files from git while
+the directory is still a git clone (`--force`: the files of later packages
+differ from the tag; `.env`, `secrets/`, `backups/` and
+`compose.override.yml` are not tracked and stay as they are):
+
+```bash
+git -c advice.detachedHead=false checkout --force v0.5.3 && ./restore.sh backups/cadence-v0.5.3-20261008-030000.sql.gz
+```
+
+If the tag is not in the clone yet, the hint fetches it first:
+`git fetch --tags origin && git -c advice.detachedHead=false checkout --force v0.5.3`
+(the remote is `CADENCE_GIT_REMOTE`, `origin` by default). Without `.git` —
+or without git on the machine — the hint unpacks the source archive of the
+tag from GitHub over the directory:
+
+```bash
+curl -fsSL https://github.com/cadence-lab-tech/self-hosted/archive/refs/tags/v0.5.3.tar.gz | tar -xpzf - --strip-components=1 && ./restore.sh backups/cadence-v0.5.3-20261008-030000.sql.gz
+```
+
+That archive is the whole repository at the tag, so `ci/` and `.github/`
+come with it, and the directory is no git clone: the `upgrade.sh` of v0.5.x
+upgrades with git and cannot move it forward again. To come back to v0.6.0
+or later from there, put the package files of that version in place by hand
+and restore its backup, as for any other version
+(`curl -fsSLO https://github.com/cadence-lab-tech/self-hosted/releases/download/v0.6.0/cadence-self-hosted-v0.6.0.tar.gz && tar -xpzf cadence-self-hosted-v0.6.0.tar.gz && rm cadence-self-hosted-v0.6.0.tar.gz`),
+then upgrade with `./upgrade.sh` as usual. A mirror (`CADENCE_RELEASES_URL`)
+carries only releases, so the source archive always comes from GitHub.
+
 ## Upgrades and rollback
 
 ```bash
@@ -629,7 +660,10 @@ that old script as before — `./upgrade.sh v0.6.0` checks out the tag
 `v0.6.0` — and brings in the new scripts. From then on `upgrade.sh` takes
 release packages: it does not need git, does not mind `.git` either, and
 `.git` can be removed (`rm -rf .git .gitignore .github ci`, all of them
-leftovers of the clone).
+leftovers of the clone). While you might still go back to a version before
+v0.6.0, keep `.git`: such a version has no package, and in a clone the way
+back is a `git checkout` of its tag; without `.git` it is the source archive
+of the tag (see [Backups](#backups)).
 
 The old script refuses to run over edited tracked files. If you edited any
 (the usual one is `docker-compose.yml`), move the change into
