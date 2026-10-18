@@ -121,6 +121,9 @@ commands if the new version does not come up. It never touches `.env`,
 `compose.override.yml`, `backups/` or `secrets/`, and stops if a package
 file was edited here. Installations from before v0.6.0 move over with
 their first upgrade ([docs/admin.md](docs/admin.md#moving-a-git-installation-to-release-packages)).
+After the upgrade, update `clab` on the machines of people and agents to
+the same version (`brew upgrade clab`); upgrades from v0.6.1 on remind of
+it.
 Details: [docs/admin.md](docs/admin.md#upgrades-and-rollback).
 
 ## Releases

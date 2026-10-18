@@ -405,11 +405,29 @@ curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/
   | CLAB_VERSION=v0.5.0 sh                   # the VERSION of your server
 ```
 
-`clab version` shows both versions and warns when the CLI is older than
-the server; the check needs clab v0.5.0 or newer, an older CLI shows only
-its own version. Homebrew does not update the CLI by itself:
-`brew upgrade clab` after a server upgrade. Release archives for Windows
-are on the tap's releases page.
+Every `clab` command, `clab version` and `clab auth login` included,
+compares its version with the server's and prints a warning to stderr once
+per command when the CLI is older than the server by any release, even a
+patch:
+
+```
+clab: CLI v0.6.0 старше сервера v0.6.1 (https://cadence.example.com), обновите CLI:
+  brew upgrade clab
+  # или ровно версию сервера: curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=v0.6.1 sh
+```
+
+A CLI installed with Homebrew is told `brew upgrade clab`, with the install
+script and the server's `CLAB_VERSION` next to it; any other CLI is told
+the install script. A CLI newer than the server by one minor version is
+fine and stays quiet (Homebrew installs the latest release, and servers are
+upgraded later); newer by more than that, it warns with the install script
+and the server's version. The output, `--json` and the exit code do not
+change, and nothing turns the warning off. The check needs clab v0.5.0 or
+newer; the warning about a CLI older than the server by a patch or one
+minor version comes with clab v0.6.1. Homebrew does not update the CLI by
+itself: `brew upgrade clab` after a server upgrade - `./upgrade.sh` reminds
+of it (upgrades from v0.6.1 on). Release archives for Windows are on the
+tap's releases page.
 
 Sign in and connect an agent:
 
@@ -614,7 +632,13 @@ script:
 6. pulls the images of the new version — if that fails, it puts the files
    back and the running stack is untouched;
 7. starts the stack (the API applies migrations itself), reloads Caddy and
-   waits for readiness (`CADENCE_READY_TIMEOUT`, 300 s).
+   waits for readiness (`CADENCE_READY_TIMEOUT`, 300 s);
+8. reminds to update `clab` on the machines of people and agents to the new
+   version: `brew upgrade clab`, or the install script of the tap with
+   `CLAB_VERSION`, then `clab version` (see "CLI and agents"). The server
+   does not update the CLI; until it is updated, every `clab` command warns
+   that the CLI is older than the server. The upgrade runs the script of the
+   version it starts from, so the reminder shows on upgrades from v0.6.1 on.
 
 Skipping versions is fine. On an arm64 machine (Apple Silicon, Graviton,
 Ampere) the upgrade to v0.5.3 or later recreates `api`, `worker` and `ui`

@@ -21,7 +21,8 @@
 #
 # If the new version does not become ready, the script exits with an error
 # and prints the exact commands that return to the previous version and its
-# backup.
+# backup. After a successful upgrade it reminds to update clab, the CLI of
+# people and agents, to the new version: the server does not update it.
 #
 #   CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
 #   CADENCE_RELEASES_URL   a mirror of the releases (see lib.sh, "releases")
@@ -80,7 +81,7 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
     --force) force=true; shift ;;
-    -h | --help) sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'; return 0 ;;
+    -h | --help) sed -n '3,28p' "$0" | sed 's/^# \{0,1\}//'; return 0 ;;
     -*) die "unknown option: $1" ;;
     *) [ -z "$target_version" ] || die "one version at a time"; target_version="$1"; shift ;;
     esac
@@ -256,6 +257,12 @@ $rollback"
 $rollback"
   fi
   ok "upgraded $old_version -> $target_version"
+  # clab of people and agents stays on the old version: say so here, where
+  # the administrator is looking.
+  say "  Update clab to $target_version on the machines of people and agents:"
+  say "    brew upgrade clab   # installed with Homebrew"
+  say "    curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=$target_version sh"
+  say "  and check with: clab version"
   if [ -e .git ]; then
     say "  This directory is a git clone; upgrades no longer use git, and .git can be removed (docs/admin.md, \"Moving a git installation to release packages\")."
   fi
