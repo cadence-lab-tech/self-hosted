@@ -281,10 +281,11 @@ check "a project created after the backup exists" contains "$("$clab" --host "$b
 
 info "restore ($driver)"
 if [ "$driver" = clab ]; then
-  if "$clab" server restore "$dump" </dev/null >/dev/null 2>&1; then
+  # stdin is /dev/null, as under cron: a character device, but not a terminal.
+  if out="$("$clab" server restore "$dump" </dev/null 2>&1)"; then
     fail "clab server restore without a terminal and --yes must refuse"
   else
-    pass "clab server restore without a terminal and --yes refuses"
+    check "clab server restore without a terminal and --yes refuses and asks for --yes" contains "$out" "run it in a terminal or pass --yes"
   fi
   check "the refusal leaves the project created after the backup" contains "$("$clab" --host "$base" project list --json)" '"AFTER"'
 fi
