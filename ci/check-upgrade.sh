@@ -27,6 +27,10 @@
 #   - ./upgrade.sh with no version on the latest release: nothing to do
 #   - going down is refused, and restore.sh of a FROM backup refuses, each
 #     with a hint that needs no git
+#   - for a clone, as it really is - without backups/package-FROM-*, since
+#     its first upgrade ran the old script with git: both refusals point at
+#     the source archive of the tag without git, and at git checkout of the
+#     tag with .git back, which, run as printed, brings back the files of FROM
 #
 # The stack is torn down with its volumes at the end.
 #
@@ -382,10 +386,60 @@ JSON
   fi
   if [ "$(instance_version)" = "$to" ]; then pass "the stack still runs $to"; else fail "the stack does not report $to"; fi
 
+  # --- a clone without the package copy of FROM ---------------------------------------------
+  # A real clone came to the package with the old upgrade.sh and git checkout:
+  # no backups/package-FROM-* is there, and FROM has no release package.
+  local archive checkout
+  archive="curl -fsSL https://github.com/cadence-lab-tech/self-hosted/archive/refs/tags/$from.tar.gz | tar -xpzf - --strip-components=1"
+  checkout="git -c advice.detachedHead=false checkout --force $from"
+  if [ "$clone" = true ]; then
+    mkdir "$work/kept"
+    mv backups/package-"$from"-*.tar.gz "$work/kept/"
+    info "./upgrade.sh $from and restore.sh without backups/package-$from-* and without git"
+    if out="$(PATH="$path_nogit" ./upgrade.sh "$from" 2>&1)"; then
+      fail "upgrade.sh $from after $to did not refuse the downgrade"
+    elif grep -qF -- "$archive && ./restore.sh" <<<"$out" && ! grep -qF "releases/download/$from" <<<"$out"; then
+      pass "upgrade.sh refuses to go down to $from, the hint takes the source archive of the tag"
+    else
+      fail "the downgrade refusal without a package copy and git: $out"
+    fi
+    if out="$(PATH="$path_nogit" ./restore.sh --yes "$old_backup" 2>&1)"; then
+      fail "restore.sh restored a $from backup on $to"
+    elif grep -qF -- "$archive && ./restore.sh $old_backup" <<<"$out" && ! grep -qF "releases/download/$from" <<<"$out"; then
+      pass "restore.sh refuses, the hint takes the source archive of the tag"
+    else
+      fail "the restore refusal without a package copy and git: $out"
+    fi
+  fi
+
   if [ -s "$work/git-calls" ]; then
     fail "git was called: $(tr '\n' ';' <"$work/git-calls")"
   else
     pass "git was never called after .git was moved away"
+  fi
+
+  if [ "$clone" = true ]; then
+    info "./upgrade.sh $from and restore.sh without backups/package-$from-*, with .git and git back"
+    mv .git.off .git
+    if out="$(./upgrade.sh "$from" 2>&1)"; then
+      fail "upgrade.sh $from after $to did not refuse the downgrade"
+    elif grep -qF -- "    $checkout && ./restore.sh" <<<"$out"; then
+      pass "upgrade.sh refuses to go down to $from, the hint checks out its tag with git"
+    else
+      fail "the downgrade refusal in a git clone without a package copy: $out"
+    fi
+    if out="$(./restore.sh --yes "$old_backup" 2>&1)"; then
+      fail "restore.sh restored a $from backup on $to"
+    elif grep -qF -- "    $checkout && ./restore.sh $old_backup" <<<"$out"; then
+      pass "restore.sh refuses, the hint checks out the tag $from with git"
+    else
+      fail "the restore refusal in a git clone without a package copy: $out"
+    fi
+    if bash -euc "$checkout" >/dev/null 2>&1 && [ "$(tr -d '[:space:]' <VERSION)" = "$from" ]; then
+      pass "the checkout, run as printed, brings back the files of $from"
+    else
+      fail "after the printed checkout VERSION is $(tr -d '[:space:]' <VERSION), expected $from"
+    fi
   fi
 
   if [ "$failures" -gt 0 ]; then

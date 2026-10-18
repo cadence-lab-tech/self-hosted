@@ -114,6 +114,82 @@ check "package.sha256 lists every file of the package with its sha256" verify_ma
 check "ci/package.sh --version sets VERSION in the package" ci/package.sh --version v99.0.0 "$dist/other"
 check "...and names the package by it" [ -f "$dist/other/$(package_name v99.0.0)" ]
 
+info "rollback hint"
+# package_files_hint is what upgrade.sh and restore.sh print when they refuse
+# another version. Its branches, run in scratch directories: a kept package
+# copy, the release package (since v0.6.0), and for older versions git in a
+# clone or else the source archive of the tag.
+#
+# hint_in DIR VERSION [NAME=VALUE...] prints the hint for VERSION in DIR with
+# the given environment.
+hint_in() {
+  local in="$1" v="$2"
+  shift 2
+  (
+    cd "$in" && unset BACKUP_DIR CADENCE_RELEASES_URL CADENCE_GIT_REMOTE
+    # shellcheck disable=SC2163 # NAME=VALUE pairs, not names
+    [ $# -eq 0 ] || export "$@"
+    package_files_hint "$v"
+  )
+}
+hint_dir() {
+  local d
+  d="$(mktemp -d "$dist/hint.XXXXXX")"
+  mkdir "$d/backups"
+  printf '%s\n' "$d"
+}
+releases="$CADENCE_RELEASES_DEFAULT"
+archive_of() { printf 'curl -fsSL https://github.com/cadence-lab-tech/self-hosted/archive/refs/tags/%s.tar.gz | tar -xpzf - --strip-components=1' "$1"; }
+checkout_of() { printf 'git -c advice.detachedHead=false checkout --force %s' "$1"; }
+git_q() { git -c user.name=check -c user.email=check@localhost -c init.defaultBranch=main "$@" >/dev/null 2>&1; }
+
+d="$(hint_dir)"
+touch "$d/backups/package-v0.6.0-20261001-000000.tar.gz" "$d/backups/package-v0.6.0-20261008-030000.tar.gz" \
+  "$d/backups/package-v0.5.3-20261008-030000.tar.gz"
+check "[kept copy] v0.6.0: tar of the latest copy in backups/" \
+  [ "$(hint_in "$d" v0.6.0)" = "tar -xpzf backups/package-v0.6.0-20261008-030000.tar.gz" ]
+out="$(hint_in "$d" v0.5.3)"
+check "[kept copy] v0.5.3: tar of the copy, before any other way" [ "$out" = "tar -xpzf backups/package-v0.5.3-20261008-030000.tar.gz" ]
+check "[kept copy] v0.5.3: no releases/download" lacks "$out" "releases/download"
+
+d="$(hint_dir)"
+check "[release] v0.6.0 without a copy: the package of its release" \
+  [ "$(hint_in "$d" v0.6.0)" = "curl -fsSLO $releases/download/v0.6.0/cadence-self-hosted-v0.6.0.tar.gz && tar -xpzf cadence-self-hosted-v0.6.0.tar.gz && rm cadence-self-hosted-v0.6.0.tar.gz" ]
+check "[release] ...from the mirror when CADENCE_RELEASES_URL is set" \
+  contains "$(hint_in "$d" v0.6.0 CADENCE_RELEASES_URL=file:///srv/mirror/)" "curl -fsSLO file:///srv/mirror/download/v0.6.0/"
+git_q -C "$d" init && git_q -C "$d" commit --allow-empty -m init && git_q -C "$d" tag v0.6.0
+check "[release] v0.6.0 in a git clone: still the package, not git" \
+  contains "$(hint_in "$d" v0.6.0)" "curl -fsSLO $releases/download/v0.6.0/"
+
+d="$(hint_dir)"
+git_q -C "$d" init && git_q -C "$d" commit --allow-empty -m init && git_q -C "$d" tag v0.5.3
+check "[git clone, tag here] v0.5.3: git checkout of the tag" [ "$(hint_in "$d" v0.5.3)" = "$(checkout_of v0.5.3)" ]
+
+d="$(hint_dir)"
+git_q -C "$d" init && git_q -C "$d" commit --allow-empty -m init
+check "[git clone, no tag] v0.5.3: fetch the tags from origin, then checkout" \
+  [ "$(hint_in "$d" v0.5.3)" = "git fetch --tags origin && $(checkout_of v0.5.3)" ]
+check "[git clone, no tag] ...from CADENCE_GIT_REMOTE when set" \
+  [ "$(hint_in "$d" v0.5.3 CADENCE_GIT_REMOTE=upstream)" = "git fetch --tags upstream && $(checkout_of v0.5.3)" ]
+
+d="$(hint_dir)"
+out="$(hint_in "$d" v0.5.3)"
+check "[no git clone] v0.5.3: the source archive of the tag" [ "$out" = "$(archive_of v0.5.3)" ]
+check "[no git clone] v0.5.3: no releases/download" lacks "$out" "releases/download/v0.5.3"
+check "[no git clone] ...from GitHub even when CADENCE_RELEASES_URL is set" \
+  [ "$(hint_in "$d" v0.5.3 CADENCE_RELEASES_URL=file:///srv/mirror)" = "$(archive_of v0.5.3)" ]
+# .git without git on PATH: only the tools the function needs besides git.
+nogit="$dist/nogit-bin"
+mkdir -p "$nogit"
+for tool in find sort tail head; do ln -sf "$(command -v "$tool")" "$nogit/$tool"; done
+git_q -C "$d" init && git_q -C "$d" commit --allow-empty -m init && git_q -C "$d" tag v0.5.3
+check "[.git, no git on PATH] v0.5.3: the source archive of the tag" \
+  [ "$(hint_in "$d" v0.5.3 PATH="$nogit")" = "$(archive_of v0.5.3)" ]
+# docs/admin.md shows these commands as the function prints them.
+for cmd in "$(archive_of v0.5.3)" "$(checkout_of v0.5.3)" "git fetch --tags origin && $(checkout_of v0.5.3)"; do
+  check "docs/admin.md shows: $cmd" grep -qF -- "$cmd" docs/admin.md
+done
+
 info "documented flags"
 # The flags install.sh takes are the labels of the case in its argument loop
 # ("--mode) ...", "-y | --yes | --non-interactive) ..."), not its usage

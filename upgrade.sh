@@ -166,7 +166,7 @@ main() {
   fi
   if [ -n "$reference" ]; then
     edited="$(edited_files "$reference")"
-  elif [ -e .git ] && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+  elif git_clone; then
     # Only files the new package replaces matter.
     edited="$(git diff --name-only HEAD -- 2>/dev/null | grep -xF -f "$work/new.list" || true)"
   else
