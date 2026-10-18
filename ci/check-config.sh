@@ -7,6 +7,10 @@
 # Docker and jq.
 #
 #   ci/check-config.sh
+#
+#   CLAB_BIN  clab whose "clab server ... --help" the documented clab server
+#             flags are checked against; default: the CLI of VERSION from the
+#             public tap, once VERSION has clab server (v0.7.0)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -242,6 +246,46 @@ for f in README.md docs/admin.md; do
   done < <(grep -noE -- 'get-cadence\.sh \| sh -s --[^`]*' "$f" | sed 's/get-cadence\.sh | //' || true)
 done
 check "the documentation shows the one-line installer with flags" [ "$documented" -gt 0 ]
+
+# clab server: every "clab server <command> ..." of the documentation uses
+# only flags that "clab server <command> --help" lists. The clab is CLAB_BIN,
+# else the CLI of VERSION from the public tap once VERSION is a release that
+# has clab server (v0.7.0); before that the check is skipped.
+info "documented clab server flags"
+clab_server="${CLAB_BIN:-}"
+if [ -z "$clab_server" ] && ! version_lt "$version" v0.7.0; then
+  clab_dir="$dist/clab-tap"
+  if curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh |
+    CLAB_VERSION="$version" CLAB_INSTALL_DIR="$clab_dir" sh >/dev/null 2>&1; then
+    clab_server="$clab_dir/clab"
+  else
+    fail "could not install clab $version from the tap to check the documented clab server flags"
+  fi
+fi
+if [ -z "$clab_server" ]; then
+  info "skipped: clab $version has no clab server; CLAB_BIN=<clab with clab server> checks it"
+else
+  documented=0
+  for f in README.md docs/admin.md; do
+    while IFS=: read -r line command; do
+      sub="$(awk '{print $3}' <<<"$command")"
+      if ! sub_help="$("$clab_server" server "$sub" --help 2>/dev/null)"; then
+        fail "$f:$line: clab server has no command '$sub'"
+        continue
+      fi
+      sub_flags="$(grep -oE -- '(^|[ ,])-{1,2}[a-z][a-z-]*' <<<"$sub_help" | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u)"
+      for flag in $(grep -oE -- ' -{1,2}[a-z][a-z-]*' <<<"$command" | tr -d ' ' || true); do
+        documented=$((documented + 1))
+        if grep -qxF -- "$flag" <<<"$sub_flags"; then
+          pass "$f:$line: clab server $sub takes $flag"
+        else
+          fail "$f:$line: clab server $sub has no flag $flag"
+        fi
+      done
+    done < <(grep -noE -- 'clab server [a-z]+[^`#]*' "$f" || true)
+  done
+  check "the documentation shows clab server with flags" [ "$documented" -gt 0 ]
+fi
 
 info "bundles/starter.json"
 bundle=bundles/starter.json
