@@ -24,6 +24,11 @@
 #     the artifact content are there, .env, secrets/, compose.override.yml
 #     and a file of the administrator are unchanged, a file the package no
 #     longer has is removed, git is not called (.git moved away for a clone)
+#   - the output of the upgrade reminds to update clab to TO (brew upgrade
+#     clab, CLAB_VERSION=TO, clab version) - checked when the upgrade.sh that
+#     runs it has the reminder: always for a clone (it runs the scripts of
+#     this checkout), for a package once FROM is a release with it; "nothing
+#     to do", the refusals and the failed upgrades do not remind
 #   - ./upgrade.sh with no version on the latest release: nothing to do
 #   - going down is refused, and restore.sh of a FROM backup refuses, each
 #     with a hint that needs no git
@@ -174,6 +179,21 @@ JSON
     git -c user.name=check -c user.email=check@localhost commit --quiet -m "scripts of the package" || true
   fi
 
+  # upgrade.sh runs to the end as the script of FROM (upgrade.sh, "move_tree"):
+  # the reminder shows only if that one has it.
+  local reminder="Update clab to $to on the machines of people and agents"
+  local reminds=false
+  # shellcheck disable=SC2016 # the text of the script, not an expansion
+  if grep -qF 'Update clab to $target_version' upgrade.sh; then reminds=true; fi
+  # no_reminder WHAT OUTPUT: a run that did not upgrade must not remind.
+  no_reminder() {
+    if grep -qF "Update clab" <<<"$2"; then
+      fail "$1 reminds to update clab: $2"
+    else
+      pass "$1 does not remind to update clab"
+    fi
+  }
+
   # --- a failed image pull -------------------------------------------------------------
   info "./upgrade.sh $to with images that cannot be pulled"
   local before out
@@ -183,6 +203,7 @@ JSON
   else
     pass "upgrade.sh $to fails when the images cannot be pulled"
   fi
+  [ "$reminds" = false ] || no_reminder "the failed pull" "$out"
   if [ "$(files_state)" = "$before" ]; then
     pass "the package files are back as they were (VERSION $(tr -d '[:space:]' <VERSION))"
   else
@@ -207,6 +228,7 @@ JSON
   else
     fail "upgrade.sh refused without naming docker-compose.yml: $out"
   fi
+  [ "$reminds" = false ] || no_reminder "the refusal over an edited file" "$out"
   if [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" = "$backups_before" ] &&
     [ "$(tr -d '[:space:]' <VERSION)" = "$from" ]; then
     pass "the refusal comes before the backup and changes nothing"
@@ -258,6 +280,7 @@ JSON
   else
     pass "upgrade.sh fails when $to is not ready in time"
   fi
+  [ "$reminds" = false ] || no_reminder "the upgrade that did not become ready" "$out"
   local rollback
   rollback="$(grep -E '^  (tar -xpzf |\./restore\.sh --yes )' <<<"$out" || true)"
   if [ "$(grep -c . <<<"$rollback")" = 2 ] && ! grep -qw git <<<"$rollback"; then
@@ -282,7 +305,17 @@ JSON
   # With an edited package file and --force: replaced, the edited copy kept.
   info "./upgrade.sh --force $to over an edited docker-compose.yml"
   printf '# a local edit\n' >>docker-compose.yml
-  PATH="$path_nogit" ./upgrade.sh --force "$to"
+  PATH="$path_nogit" ./upgrade.sh --force "$to" | tee "$work/upgrade.out"
+  out="$(cat "$work/upgrade.out")"
+  if [ "$reminds" = false ]; then
+    info "upgrade.sh of $from has no reminder to update clab; not checked"
+  elif grep -qF "$reminder" <<<"$out" && grep -qF "brew upgrade clab" <<<"$out" &&
+    grep -qF "CLAB_VERSION=$to sh" <<<"$out" && grep -qF "clab version" <<<"$out" &&
+    [ "$(grep -n "$reminder" <<<"$out" | cut -d: -f1)" -gt "$(grep -n "upgraded $from -> $to" <<<"$out" | cut -d: -f1)" ]; then
+    pass "after 'upgraded $from -> $to' it reminds to update clab: brew upgrade clab, CLAB_VERSION=$to, clab version"
+  else
+    fail "the upgrade does not remind to update clab to $to after 'upgraded': $out"
+  fi
 
   if [ -n "$(find backups -maxdepth 1 -name "cadence-$from-*.sql.gz")" ]; then
     pass "a backup of $from was taken before the upgrade"
@@ -364,6 +397,7 @@ JSON
   else
     fail "./upgrade.sh with no version: $out"
   fi
+  no_reminder "'nothing to do'" "$out"
 
   info "./upgrade.sh $from must refuse"
   if out="$(PATH="$path_nogit" ./upgrade.sh "$from" 2>&1)"; then
@@ -373,6 +407,7 @@ JSON
   else
     fail "the downgrade refusal: $out"
   fi
+  no_reminder "the downgrade refusal" "$out"
 
   info "restore.sh of a $from backup must refuse on $to"
   local old_backup
