@@ -15,6 +15,11 @@
 #   CLAB_BIN              clab to use; default: install the CLI of VERSION
 #                         from the public tap (the path docs/admin.md describes)
 #   CHECK_KEEP=1          leave the stack (and its directory) after the check
+#   CADENCE_DRIVER        scripts (default) - back up and restore with
+#                         backup.sh and restore.sh; clab - with clab server
+#                         backup and restore of CLAB_BIN (clab server
+#                         appeared in v0.7.0), plus the checks of clab server
+#                         status. The same scenarios in both prove parity.
 #
 # The stack is torn down with its volumes at the end: give it a
 # COMPOSE_PROJECT_NAME and a CHECK_HTTP_PORT of its own, never those of a
@@ -26,6 +31,11 @@ cd "$(dirname "$0")/.."
 . ./lib.sh
 
 port="${CHECK_HTTP_PORT:-8080}"
+driver="${CADENCE_DRIVER:-scripts}"
+case "$driver" in
+scripts | clab) ;;
+*) die "CADENCE_DRIVER is '$driver', expected scripts or clab" ;;
+esac
 base="http://127.0.0.1:$port"
 version="$(tr -d '[:space:]' <VERSION)"
 failures=0
@@ -227,19 +237,58 @@ check "clab relate CHECK-1 blocks CHECK-3" env SDLC_PROJECT=CHECK "$clab" --host
 blocked="$(env SDLC_PROJECT=CHECK "$clab" --host "$base" transition CHECK-3 --to start 2>&1 || true)"
 check "the start of a blocked task is held by dependencies_closed" contains "$blocked" 'dependencies_closed'
 
+# --- clab server -------------------------------------------------------------------------------------
+if [ "$driver" = clab ]; then
+  info "clab server status"
+  status="$("$clab" server status)"
+  check "status names the installation directory" contains "$status" "$work/cadence"
+  check "status reports the stack $version (VERSION)" contains "$status" "$version (VERSION)"
+  clab_version="$("$clab" server status --json | jq -r '.clab // empty')"
+  check "status reports the version of clab (${clab_version:-none})" grep -qE "^clab: +${clab_version:-none}\$" <<<"$status"
+  check "status reports an installation from the package" contains "$status" "package"
+  check "status reports the services" contains "$status" "api"
+  mkdir -p "$work/cadence/docs/sub"
+  check "status from a subdirectory finds the installation" \
+    contains "$(cd "$work/cadence/docs/sub" && "$clab" server status)" "$work/cadence"
+  check "status with CADENCE_DIR from / finds the installation" \
+    contains "$(cd / && CADENCE_DIR="$work/cadence" "$clab" server status)" "$work/cadence"
+  rmdir "$work/cadence/docs/sub"
+  if out="$(cd "$work" && "$clab" server status 2>&1)"; then
+    fail "status outside an installation must fail"
+  else
+    check "status outside an installation fails and points at --dir" contains "$out" "--dir"
+  fi
+fi
+
+# backup_cmd / restore_cmd: the scripts, or clab server (CADENCE_DRIVER).
+backup_cmd() {
+  if [ "$driver" = clab ]; then "$clab" server backup; else ./backup.sh; fi
+}
+restore_cmd() {
+  if [ "$driver" = clab ]; then "$clab" server restore "$@"; else ./restore.sh "$@"; fi
+}
+
 # --- backup and restore ----------------------------------------------------------------------------
-info "backup.sh"
-./backup.sh
+info "backup ($driver)"
+backup_cmd
 dump="$(find backups -maxdepth 1 -name "cadence-$version-*.sql.gz" | sort | tail -n 1)"
-check "backup.sh writes cadence-$version-*.sql.gz" [ -n "$dump" ]
+check "backup writes cadence-$version-*.sql.gz" [ -n "$dump" ]
 check "the dump is larger than 1 KB" [ "$(wc -c <"${dump:-/dev/null}" | tr -d ' ')" -gt 1024 ]
 check "the blobs volume is archived next to it" [ -f "${dump%.sql.gz}.blobs.tar.gz" ]
 
 "$clab" --host "$base" project create AFTER --name "Created after the backup" --team check >/dev/null
 check "a project created after the backup exists" contains "$("$clab" --host "$base" project list --json)" '"AFTER"'
 
-info "restore.sh"
-./restore.sh --yes "$dump"
+info "restore ($driver)"
+if [ "$driver" = clab ]; then
+  if "$clab" server restore "$dump" </dev/null >/dev/null 2>&1; then
+    fail "clab server restore without a terminal and --yes must refuse"
+  else
+    pass "clab server restore without a terminal and --yes refuses"
+  fi
+  check "the refusal leaves the project created after the backup" contains "$("$clab" --host "$base" project list --json)" '"AFTER"'
+fi
+restore_cmd --yes "$dump"
 projects="$("$clab" --host "$base" project list --json)"
 check "after restore the project from before the backup is there" contains "$projects" '"CHECK"'
 check "after restore the project created after the backup is gone" lacks "$projects" '"AFTER"'
@@ -250,4 +299,4 @@ if [ "$failures" -gt 0 ]; then
   docker compose logs --tail 30 api caddy || true
   die "$failures check(s) failed"
 fi
-ok "all checks passed on $version"
+ok "all checks passed on $version ($driver)"

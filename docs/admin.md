@@ -545,6 +545,9 @@ Schedule it nightly for root (or a user in the `docker` group):
 0 3 * * * /opt/cadence/backup.sh >> /opt/cadence/backups/backup.log 2>&1
 ```
 
+With `clab` v0.7.0 or later the same backup is `clab server backup` — see
+[Managing the installation with clab server](#managing-the-installation-with-clab-server).
+
 Backups on the same machine protect against a bad upgrade or a mistaken
 deletion, not against losing the machine: copy `backups/` elsewhere —
 `rsync` or `rclone` to another host or bucket after the backup, or snapshots
@@ -555,6 +558,7 @@ Restore:
 
 ```bash
 ./restore.sh backups/cadence-v0.5.0-20261008-030000.sql.gz
+clab server restore backups/cadence-v0.6.1-20261008-030000.sql.gz   # the same with clab v0.7.0+
 ```
 
 It stops the API and the worker, drops and recreates the database from the
@@ -608,6 +612,7 @@ carries only releases, so the source archive always comes from GitHub.
 ```bash
 ./upgrade.sh            # the latest release
 ./upgrade.sh v0.6.0     # the release v0.6.0
+clab server upgrade     # the same with clab v0.7.0+ (see "Managing the installation with clab server")
 ```
 
 Each version is a release `vX.Y.Z` of this repository with the package of
@@ -716,6 +721,47 @@ Apply it with `docker compose up -d`. An installation from before v0.6.0 has
 no such file and its `COMPOSE_FILE` does not list one: create the file and
 append `:compose.override.yml` to `COMPOSE_FILE` in `.env`. `upgrade.sh`
 warns when an override file exists but `COMPOSE_FILE` does not list it.
+
+## Managing the installation with clab server
+
+`clab` v0.7.0 and later manages the installation on its machine with the
+same guarantees as the scripts — `.env` is never rewritten, a downgrade is
+refused, a backup comes before an upgrade, a failed upgrade prints the
+rollback — so the same steps go without bash and its tools:
+
+```bash
+clab server status                       # directory, versions of the stack and of clab, mode, services
+clab server backup                       # = ./backup.sh
+clab server restore backups/cadence-v0.7.0-20261008-030000.sql.gz   # = ./restore.sh (asks; --yes skips)
+clab server upgrade                      # = ./upgrade.sh: the latest release
+clab server upgrade --force v0.7.1       # = ./upgrade.sh --force v0.7.1
+```
+
+`clab server` needs no sign-in: it works with the files of the installation
+and Docker (`docker compose`) on this machine, not with the API. It finds
+the installation in `--dir DIR`, else in `CADENCE_DIR`, else in the current
+directory or the nearest one above it with `VERSION` and `package.sha256`.
+It reads the same `.env` and the same variables as the scripts
+(`BACKUP_DIR`, `KEEP_DAYS`, `CADENCE_READY_TIMEOUT`, `CADENCE_RELEASES_URL`,
+`COMPOSE_PROJECT_NAME`), writes the same files under the same names, and
+prints the same rollback, with `clab server restore --yes` in place of
+`./restore.sh --yes`. Output is in English, like the scripts.
+
+For cron give the full path of `clab` (cron's `PATH` is short) and the
+directory:
+
+```bash
+0 3 * * * /usr/local/bin/clab server backup --dir /opt/cadence >> /opt/cadence/backups/backup.log 2>&1
+```
+
+Versions: `clab server` manages installations from v0.6.0 on (older ones are
+git clones: upgrade them with their own `./upgrade.sh` first). The stack may
+not be newer than `clab`: an older `clab` refuses and prints the command
+that updates it (`brew upgrade clab`, or the install script of the tap with
+`CLAB_VERSION`). An upgrade to a release newer than `clab` goes on with a
+warning; update `clab` right after it. On Windows `clab server` refuses: run
+the Linux `clab` inside WSL2. Installing is still `get-cadence.sh` or
+`./install.sh`; the scripts keep working as they are.
 
 ## Troubleshooting
 

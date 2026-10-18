@@ -42,6 +42,12 @@
 #   CHECK_HTTP_PORT       host port of the stack, default 8080
 #   COMPOSE_PROJECT_NAME  compose project of the stack, default cadence-check
 #   CLAB_BIN              clab to use; default: the CLI of FROM from the public tap
+#   CADENCE_DRIVER        scripts (default) - upgrade and restore with
+#                         upgrade.sh and restore.sh of the installation; clab -
+#                         with clab server upgrade and restore of CLAB_BIN
+#                         (clab server appeared in v0.7.0; it manages
+#                         installations from v0.6.0 on, so FROM is v0.6.0 or
+#                         later). The same scenarios in both prove parity.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -68,6 +74,16 @@ main() {
     die "usage: ci/check-upgrade.sh vFROM vTO"
   fi
   version_lt "$from" "$to" || die "$from must be older than $to"
+  local driver="${CADENCE_DRIVER:-scripts}"
+  case "$driver" in
+  scripts) ;;
+  clab)
+    [ -n "${CLAB_BIN:-}" ] || die "CADENCE_DRIVER=clab needs CLAB_BIN: a clab with clab server"
+    version_lt "$from" "$FIRST_PACKAGE_VERSION" &&
+      die "CADENCE_DRIVER=clab: clab server manages installations from $FIRST_PACKAGE_VERSION on, $from is older"
+    ;;
+  *) die "CADENCE_DRIVER is '$driver', expected scripts or clab" ;;
+  esac
 
   local repo port base failures=0 clab admin_token
   repo="$(pwd)"
@@ -125,6 +141,20 @@ main() {
     clab="$work/bin/clab"
   fi
   export CLAB_CONFIG_DIR="$work/clab"
+  # upgrade_cmd / restore_cmd: the scripts of the installation, or clab
+  # server (CADENCE_DRIVER). The printed rollback of clab server calls
+  # "clab": it is on PATH as this clab.
+  mkdir -p "$work/clab-bin"
+  ln -sf "$clab" "$work/clab-bin/clab"
+  upgrade_cmd() {
+    if [ "$driver" = clab ]; then "$clab" server upgrade "$@"; else ./upgrade.sh "$@"; fi
+  }
+  restore_cmd() {
+    if [ "$driver" = clab ]; then "$clab" server restore "$@"; else ./restore.sh "$@"; fi
+  }
+  # restore_hint: how the refusals name the restore after the package files.
+  local up_name=./upgrade.sh restore_name=./restore.sh
+  if [ "$driver" = clab ]; then up_name="clab server upgrade" restore_name="clab server restore"; fi
   printf '%s\n' "$admin_token" | "$clab" auth login --host "$base" --with-token >/dev/null
 
   info "data on $from"
@@ -184,7 +214,7 @@ JSON
   local reminder="Update clab to $to on the machines of people and agents"
   local reminds=false
   # shellcheck disable=SC2016 # the text of the script, not an expansion
-  if grep -qF 'Update clab to $target_version' upgrade.sh; then reminds=true; fi
+  if [ "$driver" = clab ] || grep -qF 'Update clab to $target_version' upgrade.sh; then reminds=true; fi
   # no_reminder WHAT OUTPUT: a run that did not upgrade must not remind.
   no_reminder() {
     if grep -qF "Update clab" <<<"$2"; then
@@ -195,13 +225,13 @@ JSON
   }
 
   # --- a failed image pull -------------------------------------------------------------
-  info "./upgrade.sh $to with images that cannot be pulled"
+  info "$up_name $to with images that cannot be pulled"
   local before out
   before="$(files_state)"
-  if out="$(CADENCE_REGISTRY=127.0.0.1:9 ./upgrade.sh "$to" 2>&1)"; then
-    fail "upgrade.sh $to succeeded with an unreachable registry"
+  if out="$(CADENCE_REGISTRY=127.0.0.1:9 upgrade_cmd "$to" 2>&1)"; then
+    fail "$up_name $to succeeded with an unreachable registry"
   else
-    pass "upgrade.sh $to fails when the images cannot be pulled"
+    pass "$up_name $to fails when the images cannot be pulled"
   fi
   [ "$reminds" = false ] || no_reminder "the failed pull" "$out"
   if [ "$(files_state)" = "$before" ]; then
@@ -216,17 +246,17 @@ JSON
   fi
 
   # --- an edited package file ------------------------------------------------------------
-  info "./upgrade.sh $to over an edited docker-compose.yml"
+  info "$up_name $to over an edited docker-compose.yml"
   local backups_before
   cp docker-compose.yml "$work/compose.orig"
   printf '# a local edit\n' >>docker-compose.yml
   backups_before="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')"
-  if out="$(./upgrade.sh "$to" 2>&1)"; then
-    fail "upgrade.sh ran over an edited docker-compose.yml"
+  if out="$(upgrade_cmd "$to" 2>&1)"; then
+    fail "$up_name ran over an edited docker-compose.yml"
   elif grep -qF "docker-compose.yml" <<<"$out" && grep -qF "Nothing has changed" <<<"$out"; then
-    pass "upgrade.sh refuses with the list of edited files (docker-compose.yml) and --force as the way out"
+    pass "$up_name refuses with the list of edited files (docker-compose.yml) and --force as the way out"
   else
-    fail "upgrade.sh refused without naming docker-compose.yml: $out"
+    fail "$up_name refused without naming docker-compose.yml: $out"
   fi
   [ "$reminds" = false ] || no_reminder "the refusal over an edited file" "$out"
   if [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" = "$backups_before" ] &&
@@ -241,7 +271,7 @@ JSON
   mkdir -p "$work/nogit"
   printf '#!/bin/sh\necho "git $*" >>"%s/git-calls"\nexit 1\n' "$work" >"$work/nogit/git"
   chmod 755 "$work/nogit/git"
-  local path_nogit="$work/nogit:$PATH"
+  local path_nogit="$work/nogit:$work/clab-bin:$PATH"
   if [ "$clone" = true ]; then
     mv .git .git.off
     # The manifest an unpacked package has: the reference for edited files.
@@ -260,29 +290,29 @@ JSON
   kept_before="$(for f in $kept; do printf '%s %s\n' "$(sha256_of "$f")" "$f"; done)"
 
   # The edited file again, now found by package.sha256 rather than git.
-  info "./upgrade.sh $to over an edited docker-compose.yml, without git"
+  info "$up_name $to over an edited docker-compose.yml, without git"
   printf '# a local edit\n' >>docker-compose.yml
-  if out="$(PATH="$path_nogit" ./upgrade.sh "$to" 2>&1)"; then
-    fail "upgrade.sh ran over an edited docker-compose.yml without git"
+  if out="$(PATH="$path_nogit" upgrade_cmd "$to" 2>&1)"; then
+    fail "$up_name ran over an edited docker-compose.yml without git"
   elif grep -qF "docker-compose.yml" <<<"$out" && grep -qF -- "--force" <<<"$out"; then
     pass "package.sha256 finds the edit: refused with the file and --force"
   else
-    fail "upgrade.sh without git refused without naming docker-compose.yml: $out"
+    fail "$up_name without git refused without naming docker-compose.yml: $out"
   fi
   cp "$work/compose.orig" docker-compose.yml
 
   # --- not ready: the printed rollback -----------------------------------------------------
   # compose up waits for the API to be healthy before it starts the worker,
   # so only a zero timeout makes "not ready" certain.
-  info "./upgrade.sh $to that does not become ready in time"
-  if out="$(PATH="$path_nogit" CADENCE_READY_TIMEOUT=0 ./upgrade.sh "$to" 2>&1)"; then
-    fail "upgrade.sh did not report the readiness timeout"
+  info "$up_name $to that does not become ready in time"
+  if out="$(PATH="$path_nogit" CADENCE_READY_TIMEOUT=0 upgrade_cmd "$to" 2>&1)"; then
+    fail "$up_name did not report the readiness timeout"
   else
-    pass "upgrade.sh fails when $to is not ready in time"
+    pass "$up_name fails when $to is not ready in time"
   fi
   [ "$reminds" = false ] || no_reminder "the upgrade that did not become ready" "$out"
   local rollback
-  rollback="$(grep -E '^  (tar -xpzf |\./restore\.sh --yes )' <<<"$out" || true)"
+  rollback="$(grep -E '^  (tar -xpzf |\./restore\.sh --yes |clab server restore --yes )' <<<"$out" || true)"
   if [ "$(grep -c . <<<"$rollback")" = 2 ] && ! grep -qw git <<<"$rollback"; then
     pass "it prints the rollback: package files and the backup, no git"
   else
@@ -303,9 +333,9 @@ JSON
 
   # --- the upgrade ------------------------------------------------------------------------
   # With an edited package file and --force: replaced, the edited copy kept.
-  info "./upgrade.sh --force $to over an edited docker-compose.yml"
+  info "$up_name --force $to over an edited docker-compose.yml"
   printf '# a local edit\n' >>docker-compose.yml
-  PATH="$path_nogit" ./upgrade.sh --force "$to" | tee "$work/upgrade.out"
+  PATH="$path_nogit" upgrade_cmd --force "$to" | tee "$work/upgrade.out"
   out="$(cat "$work/upgrade.out")"
   if [ "$reminds" = false ]; then
     info "upgrade.sh of $from has no reminder to update clab; not checked"
@@ -391,31 +421,33 @@ JSON
   fi
 
   # --- after the upgrade ----------------------------------------------------------------------
-  info "./upgrade.sh on the latest release"
-  if out="$(PATH="$path_nogit" ./upgrade.sh 2>&1)" && grep -qF "nothing to do" <<<"$out"; then
-    pass "./upgrade.sh with no version on $to (the latest): nothing to do"
+  info "$up_name on the latest release"
+  if out="$(PATH="$path_nogit" upgrade_cmd 2>&1)" && grep -qF "nothing to do" <<<"$out"; then
+    pass "$up_name with no version on $to (the latest): nothing to do"
   else
-    fail "./upgrade.sh with no version: $out"
+    fail "$up_name with no version: $out"
   fi
   no_reminder "'nothing to do'" "$out"
 
-  info "./upgrade.sh $from must refuse"
-  if out="$(PATH="$path_nogit" ./upgrade.sh "$from" 2>&1)"; then
-    fail "upgrade.sh $from after $to did not refuse the downgrade"
-  elif grep -qF "tar -xpzf backups/package-$from-" <<<"$out" && ! grep -qw git <<<"$out"; then
-    pass "upgrade.sh refuses to go down to $from, the hint puts its package files back without git"
+  info "$up_name $from must refuse"
+  if out="$(PATH="$path_nogit" upgrade_cmd "$from" 2>&1)"; then
+    fail "$up_name $from after $to did not refuse the downgrade"
+  elif grep -qF "tar -xpzf backups/package-$from-" <<<"$out" && grep -qF "&& $restore_name backups/cadence-$from-" <<<"$out" &&
+    ! grep -qw git <<<"$out"; then
+    pass "$up_name refuses to go down to $from, the hint puts its package files back without git"
   else
     fail "the downgrade refusal: $out"
   fi
   no_reminder "the downgrade refusal" "$out"
 
-  info "restore.sh of a $from backup must refuse on $to"
+  info "$restore_name of a $from backup must refuse on $to"
   local old_backup
   old_backup="$(find backups -maxdepth 1 -name "cadence-$from-*.sql.gz" | sort | tail -n 1)"
-  if out="$(PATH="$path_nogit" ./restore.sh --yes "$old_backup" 2>&1)"; then
-    fail "restore.sh restored a $from backup on $to"
-  elif grep -qF "tar -xpzf backups/package-$from-" <<<"$out" && ! grep -q 'git checkout' <<<"$out"; then
-    pass "restore.sh refuses, the hint puts the package files of $from back without git"
+  if out="$(PATH="$path_nogit" restore_cmd --yes "$old_backup" 2>&1)"; then
+    fail "$restore_name restored a $from backup on $to"
+  elif grep -qF "tar -xpzf backups/package-$from-" <<<"$out" && grep -qF "&& $restore_name $old_backup" <<<"$out" &&
+    ! grep -q 'git checkout' <<<"$out"; then
+    pass "$restore_name refuses, the hint puts the package files of $from back without git"
   else
     fail "the restore refusal: $out"
   fi
@@ -431,14 +463,14 @@ JSON
     mkdir "$work/kept"
     mv backups/package-"$from"-*.tar.gz "$work/kept/"
     info "./upgrade.sh $from and restore.sh without backups/package-$from-* and without git"
-    if out="$(PATH="$path_nogit" ./upgrade.sh "$from" 2>&1)"; then
+    if out="$(PATH="$path_nogit" upgrade_cmd "$from" 2>&1)"; then
       fail "upgrade.sh $from after $to did not refuse the downgrade"
     elif grep -qF -- "$archive && ./restore.sh" <<<"$out" && ! grep -qF "releases/download/$from" <<<"$out"; then
       pass "upgrade.sh refuses to go down to $from, the hint takes the source archive of the tag"
     else
       fail "the downgrade refusal without a package copy and git: $out"
     fi
-    if out="$(PATH="$path_nogit" ./restore.sh --yes "$old_backup" 2>&1)"; then
+    if out="$(PATH="$path_nogit" restore_cmd --yes "$old_backup" 2>&1)"; then
       fail "restore.sh restored a $from backup on $to"
     elif grep -qF -- "$archive && ./restore.sh $old_backup" <<<"$out" && ! grep -qF "releases/download/$from" <<<"$out"; then
       pass "restore.sh refuses, the hint takes the source archive of the tag"
