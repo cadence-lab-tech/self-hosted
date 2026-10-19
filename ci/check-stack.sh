@@ -10,8 +10,12 @@
 #
 #   ci/check-stack.sh
 #
-#   CHECK_HTTP_PORT       host port of the stack, default 8080
-#   COMPOSE_PROJECT_NAME  compose project of the stack, default cadence-check
+#   CHECK_HTTP_PORT       host port of the stack, default 8080; with the
+#                         scripts driver a second installation takes the
+#                         next port
+#   COMPOSE_PROJECT_NAME  name of the installation (its compose project),
+#                         default cadence-check, never cadence; the second
+#                         one is NAME-2
 #   CLAB_BIN              clab to use; default: install the CLI of VERSION
 #                         from the public tap (the path docs/admin.md describes)
 #   CHECK_KEEP=1          leave the stack (and its directory) after the check
@@ -21,9 +25,16 @@
 #                         appeared in v0.7.0), plus the checks of clab server
 #                         status. The same scenarios in both prove parity.
 #
-# The stack is torn down with its volumes at the end: give it a
-# COMPOSE_PROJECT_NAME and a CHECK_HTTP_PORT of its own, never those of a
-# running instance.
+# The installation name (CLAB-164): install.sh keeps it in .env, so after the
+# install every command runs without COMPOSE_PROJECT_NAME, as from cron or a
+# new terminal; a second installation under the same name is refused; a
+# COMPOSE_PROJECT_NAME of another installation makes backup, restore and
+# upgrade refuse; with the scripts driver a second installation runs next to
+# the first one and each sees only itself.
+#
+# The stacks are torn down with their volumes at the end: give them a
+# COMPOSE_PROJECT_NAME and a CHECK_HTTP_PORT (and the port after it) of their
+# own, never those of a running instance.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -40,6 +51,14 @@ base="http://127.0.0.1:$port"
 version="$(tr -d '[:space:]' <VERSION)"
 failures=0
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-cadence-check}"
+name="$COMPOSE_PROJECT_NAME"
+second_name="$name-2"
+second_port=$((port + 1))
+# The stacks are torn down with their volumes: never the default name of a
+# real installation.
+[ "$name" != cadence ] || die "COMPOSE_PROJECT_NAME=cadence is the name of a real installation; the check tears its stacks down - give it a name of its own"
+valid_name "$name" || die "COMPOSE_PROJECT_NAME '$name' is not a valid installation name"
+repo="$(pwd)"
 work="$(mktemp -d)"
 
 pass() { printf '  ✓ %s\n' "$*"; }
@@ -59,12 +78,28 @@ lacks() { ! grep -qF -- "$2" <<<"$1"; }
 html() { curl -sf "$base/" | grep -qi '<html'; }
 client_error() { [ "$1" -ge 400 ] && [ "$1" -lt 500 ]; }
 
+# fresh DIR CMD...: CMD in DIR as from a new terminal or cron - without
+# COMPOSE_PROJECT_NAME and the rest of what this check and load_env exported;
+# CADENCE_VERSION only for a direct docker compose.
+fresh() {
+  local d="$1"
+  shift
+  (cd "$d" && env -i PATH="$PATH" HOME="$HOME" ${DOCKER_HOST:+DOCKER_HOST="$DOCKER_HOST"} \
+    ${DOCKER_CONTEXT:+DOCKER_CONTEXT="$DOCKER_CONTEXT"} CADENCE_VERSION="$version" "$@")
+}
+
 cleanup() {
-  [ "${CHECK_KEEP:-}" != 1 ] || { info "kept: $work/cadence"; return; }
-  if [ -f "$work/cadence/.env" ]; then
-    info "tearing the stack down"
-    (cd "$work/cadence" && CADENCE_VERSION="$version" docker compose down -v --remove-orphans >/dev/null 2>&1) || true
-  fi
+  [ "${CHECK_KEEP:-}" != 1 ] || { info "kept: $work/cadence${second_up:+ and $work/second}"; return; }
+  # By the names this check gave, never by what a .env says.
+  local d n
+  for d in cadence:"$name" second:"$second_name"; do
+    n="${d#*:}"
+    d="$work/${d%%:*}"
+    if [ -f "$d/.env" ]; then
+      info "tearing $n down"
+      fresh "$d" docker compose -p "$n" down -v --remove-orphans >/dev/null 2>&1 || true
+    fi
+  done
   # Files of the containers (backups of the blobs volume) may belong to
   # another uid; the stack is gone, so what is left is ours to remove.
   rm -rf "$work" "${clab_dir:-}" 2>/dev/null || true
@@ -91,7 +126,7 @@ chmod 755 "$work/nogit/git"
 
 info "get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:$port --yes"
 (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" SDLC_ADMIN_TOKEN="$admin_token" \
-  sh -s -- --mode proxy --http-addr "127.0.0.1:$port" --yes <"$OLDPWD/get-cadence.sh")
+  sh -s -- --mode proxy --http-addr "127.0.0.1:$port" --yes <"$repo/get-cadence.sh")
 check "the stack is installed from the package into $work/cadence" [ -f "$work/cadence/.env" ]
 check "the installation is not a git clone" [ ! -e "$work/cadence/.git" ]
 check "git was never called" [ ! -s "$work/git-calls" ]
@@ -117,6 +152,32 @@ fi
 check "a second install.sh leaves .env untouched" [ "$before" = "$(sha256sum .env 2>/dev/null || shasum -a 256 .env)" ]
 
 load_env
+
+# --- installation name -------------------------------------------------------------
+info "installation name"
+check ".env keeps the installation name: COMPOSE_PROJECT_NAME=$name" grep -qxF "COMPOSE_PROJECT_NAME=$name" .env
+# From here on nothing carries the name but .env, as in cron or a new
+# terminal: before v0.7.1 this export alone kept the commands on this stack.
+unset COMPOSE_PROJECT_NAME
+# projects_in DIR: the compose projects docker compose sees from DIR.
+projects_in() { fresh "$1" docker compose ps -a --format '{{.Project}}' | sort -u | tr '\n' ' '; }
+check "docker compose here without the variable sees only $name" [ "$(projects_in "$work/cadence")" = "$name " ]
+# started DIR: the containers of DIR with their start times.
+started() {
+  fresh "$1" docker compose ps -a -q | xargs docker inspect -f '{{.Name}} {{.State.StartedAt}}' | sort
+}
+started_before="$(started "$work/cadence")"
+info "get-cadence.sh --dir same-name with COMPOSE_PROJECT_NAME=$name: the name is taken"
+if out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" COMPOSE_PROJECT_NAME="$name" \
+  sh -s -- --dir same-name --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" 2>&1)"; then
+  fail "a second installation under the name $name must be refused"
+else
+  check "a second installation under the name $name is refused, naming it and --name" \
+    contains "$out" "the installation name '$name' is taken on this machine: the installation in $work/cadence uses it"
+  check "...and the refusal suggests --name" contains "$out" "--name $name-2"
+fi
+check "the refused installation wrote no .env" [ ! -e "$work/same-name/.env" ]
+check "the first installation was not touched (same containers, same start times)" [ "$(started "$work/cadence")" = "$started_before" ]
 
 # --- local compose changes -------------------------------------------------------
 info "compose.override.yml"
@@ -247,6 +308,16 @@ if [ "$driver" = clab ]; then
   check "status reports the version of clab (${clab_version:-none})" grep -qE "^clab: +${clab_version:-none}\$" <<<"$status"
   check "status reports an installation from the package" contains "$status" "package"
   check "status reports the services" contains "$status" "api"
+  check "status names the installation: $name (.env)" grep -qE "^Name: +$name \(\.env\)\$" <<<"$status"
+  check "status --json reports .name $name from .env" \
+    [ "$("$clab" server status --json | jq -r '"\(.name) \(.name_from)"')" = "$name .env" ]
+  if out="$(COMPOSE_PROJECT_NAME=other "$clab" server status 2>&1)"; then
+    check "status with COMPOSE_PROJECT_NAME=other warns, naming both" \
+      contains "$out" "! COMPOSE_PROJECT_NAME is 'other' in the environment, but this installation is '$name'"
+    check "...and still lists the services of $name" contains "$out" "api"
+  else
+    fail "status with COMPOSE_PROJECT_NAME=other must not fail: $out"
+  fi
   mkdir -p "$work/cadence/docs/sub"
   check "status from a subdirectory finds the installation" \
     contains "$(cd "$work/cadence/docs/sub" && "$clab" server status)" "$work/cadence"
@@ -294,6 +365,58 @@ projects="$("$clab" --host "$base" project list --json)"
 check "after restore the project from before the backup is there" contains "$projects" '"CHECK"'
 check "after restore the project created after the backup is gone" lacks "$projects" '"AFTER"'
 check "/readyz answers 200 after restore" [ "$(http_code "$base/readyz")" = 200 ]
+
+# --- another installation name in the environment ------------------------------------
+# backup, restore and upgrade of this installation with COMPOSE_PROJECT_NAME
+# of another one refuse before they touch Docker: no dump, no restart.
+info "COMPOSE_PROJECT_NAME=other ($driver)"
+upgrade_cmd() {
+  if [ "$driver" = clab ]; then "$clab" server upgrade "$@"; else ./upgrade.sh "$@"; fi
+}
+started_before="$(started "$work/cadence")"
+dumps_before="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort)"
+for cmd in "backup_cmd" "restore_cmd --yes $dump" "upgrade_cmd $version"; do
+  what="${cmd%%_cmd*}"
+  # shellcheck disable=SC2086 # the command and its arguments
+  if out="$(COMPOSE_PROJECT_NAME=other $cmd 2>&1)"; then
+    fail "$what with COMPOSE_PROJECT_NAME=other must refuse"
+  elif contains "$out" "COMPOSE_PROJECT_NAME is 'other' in the environment, but the installation in $work/cadence is '$name'" &&
+    contains "$out" "unset COMPOSE_PROJECT_NAME"; then
+    pass "$what with COMPOSE_PROJECT_NAME=other refuses, naming both and unset"
+  else
+    fail "$what with COMPOSE_PROJECT_NAME=other refused without both names: $out"
+  fi
+done
+check "the refusals took no backup" [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort)" = "$dumps_before" ]
+check "the refusals restarted nothing" [ "$(started "$work/cadence")" = "$started_before" ]
+COMPOSE_PROJECT_NAME="" backup_cmd >/dev/null
+check "an empty COMPOSE_PROJECT_NAME is no variable: backup works" \
+  [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l)" -gt "$(grep -c . <<<"$dumps_before")" ]
+
+# --- two installations on one machine ------------------------------------------------
+if [ "$driver" = scripts ]; then
+  info "a second installation: --name $second_name on port $second_port"
+  (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
+    sh -s -- --dir second --name "$second_name" --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" >/dev/null)
+  second_up=1
+  check "the second installation keeps its name: COMPOSE_PROJECT_NAME=$second_name" \
+    grep -qxF "COMPOSE_PROJECT_NAME=$second_name" "$work/second/.env"
+  check "the second installation answers on $second_port" [ "$(http_code "http://127.0.0.1:$second_port/readyz")" = 200 ]
+  check "docker compose in the first installation sees only $name" [ "$(projects_in "$work/cadence")" = "$name " ]
+  check "docker compose in the second installation sees only $second_name" [ "$(projects_in "$work/second")" = "$second_name " ]
+  first_dumps="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')"
+  fresh "$work/second" ./backup.sh >/dev/null
+  check "./backup.sh of the second installation writes into its own backups/" \
+    [ "$(find "$work/second/backups" -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" = 1 ]
+  check "...and nothing into the backups/ of the first" \
+    [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" = "$first_dumps" ]
+  fresh "$work/cadence" ./backup.sh >/dev/null
+  check "./backup.sh of the first installation writes into its own backups/" \
+    [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" = "$((first_dumps + 1))" ]
+  check "...and nothing into the backups/ of the second" \
+    [ "$(find "$work/second/backups" -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" = 1 ]
+  check "the first installation still answers on $port" [ "$(http_code "$base/readyz")" = 200 ]
+fi
 
 if [ "$failures" -gt 0 ]; then
   docker compose ps || true

@@ -52,6 +52,14 @@ installer passes its flags on to `install.sh` (`--version vX.Y.Z` and
 `--dir DIR` are its own), and through a pipe it has no terminal either:
 `get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:8080` asks nothing.
 
+One installation holds any number of teams and projects. A second
+installation on the same machine (say, staging next to production) needs its
+own directory, port and installation name — the name of the installation on
+the machine, its Docker Compose project, not a project inside Cadence Lab:
+`get-cadence.sh | sh -s -- --dir cadence-stage --name cadence-stage --mode proxy --http-addr 127.0.0.1:8081`.
+The name is kept in `.env`; see
+[docs/admin.md](docs/admin.md#several-installations-on-one-machine).
+
 The checksum protects against a broken or altered download, not against a
 release replaced at its source; signed releases are planned.
 

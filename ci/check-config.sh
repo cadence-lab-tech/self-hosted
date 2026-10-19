@@ -302,11 +302,66 @@ check "every role of $bundle stands on a status" [ "$(jq -r '[.workflows[].statu
 
 info ".env.example"
 env_example="$(cat .env.example)"
-for kv in SDLC_TENANCY=single SDLC_PROJECT_CREATION=teams SDLC_AUTH_MODE=token SDLC_EMBEDDINGS_PROVIDER=none \
+for kv in COMPOSE_PROJECT_NAME=cadence SDLC_TENANCY=single SDLC_PROJECT_CREATION=teams SDLC_AUTH_MODE=token SDLC_EMBEDDINGS_PROVIDER=none \
   SDLC_SEED= SDLC_EMBEDDINGS_MODEL= POSTGRES_PASSWORD= SDLC_ADMIN_TOKEN=; do
   check ".env.example sets $kv" grep -qxF "$kv" .env.example
 done
 check ".env.example sets no image version" lacks "$(grep -v '^#' <<<"$env_example")" "CADENCE_VERSION="
+
+info "installation name"
+# The name of an installation is COMPOSE_PROJECT_NAME of its .env, and
+# compose takes it from there; without the line (installations before
+# v0.7.1) it is "cadence" from docker-compose.yml. The caller's variable is
+# kept out: it is what the scripts refuse, not what compose should see here.
+name_dir="$dist/name"
+mkdir -p "$name_dir"
+cp docker-compose.yml compose.proxy.yml Caddyfile VERSION "$name_dir/"
+compose_name() {
+  (cd "$name_dir" && env -u COMPOSE_PROJECT_NAME CADENCE_VERSION="$version" docker compose config --format json | jq -r .name)
+}
+printf 'COMPOSE_PROJECT_NAME=x\nPOSTGRES_PASSWORD=x\nCOMPOSE_FILE=docker-compose.yml:compose.proxy.yml\n' >"$name_dir/.env"
+check "compose takes the name from .env (COMPOSE_PROJECT_NAME=x)" [ "$(compose_name)" = x ]
+printf 'POSTGRES_PASSWORD=x\nCOMPOSE_FILE=docker-compose.yml:compose.proxy.yml\n' >"$name_dir/.env"
+check "without the line in .env the name is cadence" [ "$(compose_name)" = cadence ]
+
+# load_env of the scripts: the name from .env or the default, exported for
+# compose; a COMPOSE_PROJECT_NAME of the caller that names another
+# installation is refused with both names and the way out.
+#
+# name_of LINE CALLER: runs load_env in $name_dir with .env holding LINE (or
+# no name line when LINE is empty) and COMPOSE_PROJECT_NAME=CALLER ("-" -
+# unset); prints the exported name or the refusal.
+name_of() {
+  local line="$1" caller="$2" lib
+  lib="$(pwd)/lib.sh"
+  { [ -z "$line" ] || printf '%s\n' "$line"; printf 'POSTGRES_PASSWORD=x\n'; } >"$name_dir/.env"
+  local caller_env=(-u COMPOSE_PROJECT_NAME)
+  [ "$caller" = - ] || caller_env=(COMPOSE_PROJECT_NAME="$caller")
+  # shellcheck disable=SC2016 # expanded by the inner bash
+  (cd "$name_dir" && env "${caller_env[@]}" bash -c '. "$1" && load_env && printf "%s\n" "$COMPOSE_PROJECT_NAME"' _ "$lib" 2>&1)
+}
+check "load_env: no line, no variable - cadence" [ "$(name_of "" -)" = cadence ]
+check "load_env: COMPOSE_PROJECT_NAME=stage in .env - stage" [ "$(name_of COMPOSE_PROJECT_NAME=stage -)" = stage ]
+check "load_env: the same name in the variable - stage" [ "$(name_of COMPOSE_PROJECT_NAME=stage stage)" = stage ]
+check "load_env: an empty variable is no variable - stage" [ "$(name_of COMPOSE_PROJECT_NAME=stage "")" = stage ]
+check "load_env: an empty line in .env is the default - cadence" [ "$(name_of COMPOSE_PROJECT_NAME= -)" = cadence ]
+if out="$(name_of COMPOSE_PROJECT_NAME=stage other)"; then
+  fail "load_env: another name in the variable must be refused: $out"
+else
+  check "load_env: another name in the variable is refused, naming both" contains "$out" "COMPOSE_PROJECT_NAME is 'other' in the environment, but the installation in $name_dir is 'stage'"
+  check "...and pointing at unset COMPOSE_PROJECT_NAME" contains "$out" "unset COMPOSE_PROJECT_NAME"
+fi
+if out="$(name_of "" other)"; then
+  fail "load_env: a variable on an installation without the line must be refused: $out"
+else
+  check "load_env: a variable on an installation without the line points at the line to add" \
+    contains "$out" "echo COMPOSE_PROJECT_NAME=other >> $name_dir/.env"
+fi
+if out="$(name_of COMPOSE_PROJECT_NAME=Bad_Name -)"; then
+  fail "load_env: an invalid name in .env must be refused: $out"
+else
+  check "load_env: an invalid name in .env is refused" contains "$out" "COMPOSE_PROJECT_NAME in .env is 'Bad_Name', which is not a valid installation name"
+fi
 
 info "compose"
 check "compose refuses to run without CADENCE_VERSION" sh -c '! env -u CADENCE_VERSION docker compose config -q'

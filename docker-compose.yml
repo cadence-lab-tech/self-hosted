@@ -15,6 +15,12 @@
 # HTTP behind your proxy): COMPOSE_FILE in .env adds compose.tls.yml or
 # compose.proxy.yml on top of this file.
 
+# The name of the installation on this machine (the prefix of its containers,
+# volumes and network) is COMPOSE_PROJECT_NAME in .env: install.sh writes it
+# there, and compose prefers it to the line below. The line is the default
+# for installations made before v0.7.1, whose .env has no name: they stay
+# "cadence". Keep it - without it compose would take the name of the
+# directory, and such an installation would lose sight of its volumes.
 name: cadence
 
 # The images are built for linux/amd64 and linux/arm64; Docker picks the

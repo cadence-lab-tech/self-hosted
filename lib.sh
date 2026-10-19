@@ -49,12 +49,89 @@ version_lt() {
 # compose does.
 load_env() {
   [ -f .env ] || die "no .env in $(pwd): run ./install.sh first"
+  # The installation name comes from .env alone: the variable of the caller
+  # is only compared with it (load_name).
+  local caller_name="${COMPOSE_PROJECT_NAME:-}"
+  unset COMPOSE_PROJECT_NAME
   set -a
   # shellcheck disable=SC1091
   . ./.env
   set +a
   # The version always comes from VERSION, even if .env sets it.
   load_version
+  load_name "$caller_name"
+}
+
+# --- installation name -------------------------------------------------------------
+# The name of the installation on this machine is its Docker Compose project:
+# the prefix of its containers, volumes and network. It has nothing to do with
+# the projects inside Cadence Lab. install.sh writes it to .env as
+# COMPOSE_PROJECT_NAME; an installation made before v0.7.1 has no such line
+# and is "cadence", the name in docker-compose.yml. clab server follows the
+# same rule (cmd/clab/server_name.go of the backend) with the same messages.
+CADENCE_DEFAULT_NAME=cadence
+
+# valid_name NAME: the rule of compose for a project name.
+valid_name() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
+}
+
+# name_rule prints the rule valid_name checks, for the refusals.
+name_rule() {
+  say "lowercase letters, digits, '-' and '_', starting with a letter or a digit"
+}
+
+# load_name CALLER: after .env is sourced, works out the name of this
+# installation (COMPOSE_PROJECT_NAME of .env, else the default) and exports
+# it, so that every docker compose of the script works with this installation
+# only. CALLER - COMPOSE_PROJECT_NAME of the environment the script was run
+# with - must be empty or the same name: another one means another
+# installation, and the script refuses before it touches Docker.
+load_name() {
+  local caller="$1" name="${COMPOSE_PROJECT_NAME:-}" from=".env"
+  if [ -z "$name" ]; then
+    name="$CADENCE_DEFAULT_NAME"
+    from="default"
+  fi
+  valid_name "$name" ||
+    die "COMPOSE_PROJECT_NAME in .env is '$name', which is not a valid installation name: $(name_rule)"
+  if [ -n "$caller" ] && [ "$caller" != "$name" ]; then
+    die "$(name_mismatch "$caller" "$name" "$from" "$(pwd)")"
+  fi
+  export COMPOSE_PROJECT_NAME="$name"
+}
+
+# name_mismatch CALLER NAME FROM DIR prints the refusal for COMPOSE_PROJECT_NAME
+# of the environment that names another installation than the one in DIR.
+name_mismatch() {
+  local caller="$1" name="$2" from="$3" dir="$4"
+  if [ "$from" = .env ]; then
+    printf '%s\n' "COMPOSE_PROJECT_NAME is '$caller' in the environment, but the installation in $dir is '$name' (COMPOSE_PROJECT_NAME in its .env).
+  Nothing was done: '$caller' is another installation. Run the command without the variable:
+    unset COMPOSE_PROJECT_NAME"
+  else
+    printf '%s\n' "COMPOSE_PROJECT_NAME is '$caller' in the environment, but the installation in $dir is '$name' (its .env has no COMPOSE_PROJECT_NAME: the default).
+  Nothing was done. If '$caller' is another installation, run the command without the variable:
+    unset COMPOSE_PROJECT_NAME
+  If this installation was installed as '$caller' (before v0.7.1 the name was not kept in .env), add the name to its .env once:
+    echo COMPOSE_PROJECT_NAME=$caller >> $dir/.env"
+  fi
+}
+
+# name_in_use NAME prints where Docker on this machine already has the
+# compose project NAME: the directory of an installation (from the labels of
+# its containers) or "volumes" when only its volumes are left. Prints nothing
+# when the name is free; fails when Docker cannot be asked.
+name_in_use() {
+  local name="$1" containers volumes dir
+  containers="$(docker ps -a -q --filter "label=com.docker.compose.project=$name")" || return 1
+  volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=$name")" || return 1
+  if [ -n "$containers" ]; then
+    dir="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$(head -n 1 <<<"$containers")" 2>/dev/null || true)"
+    say "${dir:-containers}"
+  elif [ -n "$volumes" ]; then
+    say volumes
+  fi
 }
 
 # container_of SERVICE prints the container ID of a compose service, running

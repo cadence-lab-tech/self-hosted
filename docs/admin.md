@@ -16,6 +16,7 @@ export CADENCE_VERSION=$(cat VERSION)
 public address of your proxy in the `proxy` mode.
 
 - [Install](#install)
+- [Several installations on one machine](#several-installations-on-one-machine)
 - [Behind your reverse proxy](#behind-your-reverse-proxy)
 - [First sign-in with the administrator token](#first-sign-in-with-the-administrator-token)
 - [Teams, projects and invites](#teams-projects-and-invites)
@@ -86,6 +87,7 @@ Flags and environment variables for an unattended run:
 | `--email` | `ACME_EMAIL` | `tls` mode: Let's Encrypt notices |
 | `--http-addr` | `CADENCE_HTTP_ADDR` | `proxy` mode: where Caddy listens, default `127.0.0.1:8080` |
 | `--team`, `--team-name` | `SDLC_BOOTSTRAP_TEAM`, `SDLC_BOOTSTRAP_TEAM_NAME` | optional first team |
+| `--name` | `COMPOSE_PROJECT_NAME` | installation name on this machine, default `cadence`; see below |
 | `--yes` | | ask nothing (also when there is no terminal) |
 | | `SDLC_ADMIN_TOKEN` | use this administrator token instead of generating one |
 
@@ -94,6 +96,64 @@ a new database password would no longer open the existing database volume.
 Further changes go into `.env` by hand; apply them with
 `docker compose up -d`, which recreates only the containers whose settings
 changed.
+
+**Installation name.** `--name` names this installation *on the machine*: it
+is the Docker Compose project of the installation — the prefix of its
+containers, volumes and network (`cadence-postgres-1`, `cadence_pgdata`).
+It is not related to projects inside Cadence Lab: teams, projects and tasks
+are created in the UI, as many as you need, inside one installation. Most
+machines run one installation and keep the default `cadence`. `install.sh`
+writes the name into `.env` as `COMPOSE_PROJECT_NAME`, and from there
+`docker compose`, the scripts and `clab server` take it. It refuses a name
+another installation on this machine already uses — see the next section.
+
+## Several installations on one machine
+
+A machine can run more than one installation, for example a staging one next
+to production. Each one needs its own directory, its own port (or domain)
+and its own **installation name** — again, the name of the installation on
+the machine (its Docker Compose project), not a project inside Cadence Lab:
+one installation already holds any number of teams and projects, so a second
+installation is for a separate instance, not for another project.
+
+```bash
+curl -fsSL https://github.com/cadence-lab-tech/self-hosted/releases/latest/download/get-cadence.sh | sh -s -- --dir cadence-stage --name cadence-stage --mode proxy --http-addr 127.0.0.1:8081
+```
+
+- The name lives in `.env` as `COMPOSE_PROJECT_NAME` (lowercase letters,
+  digits, `-` and `_`). `docker compose` in the directory of the
+  installation, `./backup.sh` from cron, `./upgrade.sh`, `./restore.sh` and
+  `clab server --dir <installation>` all work with that installation and no
+  other — nothing needs to be exported.
+- `install.sh` takes the name from `--name`, else from `COMPOSE_PROJECT_NAME`
+  in the environment, else `cadence`; `--name` and a different variable at
+  once are refused. A name already in use on the machine — Docker has
+  containers or volumes of that compose project — is refused before anything
+  is written, with the directory of the installation that uses it: two
+  installations under one name would share containers and volumes, and the
+  new database password would break the existing one.
+- `upgrade.sh`, `backup.sh`, `restore.sh` and `clab server backup`,
+  `restore` and `upgrade` refuse when `COMPOSE_PROJECT_NAME` in the
+  environment names another installation than the one in `.env`: the
+  variable left in a terminal of the staging installation must not restore
+  production. Run them without it (`unset COMPOSE_PROJECT_NAME`).
+  `clab server status` only warns and reports the name in its `Name:` line.
+- Installations made before v0.7.1 have no name in `.env` and remain
+  `cadence` — the default in `docker-compose.yml`; upgrades do not edit
+  `.env` and nothing changes for them. If such an installation was started
+  with `COMPOSE_PROJECT_NAME` exported, the scripts refuse with the one step
+  that fixes it — add the name to its `.env` once:
+
+  ```bash
+  echo COMPOSE_PROJECT_NAME=cadence-stage >> /opt/cadence-stage/.env
+  ```
+
+- Never change the name of a live installation: its volumes carry it, and
+  under a new name compose would start with empty ones.
+- A `docker compose` command typed by hand puts a `COMPOSE_PROJECT_NAME` of
+  the environment above `.env`, and compose cannot refuse it: check
+  `echo $COMPOSE_PROJECT_NAME` is empty before running compose commands in an
+  installation directory.
 
 ## Behind your reverse proxy
 
@@ -730,7 +790,7 @@ refused, a backup comes before an upgrade, a failed upgrade prints the
 rollback — so the same steps go without bash and its tools:
 
 ```bash
-clab server status                       # directory, versions of the stack and of clab, mode, services
+clab server status                       # directory, installation name, versions of the stack and of clab, mode, services
 clab server backup                       # = ./backup.sh
 clab server restore backups/cadence-v0.7.0-20261008-030000.sql.gz   # = ./restore.sh (asks; --yes skips)
 clab server upgrade                      # = ./upgrade.sh: the latest release
@@ -742,8 +802,11 @@ and Docker (`docker compose`) on this machine, not with the API. It finds
 the installation in `--dir DIR`, else in `CADENCE_DIR`, else in the current
 directory or the nearest one above it with `VERSION` and `package.sha256`.
 It reads the same `.env` and the same variables as the scripts
-(`BACKUP_DIR`, `KEEP_DAYS`, `CADENCE_READY_TIMEOUT`, `CADENCE_RELEASES_URL`,
-`COMPOSE_PROJECT_NAME`), writes the same files under the same names, and
+(`BACKUP_DIR`, `KEEP_DAYS`, `CADENCE_READY_TIMEOUT`, `CADENCE_RELEASES_URL`),
+takes the installation name from `COMPOSE_PROJECT_NAME` in `.env` and refuses
+another one in the environment, like the scripts (see
+[Several installations on one machine](#several-installations-on-one-machine)),
+writes the same files under the same names, and
 prints the same rollback, with `clab server restore --yes` in place of
 `./restore.sh --yes`. Output is in English, like the scripts.
 

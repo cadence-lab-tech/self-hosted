@@ -42,8 +42,10 @@ case "$file" in
 esac
 gzip -t "$file" 2>/dev/null || die "$file is not a valid gzip archive"
 
-require_docker
+# .env first: a COMPOSE_PROJECT_NAME of another installation stops here,
+# before Docker is asked anything.
 load_env
+require_docker
 check_mode
 
 # The version is part of the name backup.sh gives the file.

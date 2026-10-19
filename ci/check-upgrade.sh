@@ -32,6 +32,10 @@
 #   - ./upgrade.sh with no version on the latest release: nothing to do
 #   - going down is refused, and restore.sh of a FROM backup refuses, each
 #     with a hint that needs no git
+#   - an installation from before v0.7.1 has no name in .env; started with
+#     COMPOSE_PROJECT_NAME, as this check starts it, it is refused by the
+#     scripts (after the upgrade) and by clab server with the one step that
+#     fixes it - the line in .env - and runs without the variable after it
 #   - for a clone, as it really is - without backups/package-FROM-*, since
 #     its first upgrade ran the old script with git: both refusals point at
 #     the source archive of the tag without git, and at git checkout of the
@@ -90,6 +94,8 @@ main() {
   port="${CHECK_HTTP_PORT:-8080}"
   base="http://127.0.0.1:$port"
   export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-cadence-check}"
+  [ "$COMPOSE_PROJECT_NAME" != cadence ] ||
+    die "COMPOSE_PROJECT_NAME=cadence is the name of a real installation; the check tears its stack down - give it a name of its own"
   work="$(mktemp -d)"
   dir="$work/cadence"
 
@@ -156,6 +162,37 @@ main() {
   local up_name=./upgrade.sh restore_name=./restore.sh
   if [ "$driver" = clab ]; then up_name="clab server upgrade" restore_name="clab server restore"; fi
   printf '%s\n' "$admin_token" | "$clab" auth login --host "$base" --with-token >/dev/null
+
+  # name_line_fix WHAT CMD...: an installation from before v0.7.1 has no name
+  # in .env and this check runs it with COMPOSE_PROJECT_NAME. CMD must refuse
+  # and print the line to add; the line is added as printed, and CMD then
+  # runs without the variable.
+  name_line_fix() {
+    local what="$1" out fix
+    shift
+    if out="$("$@" 2>&1)"; then
+      fail "$what on an installation without the name in .env, with COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME, must refuse"
+      return
+    fi
+    fix="$(grep -E "^    echo COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME >> $dir/.env\$" <<<"$out" || true)"
+    if [ -n "$fix" ] && grep -qF "the installation in $dir is 'cadence'" <<<"$out"; then
+      pass "$what refuses: this installation is 'cadence' by .env, and the one step is the line in .env"
+    else
+      fail "$what refused without the line to add: $out"
+      return
+    fi
+    bash -euc "$fix"
+    if env -u COMPOSE_PROJECT_NAME "$@" >/dev/null 2>&1; then
+      pass "after the line in .env, $what runs without COMPOSE_PROJECT_NAME"
+    else
+      fail "after the line in .env, $what without COMPOSE_PROJECT_NAME failed"
+    fi
+  }
+  # clab server applies the rule to FROM already.
+  if [ "$driver" = clab ] && ! grep -q '^COMPOSE_PROJECT_NAME=' .env; then
+    info "clab server on $from without the name in .env"
+    name_line_fix "clab server backup" "$clab" server backup
+  fi
 
   info "data on $from"
   printf 'Written on %s before the upgrade.\n' "$from" >"$work/doc.md"
@@ -380,6 +417,15 @@ JSON
     pass "$kept are unchanged"
   else
     fail "some of $kept changed"
+  fi
+  # The scripts of TO apply the rule; upgrade.sh did not write the line.
+  if [ "$driver" = scripts ]; then
+    if grep -q '^COMPOSE_PROJECT_NAME=' .env; then
+      info "$from had the name in .env already; the upgrade kept it"
+    else
+      info "./backup.sh of $to on an installation without the name in .env"
+      name_line_fix "./backup.sh" ./backup.sh
+    fi
   fi
   if [ ! -e obsolete.txt ]; then
     pass "a file the package of $to no longer has is removed"
