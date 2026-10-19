@@ -938,9 +938,9 @@ Both processes also expose the standard `go_*` and `process_*` metrics.
 The `job` label of the worker: `lease_sweep` (returning expired leases),
 `ops_state` (the database snapshot), and with indexing on (the default,
 `SDLC_INDEX_ENABLED`) `index_enqueue`, `index_run`, `drift`, `index_prune`,
-`repo_ref_sync`, `knowledge`, `embed_refresh`, `overlaps`; `blob_gc` and
-`embed_cache_gc` run hourly. A job that is turned off has no
-`last_success` series.
+`repo_ref_sync`, `knowledge`, `embed_refresh`, `overlaps`; `blob_gc` runs
+hourly and `embed_cache_gc` every six hours, neither at start. A job that
+is turned off or has not run yet has no `last_success` series.
 
 For Postgres and Caddy use their own exporters: `postgres_exporter` and the
 `metrics` directive of Caddy.
