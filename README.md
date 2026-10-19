@@ -22,6 +22,11 @@ release, verifies its checksum, unpacks it into `./cadence` and runs
 curl -fsSL https://github.com/cadence-lab-tech/self-hosted/releases/latest/download/get-cadence.sh | sh -s -- --domain cadence.example.com
 ```
 
+With the CLI installed (`brew install cadence-lab-tech/tap/clab`, v0.8.0+),
+the same is `clab server install --domain cadence.example.com --email ops@example.com`:
+no `curl`, `tar` or `bash` needed, only Docker
+([docs/admin.md](docs/admin.md#install)).
+
 Then open the printed address, sign in with the printed administrator token
 and follow [docs/admin.md](docs/admin.md): a team and a project, the starter
 cycle and roles from `bundles/starter.json`, the GitHub App, single sign-on,

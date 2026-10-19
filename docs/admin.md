@@ -57,6 +57,35 @@ is no such release, or if the directory already has a `.env` (then
 broken or altered download, not against a release replaced at its source;
 signatures of the package and the images are planned.
 
+**With clab.** `clab` v0.8.0 and later installs the same way with one command
+and needs neither `curl`, `tar`, `sha256sum` nor `bash` — only Docker
+(`brew install cadence-lab-tech/tap/clab`, see [CLI and agents](#cli-and-agents)):
+
+```bash
+clab server install --domain cadence.example.com --email ops@example.com
+clab server install --mode proxy --http-addr 127.0.0.1:8080 --yes
+```
+
+It downloads the package of the release with its `checksums.txt`, verifies
+the checksum, unpacks the package, writes `.env` exactly as `install.sh`
+does, starts the stack and prints the address, the administrator token
+(once) and the cron line of the nightly backup. It takes the flags and
+variables of `install.sh` from the table below, `--name` and `--yes`
+(`-y`) included, and two of its own:
+
+| flag | |
+|---|---|
+| `--version vX.Y.Z` | the release to install; default the latest release that is not newer than `clab` itself. A release newer than `clab` is refused with the command that updates `clab` |
+| `--dir DIR` | the installation directory, default `$CADENCE_DIR`, else `./cadence`. It must not exist, be empty, or hold an unpacked package without `.env` — then that package is installed in place, with no download, and `--version` must match its `VERSION` |
+
+Every refusal — a `.env` already there, a taken installation name, a busy
+port, a missing domain in the `tls` mode, a checksum that does not match —
+comes before `.env` is written, and nothing is changed. If the images cannot
+be pulled or the stack does not become ready, `.env` is kept and the command
+prints how to start the stack. The result is the same directory as with
+`get-cadence.sh`: `clab server` and the scripts of the package both manage
+it afterwards.
+
 By hand, the same steps:
 
 ```bash
@@ -67,6 +96,9 @@ sha256sum --ignore-missing -c checksums.txt
 mkdir cadence && tar -xpzf cadence-self-hosted-$v.tar.gz -C cadence && cd cadence
 ./install.sh
 ```
+
+With `clab` v0.8.0+ the last line can be `clab server install --dir cadence`
+run next to the unpacked directory: it installs that package in place.
 
 `install.sh` checks Docker, compose v2, free ports and the domain, asks for
 the mode, writes `.env` (mode 600) with a generated database password,
@@ -790,6 +822,7 @@ refused, a backup comes before an upgrade, a failed upgrade prints the
 rollback — so the same steps go without bash and its tools:
 
 ```bash
+clab server install --mode proxy --http-addr 127.0.0.1:8080   # = get-cadence.sh | sh: a new installation in ./cadence (v0.8.0+)
 clab server status                       # directory, installation name, versions of the stack and of clab, mode, services
 clab server backup                       # = ./backup.sh
 clab server restore backups/cadence-v0.7.0-20261008-030000.sql.gz   # = ./restore.sh (asks; --yes skips)
@@ -800,7 +833,9 @@ clab server upgrade --force v0.7.1       # = ./upgrade.sh --force v0.7.1
 `clab server` needs no sign-in: it works with the files of the installation
 and Docker (`docker compose`) on this machine, not with the API. It finds
 the installation in `--dir DIR`, else in `CADENCE_DIR`, else in the current
-directory or the nearest one above it with `VERSION` and `package.sha256`.
+directory or the nearest one above it with `VERSION` and `package.sha256`;
+`clab server install` creates it in `--dir DIR`, else `CADENCE_DIR`, else
+`./cadence` (see [Install](#install)).
 It reads the same `.env` and the same variables as the scripts
 (`BACKUP_DIR`, `KEEP_DAYS`, `CADENCE_READY_TIMEOUT`, `CADENCE_RELEASES_URL`),
 takes the installation name from `COMPOSE_PROJECT_NAME` in `.env` and refuses
@@ -822,9 +857,11 @@ git clones: upgrade them with their own `./upgrade.sh` first). The stack may
 not be newer than `clab`: an older `clab` refuses and prints the command
 that updates it (`brew upgrade clab`, or the install script of the tap with
 `CLAB_VERSION`). An upgrade to a release newer than `clab` goes on with a
-warning; update `clab` right after it. On Windows `clab server` refuses: run
-the Linux `clab` inside WSL2. Installing is still `get-cadence.sh` or
-`./install.sh`; the scripts keep working as they are.
+warning; update `clab` right after it. `clab server install` installs
+v0.6.0 and later and never a release newer than itself: without `--version`
+it takes the latest release that `clab` can manage. On Windows `clab server`
+refuses: run the Linux `clab` inside WSL2. The scripts keep working as they
+are, and either of them manages an installation the other one made.
 
 ## Troubleshooting
 
