@@ -29,7 +29,7 @@ PACKAGE_FILES=(
   VERSION
   docker-compose.yml compose.tls.yml compose.proxy.yml Caddyfile .env.example
   install.sh upgrade.sh backup.sh restore.sh lib.sh
-  README.md LICENSE
+  README.md LICENSE SECURITY.md
 )
 # Directories that go in whole.
 PACKAGE_DIRS=(bundles docs)

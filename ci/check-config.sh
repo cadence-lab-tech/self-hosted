@@ -38,7 +38,7 @@ lacks() { ! grep -qF -- "$2" <<<"$1"; }
 version="$(tr -d '[:space:]' <VERSION)"
 
 info "layout"
-for f in docker-compose.yml compose.tls.yml compose.proxy.yml .env.example Caddyfile README.md docs/admin.md LICENSE VERSION; do
+for f in docker-compose.yml compose.tls.yml compose.proxy.yml .env.example Caddyfile README.md docs/admin.md LICENSE SECURITY.md VERSION; do
   check "$f exists" [ -f "$f" ]
 done
 for f in install.sh upgrade.sh backup.sh restore.sh get-cadence.sh ci/package.sh; do
@@ -57,7 +57,7 @@ info "release package"
 # apart from the list in ci/package.sh, so that a file dropped from the
 # package turns this check red.
 required_files="VERSION docker-compose.yml compose.tls.yml compose.proxy.yml Caddyfile .env.example
-  install.sh upgrade.sh backup.sh restore.sh lib.sh bundles/starter.json docs/admin.md README.md LICENSE
+  install.sh upgrade.sh backup.sh restore.sh lib.sh bundles/starter.json docs/admin.md README.md LICENSE SECURITY.md
   package.sha256"
 dist="$(mktemp -d)"
 trap 'rm -rf "$dist"' EXIT
