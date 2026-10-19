@@ -66,7 +66,11 @@ The name is kept in `.env`; see
 [docs/admin.md](docs/admin.md#several-installations-on-one-machine).
 
 The checksum protects against a broken or altered download, not against a
-release replaced at its source; signed releases are planned.
+release replaced at its source. From v0.9.0 the package and the images are
+signed by the release workflows of our repositories (Sigstore, no keys),
+carry an SBOM and a build provenance, and `docker-compose.yml` pins the
+images by digest; the commands that check all of it are in
+[docs/admin.md](docs/admin.md#verifying-a-release).
 
 ## Requirements
 
@@ -76,7 +80,7 @@ release replaced at its source; signed releases are planned.
 | CPU | 2 vCPU | 4 vCPU |
 | RAM | 4 GB | 8 GB |
 | Disk | 20 GB SSD | 50 GB SSD; code indexes and backups grow with repositories |
-| Software | Docker Engine 24+ with the compose v2 plugin, curl, tar, openssl | |
+| Software | Docker Engine 24+ with the compose v2 plugin, curl, tar, openssl | [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x to [verify a release](docs/admin.md#verifying-a-release) (recommended, not required) |
 | Network | `tls`: ports 80 and 443 from the internet; `proxy`: one port for your proxy | outbound HTTPS to `ghcr.io`, GitHub and your embeddings provider, if any |
 
 GitHub has to reach `https://<host>/webhooks/github` if you connect a GitHub

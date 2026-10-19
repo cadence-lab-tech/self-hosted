@@ -35,6 +35,14 @@
 # upgrade refuse; with the scripts driver a second installation runs next to
 # the first one and each sees only itself.
 #
+# Images: docker-compose.yml pins the images of VERSION by digest (ci/pins.sh)
+# and the check compares the containers with it. Images of a branch, built
+# under the tag of VERSION into a local registry, have other digests: drop
+# the pin with empty variables, and the stack pulls them by tag:
+#
+#   CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
+#     COMPOSE_PROJECT_NAME=check-<name> CHECK_HTTP_PORT=<port> ci/check-stack.sh
+#
 # The stacks are torn down with their volumes at the end: give them a
 # COMPOSE_PROJECT_NAME and a CHECK_HTTP_PORT (and the port after it) of their
 # own, never those of a running instance.
@@ -277,6 +285,24 @@ esac
 for service in api ui; do
   check "$service runs natively ($host_platform)" \
     [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$(docker compose images -q "$service")")" = "$host_platform" ]
+done
+
+# --- images --------------------------------------------------------------------------
+# The containers run what compose names: the tag of VERSION with the digest
+# the package pins, or the tag alone with the pin dropped (images of a branch).
+info "images"
+compose_json="$(docker compose config --format json)"
+for service in api worker ui; do
+  want="$(jq -r ".services.$service.image" <<<"$compose_json")"
+  check "$service runs $want" [ "$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q "$service")")" = "$want" ]
+done
+for image in backend frontend; do
+  var="CADENCE_$(tr '[:lower:]' '[:upper:]' <<<"$image")_DIGEST"
+  if [ -z "${!var+set}" ]; then
+    check "$image is pinned by digest ($version@sha256:...)" contains "$compose_json" "/sdlc-pipeline-$image:$version@sha256:"
+  else
+    info "$var is set (${!var:-empty}): $image as the variable says"
+  fi
 done
 
 # --- proxy mode and routing ----------------------------------------------------------

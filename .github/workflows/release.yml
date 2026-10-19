@@ -2,16 +2,22 @@
 #
 #   pull-request  on the cadence-release event, sent by the release of the
 #                 backend and frontend images (or run by hand), opens the pull
-#                 request "VERSION -> vX.Y.Z" (ci/release-pr.sh). The event may
-#                 arrive twice; the second run finds the open pull request.
+#                 request "VERSION -> vX.Y.Z" (ci/release-pr.sh): VERSION and
+#                 the digests of both images in docker-compose.yml, once the
+#                 signatures of both images verify. The event may arrive
+#                 twice; the second run finds the open pull request.
 #   tag           when VERSION changes on main, tags that commit vX.Y.Z and
 #                 publishes the GitHub Release vX.Y.Z with the package
 #                 (ci/package.sh): cadence-self-hosted-vX.Y.Z.tar.gz,
-#                 checksums.txt and get-cadence.sh. Installations download
-#                 these assets: get-cadence.sh installs, ./upgrade.sh vX.Y.Z
-#                 upgrades. A second run finds the tag and the release and
-#                 uploads only the assets that are missing; it never replaces
-#                 one.
+#                 checksums.txt and get-cadence.sh, plus
+#                 checksums.txt.sigstore.json - the signature of
+#                 checksums.txt by this workflow (cosign keyless, identity
+#                 .../self-hosted/.github/workflows/release.yml@refs/heads/main).
+#                 Installations download these assets: get-cadence.sh
+#                 installs, ./upgrade.sh vX.Y.Z upgrades. A second run finds
+#                 the tag and the release and uploads only the assets that
+#                 are missing; it never replaces one, and signs only when the
+#                 signature is missing - the checksums.txt already published.
 #
 # The pull request is opened with the secret RELEASE_PR_TOKEN, not with
 # GITHUB_TOKEN: a pull request opened by GITHUB_TOKEN starts no workflows, and
@@ -64,6 +70,11 @@ jobs:
         with:
           ref: main
           token: ${{ secrets.RELEASE_PR_TOKEN }}
+      # The pinned cosign verifies the signatures of the images; the version
+      # moves by a pull request, like everything else here.
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v3.1.3
       - name: pull request with the new VERSION
         run: ci/release-pr.sh
 
@@ -73,8 +84,13 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
+      # The OIDC token of this run signs checksums.txt (cosign keyless).
+      id-token: write
     steps:
       - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v3.1.3
       - name: tag the version
         run: |
           v="$(tr -d '[:space:]' < VERSION)"
@@ -103,13 +119,24 @@ jobs:
             exit 1
           fi
           ci/package.sh dist
+          sign() { cosign sign-blob --yes --bundle dist/checksums.txt.sigstore.json dist/checksums.txt; }
           if ! gh release view "$v" >/dev/null 2>&1; then
+            sign
             # Notes are generated for now; the notes of the version come with
             # the annotated tag (CLAB-149).
             gh release create "$v" --verify-tag --title "$v" --generate-notes dist/*
             exit 0
           fi
           have="$(gh release view "$v" --json assets --jq '.assets[].name')"
+          # The signature is of the checksums.txt the release has: a
+          # published one is signed as it is, not the one built here again.
+          if ! grep -qxF checksums.txt.sigstore.json <<<"$have"; then
+            if grep -qxF checksums.txt <<<"$have"; then
+              gh release download "$v" --pattern checksums.txt --dir published
+              cp published/checksums.txt dist/checksums.txt
+            fi
+            sign
+          fi
           for f in dist/*; do
             if grep -qxF "$(basename "$f")" <<<"$have"; then
               echo "release $v already has $(basename "$f")"

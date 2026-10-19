@@ -2,7 +2,10 @@
 #
 #   lint   shell linter (get-cadence.sh as POSIX sh), compose and Caddyfile
 #          in both modes, the release package (ci/check-config.sh), the
-#          one-line installer under dash (ci/check-get-cadence.sh), secret scan
+#          one-line installer under dash (ci/check-get-cadence.sh), the
+#          release pull request (ci/check-release-pr.sh), the digests
+#          docker-compose.yml pins against the tag of VERSION in the registry
+#          (ci/check-pins.sh: a moved tag fails it), secret scan
 #   stack  the stack on the published images of VERSION, in proxy mode,
 #          installed from the package of this commit with the one-line
 #          installer: sign-in, clab, MCP, backup and restore
@@ -50,6 +53,10 @@ jobs:
         run: ci/check-config.sh
       - name: one-line installer
         run: ci/check-get-cadence.sh
+      - name: release pull request
+        run: ci/check-release-pr.sh
+      - name: pinned digests are the images of VERSION
+        run: ci/check-pins.sh
       - name: no secrets in the history
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest git /repo --redact
 
