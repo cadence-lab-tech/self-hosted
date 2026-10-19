@@ -266,7 +266,9 @@ if [ -n "$db_url" ]; then
   mkdir -p secrets
   chmod 711 secrets
   if [ -n "$db_ca" ]; then
-    [ -f "$db_ca" ] && [ -r "$db_ca" ] || die "--external-db-ca: no readable file $db_ca"
+    if [ ! -f "$db_ca" ] || [ ! -r "$db_ca" ]; then
+      die "--external-db-ca: no readable file $db_ca"
+    fi
     grep -q 'BEGIN CERTIFICATE' "$db_ca" || die "--external-db-ca: $db_ca is not a PEM certificate"
     case "$db_url" in
     *"?sslrootcert="* | *"&sslrootcert="*) die "the CA is given twice: --external-db-ca and sslrootcert in --external-db; keep one" ;;
