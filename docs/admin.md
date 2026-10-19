@@ -29,6 +29,7 @@ public address of your proxy in the `proxy` mode.
 - [Upgrades and rollback](#upgrades-and-rollback)
   ([releases and mirrors](#releases-and-mirrors),
   [moving a git installation](#moving-a-git-installation-to-release-packages))
+- [Security](#security)
 - [Troubleshooting](#troubleshooting)
 
 ## Install
@@ -753,14 +754,15 @@ example:
 ```
 
 Releases are published as GitHub Releases of this repository; watch it
-(Releases) to hear about them.
+(Releases and Security alerts) to hear about them and about security fixes
+(see [Security](#security)).
 
 ### Releases and mirrors
 
 Each release `vX.Y.Z` carries three assets with names that do not change:
 `cadence-self-hosted-vX.Y.Z.tar.gz` (the package: compose files, Caddyfile,
 `.env.example`, `VERSION`, the scripts, `bundles/`, `docs/`, `README.md`,
-`LICENSE` and `package.sha256`), `checksums.txt` and `get-cadence.sh`. A
+`LICENSE`, `SECURITY.md` and `package.sha256`), `checksums.txt` and `get-cadence.sh`. A
 machine that cannot reach GitHub takes them from a mirror:
 `CADENCE_RELEASES_URL` points `get-cadence.sh` and `upgrade.sh` at any
 HTTP(S) address or directory (`file:///srv/cadence-releases`) with the
@@ -813,6 +815,32 @@ Apply it with `docker compose up -d`. An installation from before v0.6.0 has
 no such file and its `COMPOSE_FILE` does not list one: create the file and
 append `:compose.override.yml` to `COMPOSE_FILE` in `.env`. `upgrade.sh`
 warns when an override file exists but `COMPOSE_FILE` does not list it.
+
+## Security
+
+The security policy is [`SECURITY.md`](../SECURITY.md) in the root of the
+installation and of each public repository of Cadence Lab: how to report a
+vulnerability, response times, disclosure and CVE.
+
+- **Reporting.** Privately, through GitHub: "Report a vulnerability" on the
+  Security tab of
+  [cadence-lab-tech/self-hosted](https://github.com/cadence-lab-tech/self-hosted/security/advisories/new)
+  or of the repository of the affected component. It is the only channel;
+  do not open a public issue.
+- **Supported versions.** During the beta, security fixes go into the
+  latest minor `0.x` only, as a new release on top of it; older versions get
+  no backports. Stay on the latest release: `./upgrade.sh` (or
+  `clab server upgrade`) and `brew upgrade clab` on the machines of people
+  and agents. A support window for older versions comes with 1.0.
+- **Notifications.** On
+  [cadence-lab-tech/self-hosted](https://github.com/cadence-lab-tech/self-hosted)
+  choose Watch → Custom → Releases and Security alerts. A security fix is
+  published as a GitHub Security Advisory with a CVE in the repository of
+  the vulnerable code, and the release that fixes it has a "Security"
+  section in its notes with a link to the advisory.
+- **After a fix.** Upgrade to the fixing release as described in
+  [Upgrades and rollback](#upgrades-and-rollback); the advisory names the
+  affected and fixed versions and any step beyond the upgrade.
 
 ## Managing the installation with clab server
 

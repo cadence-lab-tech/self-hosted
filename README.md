@@ -116,6 +116,7 @@ production: when the evaluation is over, deploy on a server.
 | `backup.sh`, `restore.sh` | database dump and the artifact volume; restore with a version check |
 | `lib.sh` | helpers the scripts share |
 | `docs/admin.md` | the administrator guide |
+| `SECURITY.md` | the security policy: reporting a vulnerability, response times, supported versions |
 | `bundles/starter.json` | a starter of roles and cycles for a new project, applied with `clab import` |
 | `package.sha256` | in the package only: the sha256 of each of its files, against which `upgrade.sh` finds local edits |
 | `get-cadence.sh` | the one-line installer, published next to the package (not in it) |
@@ -161,6 +162,13 @@ of every version find the assets by them. `CADENCE_RELEASES_URL` points
 The pull request is opened with the repository secret `RELEASE_PR_TOKEN` — a
 fine-grained token for this repository with Contents and Pull requests read
 and write — because pull requests opened by `GITHUB_TOKEN` do not start CI.
+
+Security fixes ship as releases too, with a "Security" section in the notes
+and a GitHub Security Advisory. Watch this repository (Releases and Security
+alerts) to hear about them. Report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md), never in a public issue; during the beta only
+the latest minor `0.x` gets security fixes
+([docs/admin.md](docs/admin.md#security)).
 
 ## License and beta terms
 
