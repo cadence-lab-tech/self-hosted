@@ -119,7 +119,7 @@ production: when the evaluation is over, deploy on a server.
 | | |
 |---|---|
 | `VERSION` | the version of Cadence Lab this package runs; both images use it |
-| `docker-compose.yml` | Postgres with pgvector, the API, the worker, the UI and Caddy; only Caddy publishes ports |
+| `docker-compose.yml` | Postgres with pgvector, the API, the worker, the UI and Caddy; only Caddy publishes ports, the API and the worker serve Prometheus metrics inside the network ([monitoring](docs/admin.md#monitoring)) |
 | `compose.tls.yml`, `compose.proxy.yml` | the published ports of each mode, picked by `COMPOSE_FILE` in `.env` |
 | `compose.external-db.yml` | your own PostgreSQL instead of the container (`CADENCE_DB=external`): no `postgres`, the backup client `db-client` |
 | `compose.override.yml` | not in the package: your local compose changes, created by `install.sh` and listed in `COMPOSE_FILE` |

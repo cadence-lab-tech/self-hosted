@@ -80,6 +80,12 @@ x-shared-env: &shared-env
   SDLC_EMBEDDINGS_BATCH: ${SDLC_EMBEDDINGS_BATCH:-96}
   SDLC_EMBEDDINGS_SEND_DIMENSIONS: ${SDLC_EMBEDDINGS_SEND_DIMENSIONS:-true}
   SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
+  # Prometheus metrics of the API and the worker (since v0.10.0), each on its
+  # own port 9090 inside the compose network. No port is published and Caddy
+  # does not route /metrics: they are served without a token. How to let
+  # Prometheus in: docs/admin.md, "Monitoring". An empty value in .env turns
+  # the listeners off.
+  SDLC_METRICS_ADDR: ${SDLC_METRICS_ADDR-:9090}
 
 services:
   postgres:
