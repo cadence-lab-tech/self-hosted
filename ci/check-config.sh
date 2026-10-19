@@ -336,6 +336,10 @@ for kv in COMPOSE_PROJECT_NAME=cadence SDLC_TENANCY=single SDLC_PROJECT_CREATION
   check ".env.example sets $kv" grep -qxF "$kv" .env.example
 done
 check ".env.example sets no image version" lacks "$(grep -v '^#' <<<"$env_example")" "CADENCE_VERSION="
+# An uncommented empty line would turn the metrics listeners off on every new
+# installation: the default lives in docker-compose.yml.
+check ".env.example documents SDLC_METRICS_ADDR, commented out" grep -qxF "# SDLC_METRICS_ADDR=:9090" .env.example
+check ".env.example does not set SDLC_METRICS_ADDR" lacks "$(grep -v '^#' <<<"$env_example")" "SDLC_METRICS_ADDR="
 
 info "installation name"
 # The name of an installation is COMPOSE_PROJECT_NAME of its .env, and
@@ -457,7 +461,30 @@ for mode in tls proxy; do
   check "[$mode] api and worker get the same embeddings and lease settings" contains "$envs" "same"
   check "[$mode] SDLC_EMBEDDINGS_MODEL is empty by default" contains "$envs" "model=[]"
   check "[$mode] SDLC_EMBEDDINGS_PROVIDER is none by default" contains "$envs" "provider=none"
+  # Metrics (since v0.10.0): both processes listen on :9090 inside the
+  # network; nothing is published (the ports check above) and Caddy does not
+  # route /metrics (the Caddyfile checks below).
+  check "[$mode] api and worker get SDLC_METRICS_ADDR=:9090" \
+    [ "$(jq -r '[.services.api.environment.SDLC_METRICS_ADDR, .services.worker.environment.SDLC_METRICS_ADDR] | join(" ")' <<<"$config")" = ":9090 :9090" ]
 done
+metrics_off="$(SDLC_METRICS_ADDR='' POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --format json |
+  jq -r '[.services.api.environment.SDLC_METRICS_ADDR, .services.worker.environment.SDLC_METRICS_ADDR] | join(",")')"
+check "an empty SDLC_METRICS_ADDR in .env turns the listeners off" [ "$metrics_off" = "," ]
+
+# The example alert rules of docs/admin.md ("Monitoring") are what an
+# administrator copies into Prometheus: they must load.
+info "alert rules (docs)"
+rules="$(awk '/^# cadence-alerts.yml$/ { on = 1 } on && /^```$/ { exit } on' docs/admin.md)"
+check "docs/admin.md has the example rules (# cadence-alerts.yml)" [ -n "$rules" ]
+# The rules go in on stdin: a bind mount of a scratch directory is not
+# readable for the user of the image on every CI runner.
+if promtool_out="$(docker run --rm -i --entrypoint promtool prom/prometheus:v3.5.0 \
+  check rules /dev/stdin <<<"$rules" 2>&1)"; then
+  pass "promtool check rules accepts them"
+else
+  fail "promtool check rules accepts them"
+  printf '%s\n' "$promtool_out" >&2
+fi
 
 info "Caddyfile"
 adapt() {
@@ -477,6 +504,7 @@ for cfg in "$tls" "$proxy"; do
   check "routes /v1 /mcp /webhooks /healthz /readyz to the API" contains "$cfg" '"/v1/*","/mcp/*","/webhooks/*","/healthz","/readyz"'
   check "MCP is proxied without buffering" contains "$cfg" '"flush_interval":-1'
   check "everything else goes to the UI" contains "$cfg" '"dial":"ui:80"'
+  check "nothing is routed to the metrics port" lacks "$cfg" ':9090'
 done
 
 [ "$failures" -eq 0 ] || die "$failures check(s) failed"
