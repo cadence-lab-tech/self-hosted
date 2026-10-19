@@ -90,9 +90,11 @@ main() {
     valid_version "$target_version" || die "'$target_version' is not a version: expected vX.Y.Z"
   fi
 
+  # .env first: a COMPOSE_PROJECT_NAME of another installation stops here,
+  # before Docker is asked anything.
+  load_env
   require_docker
   command -v curl >/dev/null 2>&1 || die "curl is required to download the package of the release"
-  load_env
   check_mode
   local old_version="$CADENCE_VERSION" backups="${BACKUP_DIR:-backups}"
 

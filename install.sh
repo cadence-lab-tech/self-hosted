@@ -7,12 +7,19 @@
 #   ./install.sh                                  # asks questions
 #   ./install.sh --mode tls --domain cadence.example.com --email ops@example.com
 #   ./install.sh --mode proxy --http-addr 127.0.0.1:8080 --yes
+#   ./install.sh --name cadence-stage --mode proxy --http-addr 127.0.0.1:8081
 #
 # Without a terminal, or with --yes, it asks nothing: every answer comes from
 # flags or from the environment (CADENCE_MODE, SDLC_DOMAIN, ACME_EMAIL,
 # CADENCE_HTTP_ADDR, SDLC_BOOTSTRAP_TEAM, SDLC_BOOTSTRAP_TEAM_NAME). An
 # administrator token may be supplied as SDLC_ADMIN_TOKEN (at least 16
 # characters); otherwise one is generated.
+#
+# --name NAME (or COMPOSE_PROJECT_NAME) names this installation on the
+# machine, default cadence: the Docker Compose project of its containers,
+# volumes and network, kept in .env. A second installation on the same
+# machine needs a name of its own. It is not a project inside Cadence Lab:
+# one installation holds any number of teams and projects.
 #
 # It runs once. With an existing .env it stops and changes nothing:
 # regenerating the secrets would lock the database volume out with a new
@@ -24,7 +31,7 @@ cd "$(dirname "$0")"
 . ./lib.sh
 
 usage() {
-  sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -35,6 +42,7 @@ http_addr="${CADENCE_HTTP_ADDR:-}"
 team="${SDLC_BOOTSTRAP_TEAM:-}"
 team_name="${SDLC_BOOTSTRAP_TEAM_NAME:-}"
 admin_token="${SDLC_ADMIN_TOKEN:-}"
+name=""
 assume_yes=false
 timeout="${CADENCE_READY_TIMEOUT:-300}"
 
@@ -46,6 +54,7 @@ while [ $# -gt 0 ]; do
   --http-addr) http_addr="${2:?--http-addr needs [ip:]port}"; shift 2 ;;
   --team) team="${2:?--team needs a key}"; shift 2 ;;
   --team-name) team_name="${2:?--team-name needs a name}"; shift 2 ;;
+  --name) name="${2:?--name needs a name of the installation}"; shift 2 ;;
   -y | --yes | --non-interactive) assume_yes=true; shift ;;
   -h | --help) usage 0 ;;
   *) warn "unknown argument: $1"; usage 2 >&2 ;;
@@ -79,9 +88,33 @@ if [ -e .env ]; then
 fi
 
 # --- 2. environment ---------------------------------------------------------------
+# The installation name: --name, else COMPOSE_PROJECT_NAME, else the default.
+# Both given and different is a mistake in one of them, not a choice.
+env_name="${COMPOSE_PROJECT_NAME:-}"
+if [ -n "$name" ] && [ -n "$env_name" ] && [ "$name" != "$env_name" ]; then
+  die "--name is '$name', but COMPOSE_PROJECT_NAME in the environment is '$env_name': give one of them, or the same name in both"
+fi
+name="${name:-${env_name:-$CADENCE_DEFAULT_NAME}}"
+valid_name "$name" || die "'$name' is not a valid installation name (--name): $(name_rule)"
+
 info "checking the environment"
 require_docker
 load_version
+# Another installation under the same name would share its containers and
+# volumes: the new database password would not open its volume, and this
+# installation would break that one.
+taken="$(name_in_use "$name")" || die "could not ask Docker which installation names are taken (docker ps, docker volume ls)"
+if [ -n "$taken" ]; then
+  case "$taken" in
+  volumes) where="Docker keeps volumes of the compose project '$name' (an installation removed without its data)" ;;
+  containers) where="Docker has containers of the compose project '$name'" ;;
+  *) where="the installation in $taken uses it" ;;
+  esac
+  die "the installation name '$name' is taken on this machine: $where.
+  Every installation on one machine needs a name of its own; pick another one with --name:
+    ./install.sh --name ${name}-2 ...   (or get-cadence.sh ... --name ${name}-2)
+  The name is the Docker Compose project of the installation, not a project inside Cadence Lab. Nothing was changed."
+fi
 # The images are built for linux/amd64 and linux/arm64 (uname -m says
 # aarch64 on Linux and arm64 on macOS); anything else has no image to pull.
 case "$(uname -m)" in
@@ -195,6 +228,7 @@ set_kv() {
 trap 'rm -f .env.tmp .env.tmp.next' EXIT
 cp .env.example .env.tmp
 chmod 600 .env.tmp
+set_kv COMPOSE_PROJECT_NAME "$name"
 set_kv CADENCE_MODE "$mode"
 set_kv COMPOSE_FILE "$compose_file"
 if [ "$mode" = tls ]; then

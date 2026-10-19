@@ -8,7 +8,9 @@
 # Downloads the package of the release and its checksums.txt, verifies the
 # checksum, unpacks the package into a new directory and runs install.sh of
 # the package there with the other flags (--mode, --domain, --email,
-# --http-addr, --team, --team-name, --yes; see docs/admin.md, "Install").
+# --http-addr, --team, --team-name, --name, --yes; see docs/admin.md,
+# "Install"). A second installation on the same machine needs its own --dir
+# and its own --name (docs/admin.md, "Several installations on one machine").
 # Without a terminal - as above, where the script itself comes on stdin -
 # install.sh asks nothing and takes the answers from the flags.
 #
@@ -42,7 +44,9 @@ get-cadence.sh [--version vX.Y.Z] [--dir DIR] [flags of install.sh]
   --version vX.Y.Z   the release to install, default the latest
   --dir DIR          where to unpack, default ./cadence
   other flags        go to install.sh of the package: --mode, --domain,
-                     --email, --http-addr, --team, --team-name, --yes
+                     --email, --http-addr, --team, --team-name, --name, --yes;
+                     --name NAME names the installation on this machine
+                     (default cadence), a second one needs its own
 
   CADENCE_RELEASES_URL   a mirror of the releases instead of GitHub
 USAGE

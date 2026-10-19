@@ -21,8 +21,10 @@ cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . ./lib.sh
 
-require_docker
+# .env first: a COMPOSE_PROJECT_NAME of another installation stops here,
+# before Docker is asked anything.
 load_env
+require_docker
 
 keep_days="${KEEP_DAYS:-14}"
 dir="${BACKUP_DIR:-$(pwd)/backups}"

@@ -46,9 +46,14 @@ stubs="$work/bin"
 mkdir -p "$stubs"
 cat >"$stubs/docker" <<'SH'
 #!/bin/sh
-# docker for the check: the daemon answers, pulling images fails.
+# docker for the check: the daemon answers, pulling images fails. The compose
+# project STUB_TAKEN has a container of an installation in /srv/other;
+# every other installation name is free.
 case "$*" in
 "compose version" | info*) exit 0 ;;
+"ps -a -q --filter label=com.docker.compose.project=${STUB_TAKEN:-}") echo c0ffee; exit 0 ;;
+"ps -a -q --filter "* | "volume ls -q --filter "*) exit 0 ;;
+"inspect -f "*" c0ffee") echo /srv/other; exit 0 ;;
 *) echo "docker stub: $*" >&2; exit 1 ;;
 esac
 SH
@@ -68,6 +73,9 @@ get() {
   (cd "$dir" && PATH="$stubs:$PATH" CADENCE_RELEASES_URL="file://$releases" \
     "$shell" -s -- "$@" <"$OLDPWD/get-cadence.sh" 2>&1)
 }
+# The installation name comes from --name or COMPOSE_PROJECT_NAME; the
+# checks set the variable themselves, the caller's does not leak in.
+unset COMPOSE_PROJECT_NAME
 
 info "get-cadence.sh under $shell"
 
@@ -89,6 +97,11 @@ if grep -qxF 'CADENCE_MODE=proxy' "$env_file" 2>/dev/null &&
   pass "install.sh wrote .env from the flags, COMPOSE_FILE with compose.override.yml"
 else
   fail "install.sh did not write the expected .env"
+fi
+if grep -qxF 'COMPOSE_PROJECT_NAME=cadence' "$env_file" 2>/dev/null; then
+  pass "without --name the installation name in .env is cadence"
+else
+  fail "without --name .env has no COMPOSE_PROJECT_NAME=cadence"
 fi
 if [ -f "$work/latest/cadence/compose.override.yml" ]; then
   pass "install.sh created compose.override.yml"
@@ -132,6 +145,61 @@ else
     fail "--domain alone did not write the tls .env: $out"
   fi
 fi
+
+info "installation name"
+# name_written DIR NAME: install.sh of DIR/cadence wrote COMPOSE_PROJECT_NAME=NAME.
+name_written() { grep -qxF "COMPOSE_PROJECT_NAME=$2" "$1/cadence/.env" 2>/dev/null; }
+out="$(get "$work/named" --name cadence-stage --mode proxy --http-addr 127.0.0.1:1 --yes || true)"
+if name_written "$work/named" cadence-stage; then
+  pass "--name cadence-stage reaches install.sh and lands in .env"
+else
+  fail "--name cadence-stage did not land in .env: $out"
+fi
+out="$(COMPOSE_PROJECT_NAME=cadence-env get "$work/env-name" --mode proxy --http-addr 127.0.0.1:1 --yes || true)"
+if name_written "$work/env-name" cadence-env; then
+  pass "COMPOSE_PROJECT_NAME=cadence-env without --name lands in .env"
+else
+  fail "COMPOSE_PROJECT_NAME without --name did not land in .env: $out"
+fi
+out="$(COMPOSE_PROJECT_NAME=cadence-env get "$work/env-same" --name cadence-env --mode proxy --http-addr 127.0.0.1:1 --yes || true)"
+if name_written "$work/env-same" cadence-env; then
+  pass "--name and COMPOSE_PROJECT_NAME with the same name are fine"
+else
+  fail "--name and COMPOSE_PROJECT_NAME with the same name: $out"
+fi
+# refused DIR TEXT ARGS...: the installer fails, says TEXT and writes no .env.
+refused() {
+  local dir="$1" text="$2" out status
+  shift 2
+  out="$(get "$dir" "$@")" && status=0 || status=$?
+  if [ "$status" != 0 ] && contains "$out" "$text" && [ ! -e "$dir/cadence/.env" ]; then
+    pass "$* is refused (\"$text\"), no .env"
+  else
+    fail "$*: status $status, no \"$text\" or .env written: $out"
+  fi
+}
+refused "$work/bad-name" "'Bad_Name' is not a valid installation name" --name Bad_Name --mode proxy --http-addr 127.0.0.1:1 --yes
+refused "$work/dash-name" "'-x' is not a valid installation name" --name -x --mode proxy --http-addr 127.0.0.1:1 --yes
+export COMPOSE_PROJECT_NAME=cadence-env
+refused "$work/two-names" "--name is 'cadence-stage', but COMPOSE_PROJECT_NAME in the environment is 'cadence-env'" \
+  --name cadence-stage --mode proxy --http-addr 127.0.0.1:1 --yes
+unset COMPOSE_PROJECT_NAME
+export STUB_TAKEN=cadence
+refused "$work/taken" "the installation name 'cadence' is taken on this machine: the installation in /srv/other uses it" \
+  --mode proxy --http-addr 127.0.0.1:1 --yes
+out="$(get "$work/taken-hint" --mode proxy --http-addr 127.0.0.1:1 --yes || true)"
+if contains "$out" "--name cadence-2"; then
+  pass "the refusal of a taken name suggests --name"
+else
+  fail "the refusal of a taken name does not suggest --name: $out"
+fi
+out="$(get "$work/not-taken" --name cadence-stage --mode proxy --http-addr 127.0.0.1:1 --yes || true)"
+if name_written "$work/not-taken" cadence-stage; then
+  pass "another name next to the taken one installs"
+else
+  fail "--name cadence-stage next to a taken cadence: $out"
+fi
+unset STUB_TAKEN
 
 info "refusals"
 out="$(get "$work/broken" --version "$broken" --yes)" && status=0 || status=$?
