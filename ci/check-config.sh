@@ -259,7 +259,8 @@ check "the documentation shows the one-line installer with flags" [ "$documented
 # has clab server (v0.7.0); before that the check is skipped. A command the
 # tap's clab of VERSION does not list yet is documented ahead of its release
 # (CLAB-160): skipped with a note until VERSION catches up, checked with
-# CLAB_BIN of the branch that brings it.
+# CLAB_BIN of the branch that brings it. The same for a flag of clab server
+# install that install.sh of this checkout already takes.
 info "documented clab server flags"
 clab_server="${CLAB_BIN:-}"
 if [ -z "$clab_server" ] && ! version_lt "$version" v0.7.0; then
@@ -292,6 +293,11 @@ else
         documented=$((documented + 1))
         if grep -qxF -- "$flag" <<<"$sub_flags"; then
           pass "$f:$line: clab server $sub takes $flag"
+        elif [ -z "${CLAB_BIN:-}" ] && [ "$sub" = install ] && grep -qxF -- "$flag" <<<"$install_flags"; then
+          # clab server install takes the flags of install.sh: a flag
+          # install.sh of this checkout has is documented ahead of the clab
+          # release that brings it (CLAB-127), like a command above.
+          info "skipped $f:$line: clab $version has no 'clab server install $flag' yet (install.sh has it); CLAB_BIN=<clab with it> checks it"
         else
           fail "$f:$line: clab server $sub has no flag $flag"
         fi
