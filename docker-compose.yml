@@ -13,7 +13,9 @@
 #
 # Which ports Caddy publishes depends on the mode (TLS on a domain or plain
 # HTTP behind your proxy): COMPOSE_FILE in .env adds compose.tls.yml or
-# compose.proxy.yml on top of this file.
+# compose.proxy.yml on top of this file. With your own PostgreSQL instead of
+# the postgres container (CADENCE_DB=external) it adds compose.external-db.yml
+# as well.
 
 # The name of the installation on this machine (the prefix of its containers,
 # volumes and network) is COMPOSE_PROJECT_NAME in .env: install.sh writes it
@@ -41,7 +43,13 @@ x-image-backend: &image-backend
 
 # Settings the API and the worker must agree on.
 x-shared-env: &shared-env
+  # The bundled database; compose.external-db.yml replaces it with
+  # SDLC_DATABASE_URL of .env.
   SDLC_DATABASE_URL: postgres://${POSTGRES_USER:-sdlc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sdlc}?sslmode=disable
+  # Connections of each process (the API and the worker hold a pool each)
+  # and how long a process waits for the database on start.
+  SDLC_DB_MAX_CONNS: ${SDLC_DB_MAX_CONNS:-10}
+  SDLC_DB_CONNECT_TIMEOUT: ${SDLC_DB_CONNECT_TIMEOUT:-30s}
   SDLC_ENV: production
   SDLC_LOG_LEVEL: ${SDLC_LOG_LEVEL:-info}
   # The worker decides that a lease has expired by the same rules the API

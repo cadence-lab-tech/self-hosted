@@ -18,6 +18,7 @@ public address of your proxy in the `proxy` mode.
 - [Install](#install)
 - [Several installations on one machine](#several-installations-on-one-machine)
 - [Behind your reverse proxy](#behind-your-reverse-proxy)
+- [External PostgreSQL](#external-postgresql)
 - [First sign-in with the administrator token](#first-sign-in-with-the-administrator-token)
 - [Teams, projects and invites](#teams-projects-and-invites)
 - [First cycle and roles](#first-cycle-and-roles)
@@ -128,6 +129,8 @@ Flags and environment variables for an unattended run:
 | `--http-addr` | `CADENCE_HTTP_ADDR` | `proxy` mode: where Caddy listens, default `127.0.0.1:8080` |
 | `--team`, `--team-name` | `SDLC_BOOTSTRAP_TEAM`, `SDLC_BOOTSTRAP_TEAM_NAME` | optional first team |
 | `--name` | `COMPOSE_PROJECT_NAME` | installation name on this machine, default `cadence`; see below |
+| `--external-db URL` | `CADENCE_EXTERNAL_DB` | keep the data in your own PostgreSQL instead of the container; see [External PostgreSQL](#external-postgresql) |
+| `--external-db-ca FILE` | `CADENCE_EXTERNAL_DB_CA` | the CA of that server: copied to `secrets/db-ca.pem`, `sslmode=verify-full` |
 | `--yes` | | ask nothing (also when there is no terminal) |
 | | `SDLC_ADMIN_TOKEN` | use this administrator token instead of generating one |
 
@@ -233,6 +236,191 @@ A proxy on another machine needs `CADENCE_HTTP_ADDR=0.0.0.0:8080` (or the
 address of the internal interface) and a firewall that admits only the proxy.
 Sign-in redirects are built from the address in the browser, so nothing in
 `.env` needs the public host name in this mode.
+
+## External PostgreSQL
+
+By default the data lives in the `postgres` container of the stack and its
+`pgdata` volume. A company that runs its databases itself — Amazon RDS,
+Google Cloud SQL, Azure Database for PostgreSQL, its own cluster — can keep
+the data there instead. The stack then has no `postgres` container; the API
+applies the schema to your database on start, as it does to its own.
+
+```bash
+curl -fsSL https://github.com/cadence-lab-tech/self-hosted/releases/latest/download/get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:8080 --external-db 'postgres://cadence:PASSWORD@db.internal:5432/cadence' --external-db-ca ./rds-ca.pem
+./install.sh --domain cadence.example.com --email ops@example.com --external-db 'postgres://cadence:PASSWORD@db.internal:5432/cadence?sslmode=verify-full&sslrootcert=system'
+clab server install --mode proxy --http-addr 127.0.0.1:8080 --external-db 'postgres://cadence:PASSWORD@db.internal:5432/cadence' --external-db-ca rds-ca.pem
+```
+
+Quote the URL: it has `?` and `&`. Percent-encode the characters of the
+password that a URL reserves (`@` is `%40`, `/` is `%2F`, `%` is `%25`, `'` is
+`%27`). The path to the CA may be relative: `get-cadence.sh` resolves it
+before it changes into the new directory.
+
+**Before anything is written** the installer checks the database twice: as
+the service will see it — `/api dbcheck` of the backend image of `VERSION`,
+the same driver and TLS as the API — and as the backup client will (`psql`
+of `db-client`, below). It refuses, naming the cause and what to do, when the
+URL does not parse or has a parameter the two do not read the same way; the
+host is unreachable; TLS, the CA or the host name do not match; the password
+is wrong; the server is older than 15 or newer than 18; `vector` is missing
+(or older than 0.5.0) and the role cannot create it, and the same for
+`pgcrypto`; the role cannot create objects in the schema `public`; the
+database has tables that are not Cadence Lab's; or the schema of Cadence Lab
+in it is newer than the images. A database that already holds the schema of
+this or an older version is accepted with a warning: the installation takes
+its data over. The directory stays as it was, without `.env`: fix the cause
+and run `./install.sh` there again with the same flags (or
+`clab server install --dir` the same directory). The same check runs by hand
+at any time, read-only:
+
+```bash
+docker compose run --rm --no-deps -T api dbcheck          # add --json for a machine-readable report
+```
+
+`.env` gets `CADENCE_DB=external`, the URL in `SDLC_DATABASE_URL` (mode 600,
+like the rest of `.env`; never printed by the scripts) and
+`compose.external-db.yml` in `COMPOSE_FILE` after the file of the mode;
+`POSTGRES_PASSWORD` stays empty. The external mode needs Docker Compose 2.20
+or newer; the bundled mode keeps working on older ones.
+
+### Server, extensions and the role
+
+- **PostgreSQL 15, 16, 17 or 18.** The backup client is PostgreSQL 18
+  (`pgvector/pgvector:pg18`), whose `pg_dump` reads all of them.
+- **Extensions `vector` (pgvector 0.5.0 or newer) and `pgcrypto`.** On a
+  managed server only an administrative role may create `vector`; do it once,
+  connected to the database of Cadence Lab:
+
+  ```sql
+  -- as rds_superuser (Amazon RDS), cloudsqlsuperuser (Cloud SQL),
+  -- azure_pg_admin (Azure; allow-list VECTOR and PGCRYPTO in azure.extensions first)
+  CREATE EXTENSION IF NOT EXISTS vector;
+  CREATE EXTENSION IF NOT EXISTS pgcrypto;
+  ```
+
+  If the role of Cadence Lab may create them itself, the API does it on the
+  first start.
+- **A database and a role of their own, the role owning the database:**
+
+  ```sql
+  CREATE ROLE cadence LOGIN PASSWORD '...';
+  CREATE DATABASE cadence OWNER cadence;
+  ```
+
+  The role needs no superuser and no `CREATEDB`: it creates the tables,
+  indexes and functions of the schema in `public`. Without ownership of the
+  database grant it the schema instead:
+  `GRANT USAGE, CREATE ON SCHEMA public TO cadence;`. Do not share the
+  database with other applications: the installer refuses foreign tables,
+  and a restore removes every object of `public` it can.
+
+### TLS and the URL
+
+`SDLC_DATABASE_URL` is `postgres://USER:PASSWORD@HOST:PORT/DATABASE?PARAMETERS`
+(the `key=value` form is not supported). `sslmode` must be named:
+
+| `sslmode` | |
+|---|---|
+| `verify-full` | the certificate is signed by the CA of `sslrootcert` and names the host of the URL. The default with `--external-db-ca` |
+| `verify-ca` | signed by that CA, any host name |
+| `require` | encrypted, the server is not verified — the installer warns |
+| `prefer`, `allow`, `disable` | possibly unencrypted — the installer warns loudly; only on a network you trust |
+
+`verify-full` and `verify-ca` need `sslrootcert`: a file under `/secrets`
+(`--external-db-ca FILE` copies it to `secrets/db-ca.pem` with mode 644, so
+that the service, uid 65532, can read it) or `system` for a CA the system
+trusts (a server behind a public CA). Without `sslmode` the installer
+refuses: both clients would silently fall back to `prefer`. Amazon RDS
+publishes its CA bundle at
+<https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem>; Cloud SQL
+and Azure offer theirs in the console.
+
+The parameters the service (pgx) and the backup client (libpq) read the same
+way are the only ones allowed: `host`, `port`, `dbname`, `user`,
+`password`, `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `sslpassword`,
+`sslsni`, `sslnegotiation`, `channel_binding`, `connect_timeout`,
+`target_session_attrs`, `application_name`, `options`. Others — pool
+settings such as `pool_max_conns` included — are refused by name: one of the
+clients would read them differently or fail. A client certificate goes the
+same way as the CA: put it into `secrets/` (readable by uid 65532) and name
+`/secrets/<file>` in `sslcert` and `sslkey`.
+
+### Connections and pools
+
+The API and the worker hold a pool each, up to `SDLC_DB_MAX_CONNS`
+connections (10), and wait `SDLC_DB_CONNECT_TIMEOUT` (30s) for the database
+on start; set both in `.env`. The stack opens at most
+`SDLC_DB_MAX_CONNS × (API replicas + 1 worker)` connections, plus one for a
+backup or a restore; keep that below `max_connections` of the server minus
+what other clients need. A connection pooler in front of the server
+(PgBouncer, RDS Proxy) is supported only in `session` mode: the service holds
+session advisory locks while it migrates and uses prepared statements, which
+the `transaction` and `statement` modes break.
+
+### Backups, restore and snapshots
+
+`./backup.sh`, `clab server backup` and the backup step of an upgrade run
+`pg_dump` of the backup client `db-client` (a container of the profile
+`tools`, in the network of the installation, with `secrets/` as `/secrets`)
+against `SDLC_DATABASE_URL`. The password reaches it as `PGPASSWORD`, never
+on a command line. The files and their names are those of the bundled mode
+(see [Backups](#backups)): the same dump without owners, privileges and
+extensions, so a backup of the bundled database restores into an external
+one and back.
+
+`./restore.sh FILE` and `clab server restore FILE` check that the database
+answers, stop the API and the worker, and in **one transaction** create the
+extensions if they are missing (when the role may), remove every object of
+the schema `public` except those of the extensions, and load the dump. No
+`DROP DATABASE`, no connection to the database `postgres`, no superuser: the
+role of the URL is enough. A failed load is rolled back and leaves the
+database as it was.
+
+Snapshots and point-in-time recovery of your provider complement the dumps;
+`pg_dump` stays the backup the scripts know about. To go back to a snapshot:
+restore it into a new instance with the tools of the provider, point
+`SDLC_DATABASE_URL` in `.env` at it, run `docker compose run --rm --no-deps -T api dbcheck`,
+then `export CADENCE_VERSION=$(cat VERSION) && docker compose up -d`. The
+schema in the snapshot must be that of `VERSION`: a snapshot taken before an
+upgrade goes with the package files of the old version
+(`backups/package-<version>-<date>.tar.gz`), exactly as a dump does.
+
+### Upgrades
+
+`./upgrade.sh` and `clab server upgrade` need no `postgres` container. Before
+the backup they check the database with the images of the new version and
+the compose files of its package (`/api dbcheck`); a database they cannot
+use stops the upgrade while nothing has changed. The printed rollback
+(`tar -xpzf …` and `./restore.sh --yes …`) restores the backup into the same
+external database.
+
+### Moving from the bundled database
+
+There is no automatic move; it takes one backup and one restore, with a
+downtime of both:
+
+1. Prepare the database, the role and the extensions as above; put the CA
+   into `secrets/db-ca.pem` (mode 644) if the URL names it. Check them from
+   the installation:
+   `docker compose run --rm --no-deps -T -e SDLC_DATABASE_URL='postgres://…' api dbcheck --install`
+   (in the bundled mode the variable has to be given explicitly like this).
+2. Take a backup: `./backup.sh` (on v0.10.0 or later, whose dumps carry no
+   owners and extensions).
+3. Stop the stack: `docker compose down` (keep the volumes).
+4. In `.env` set `CADENCE_DB=external`, `SDLC_DATABASE_URL='postgres://…'`
+   and add `compose.external-db.yml` to `COMPOSE_FILE` after the file of the
+   mode.
+5. Create the containers on the new settings and restore the backup into the
+   new database (the restore reaches the blobs volume through the `api`
+   container, which `down` removed):
+   `docker compose create && ./restore.sh --yes backups/cadence-<version>-<date>.sql.gz`
+   — it starts the stack on the external database.
+6. When everything is in place, remove the old volume:
+   `docker volume rm <name>_pgdata`.
+
+A dump of a PostgreSQL 17 server names `transaction_timeout`, which servers
+15 and 16 do not know; the restore drops that line, so moving to an older
+external server works too.
 
 ## First sign-in with the administrator token
 
@@ -633,11 +821,17 @@ docker compose logs worker | grep 'эмбеддинги не посчитаны'
 ```
 
 writes `backups/cadence-<version>-<YYYYmmdd-HHMMSS>.sql.gz` — a dump of the
-database made inside the Postgres container — and, when artifact content
+database made inside the Postgres container, or with an
+[external database](#external-postgresql) by the backup client `db-client` —
+and, when artifact content
 lives in the `blobs` volume (`SDLC_BLOB_S3_BUCKET` is empty), the archive of
 that volume next to it, `….blobs.tar.gz`. A dump smaller than 1 KB is treated
-as a failure. Backups older than `KEEP_DAYS` (14) are deleted;
-`BACKUP_DIR` writes elsewhere.
+as a failure, and so is a database that does not answer: no dump file is
+left then. Backups older than `KEEP_DAYS` (14) are deleted;
+`BACKUP_DIR` writes elsewhere. From v0.10.0 the dump is plain SQL without
+owners, privileges and extensions (`pg_dump --no-owner --no-privileges
+--exclude-extension`): it loads into an empty database as its owner, the
+bundled one or an external one; the restore creates the extensions first.
 
 Schedule it nightly for root (or a user in the `docker` group):
 
@@ -662,8 +856,10 @@ clab server restore backups/cadence-v0.6.1-20261008-030000.sql.gz   # the same w
 ```
 
 It stops the API and the worker, drops and recreates the database from the
-dump, puts the `blobs` archive back if there is one, starts the stack and
-waits until it is ready. **Everything written after the backup is lost.** It
+dump (with an external database: removes the objects of Cadence Lab and
+loads the dump in one transaction, see
+[External PostgreSQL](#backups-restore-and-snapshots)), puts the `blobs`
+archive back if there is one, starts the stack and waits until it is ready. **Everything written after the backup is lost.** It
 asks for confirmation; `--yes` skips it.
 
 The backup must match the running version (`VERSION`). If it was taken on
@@ -731,7 +927,9 @@ needed. The script:
    `.env` and local compose changes in `compose.override.yml`, see below);
    `./upgrade.sh --force v0.6.0` replaces the edited files, and their edited
    copies stay in the package copy of step 5;
-4. takes a backup of the current version;
+4. takes a backup of the current version; with an
+   [external database](#external-postgresql) it first checks the database
+   with the images of the new version and stops if they cannot use it;
 5. keeps the current package files in
    `backups/package-<version>-<date>.tar.gz`, then replaces them with the new
    ones and removes the files the new package no longer has; `.env`,
@@ -1177,7 +1375,7 @@ rollback — so the same steps go without bash and its tools:
 
 ```bash
 clab server install --mode proxy --http-addr 127.0.0.1:8080   # = get-cadence.sh | sh: a new installation in ./cadence (v0.8.0+)
-clab server status                       # directory, installation name, versions of the stack and of clab, mode, services
+clab server status                       # directory, installation name, versions of the stack and of clab, mode, database, services
 clab server backup                       # = ./backup.sh
 clab server restore backups/cadence-v0.7.0-20261008-030000.sql.gz   # = ./restore.sh (asks; --yes skips)
 clab server upgrade                      # = ./upgrade.sh: the latest release
@@ -1195,7 +1393,9 @@ It reads the same `.env` and the same variables as the scripts
 takes the installation name from `COMPOSE_PROJECT_NAME` in `.env` and refuses
 another one in the environment, like the scripts (see
 [Several installations on one machine](#several-installations-on-one-machine)),
-writes the same files under the same names, and
+writes the same files under the same names, takes `--external-db` and
+`--external-db-ca` and backs up, restores and upgrades an
+[external database](#external-postgresql) the same way (v0.10.0+), and
 prints the same rollback, with `clab server restore --yes` in place of
 `./restore.sh --yes`. Output is in English, like the scripts.
 
@@ -1239,3 +1439,16 @@ docker compose exec caddy wget -qO- http://worker:9090/metrics | grep '^cadence_
   see [Behind your reverse proxy](#behind-your-reverse-proxy).
 - **GitHub App: `Bad credentials`** — the key file is unreadable for uid
   65532 or the machine clock is off.
+- **External database: the API does not become ready** — run
+  `docker compose run --rm --no-deps -T api dbcheck`: it names what is wrong
+  (TLS, the password, the extensions, the privileges, the schema). A host
+  that is `localhost` in the URL is the container itself; use the address of
+  the database server as the containers see it.
+- **External database: `too many connections`** — lower
+  `SDLC_DB_MAX_CONNS` in `.env` or raise `max_connections` of the server;
+  see [Connections and pools](#connections-and-pools).
+- **External database: backups fail, the service works** — the backup
+  client (`psql`, `pg_dump`) reads the URL with libpq; the installer checks
+  both, but a URL edited in `.env` later is not checked:
+  `docker compose run --rm --no-deps -T api dbcheck` and `./backup.sh` show
+  the error.

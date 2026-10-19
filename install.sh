@@ -21,6 +21,13 @@
 # machine needs a name of its own. It is not a project inside Cadence Lab:
 # one installation holds any number of teams and projects.
 #
+# --external-db URL (or CADENCE_EXTERNAL_DB) puts the data into your own
+# PostgreSQL 15-18 instead of the postgres container: URL is
+# postgres://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=verify-full, and
+# --external-db-ca FILE (or CADENCE_EXTERNAL_DB_CA) the CA of the server,
+# copied to secrets/. The database is checked before anything is written
+# (docs/admin.md, "External PostgreSQL").
+#
 # It runs once. With an existing .env it stops and changes nothing:
 # regenerating the secrets would lock the database volume out with a new
 # password.
@@ -31,7 +38,7 @@ cd "$(dirname "$0")"
 . ./lib.sh
 
 usage() {
-  sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -42,6 +49,8 @@ http_addr="${CADENCE_HTTP_ADDR:-}"
 team="${SDLC_BOOTSTRAP_TEAM:-}"
 team_name="${SDLC_BOOTSTRAP_TEAM_NAME:-}"
 admin_token="${SDLC_ADMIN_TOKEN:-}"
+db_url="${CADENCE_EXTERNAL_DB:-}"
+db_ca="${CADENCE_EXTERNAL_DB_CA:-}"
 name=""
 assume_yes=false
 timeout="${CADENCE_READY_TIMEOUT:-300}"
@@ -55,6 +64,8 @@ while [ $# -gt 0 ]; do
   --team) team="${2:?--team needs a key}"; shift 2 ;;
   --team-name) team_name="${2:?--team-name needs a name}"; shift 2 ;;
   --name) name="${2:?--name needs a name of the installation}"; shift 2 ;;
+  --external-db) db_url="${2:?--external-db needs a URL postgres://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=verify-full}"; shift 2 ;;
+  --external-db-ca) db_ca="${2:?--external-db-ca needs the file of the CA of the database server}"; shift 2 ;;
   -y | --yes | --non-interactive) assume_yes=true; shift ;;
   -h | --help) usage 0 ;;
   *) warn "unknown argument: $1"; usage 2 >&2 ;;
@@ -205,6 +216,78 @@ else
   token_generated=true
 fi
 
+# --- external database -------------------------------------------------------------
+# url_with_param URL KEY VALUE appends KEY=VALUE to the query of URL.
+url_with_param() {
+  case "$1" in
+  *"?"*) printf '%s&%s=%s\n' "$1" "$2" "$3" ;;
+  *) printf '%s?%s=%s\n' "$1" "$2" "$3" ;;
+  esac
+}
+# external_precheck: the database, as the service will see it (/api dbcheck
+# of the image of VERSION) and as the backup client will (psql of db-client).
+# Runs before .env exists, so the settings come from the environment; what
+# compose creates for the run (network, volumes) is removed after it.
+external_precheck() (
+  # shellcheck disable=SC2030 # the settings of this run only
+  export COMPOSE_PROJECT_NAME="$name" COMPOSE_FILE="docker-compose.yml:$EXTERNAL_DB_FILE" \
+    CADENCE_DB=external SDLC_DATABASE_URL="$db_url" POSTGRES_PASSWORD=
+  rc=0
+  db_check --install || rc=1
+  if [ "$rc" = 0 ]; then
+    info "checking the backup client (pg_dump and psql of $(docker compose config --images db-client 2>/dev/null || echo db-client)) with the same URL"
+    if db_client_check; then
+      ok "the backup client connects"
+    else
+      warn "the backup client (libpq) cannot connect with SDLC_DATABASE_URL, though the service can: see its error above"
+      rc=1
+    fi
+  fi
+  # The run created the network and the volumes of api under the name of
+  # this installation, which was free a moment ago: a refused attempt must
+  # not leave them to make the name look taken.
+  docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+  exit "$rc"
+)
+db_mode=bundled
+if [ -n "$db_ca" ] && [ -z "$db_url" ]; then
+  die "--external-db-ca needs --external-db URL"
+fi
+if [ -n "$db_url" ]; then
+  db_mode=external
+  case "$db_url" in
+  postgres://* | postgresql://*) ;;
+  *) die "--external-db must be a URL: postgres://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=verify-full (the key=value form is not supported)" ;;
+  esac
+  case "$db_url" in
+  *"'"* | *$'\n'*) die "--external-db must not contain a single quote or a line break: percent-encode it (%27)" ;;
+  esac
+  require_compose_for_external_db
+  mkdir -p secrets
+  chmod 711 secrets
+  if [ -n "$db_ca" ]; then
+    if [ ! -f "$db_ca" ] || [ ! -r "$db_ca" ]; then
+      die "--external-db-ca: no readable file $db_ca"
+    fi
+    grep -q 'BEGIN CERTIFICATE' "$db_ca" || die "--external-db-ca: $db_ca is not a PEM certificate"
+    case "$db_url" in
+    *"?sslrootcert="* | *"&sslrootcert="*) die "the CA is given twice: --external-db-ca and sslrootcert in --external-db; keep one" ;;
+    esac
+    # The service runs as uid 65532: the CA must be readable by it.
+    cp "$db_ca" secrets/db-ca.pem
+    chmod 644 secrets/db-ca.pem
+    db_url="$(url_with_param "$db_url" sslrootcert /secrets/db-ca.pem)"
+    case "$db_url" in
+    *"?sslmode="* | *"&sslmode="*) ;;
+    *) db_url="$(url_with_param "$db_url" sslmode verify-full)" ;;
+    esac
+  fi
+  info "checking the external database $(db_target "$db_url")"
+  external_precheck || die "the external database is not ready (see above). Nothing was written:
+  fix the database or the URL and run ./install.sh again in $(pwd) with the same flags (docs/admin.md, \"External PostgreSQL\")"
+  compose_file="docker-compose.yml:compose.$mode.yml:$EXTERNAL_DB_FILE:compose.override.yml"
+fi
+
 # --- 4. .env ---------------------------------------------------------------------------
 info "writing .env"
 # set_kv writes KEY=VALUE over the template line; values go through ENVIRON,
@@ -239,7 +322,13 @@ else
   set_kv ACME_EMAIL ""
   set_kv CADENCE_HTTP_ADDR "$http_addr"
 fi
-set_kv POSTGRES_PASSWORD "$(gen_hex 24)"
+set_kv CADENCE_DB "$db_mode"
+if [ "$db_mode" = external ]; then
+  set_kv SDLC_DATABASE_URL "$db_url"
+  set_kv POSTGRES_PASSWORD ""
+else
+  set_kv POSTGRES_PASSWORD "$(gen_hex 24)"
+fi
 set_kv SDLC_ADMIN_TOKEN "$admin_token"
 set_kv SDLC_GITHUB_WEBHOOK_SECRET "$(gen_hex 24)"
 set_kv SDLC_BOOTSTRAP_TEAM "$team"
@@ -289,6 +378,10 @@ fi
 ok "Cadence Lab $CADENCE_VERSION is up"
 say ""
 say "  Address:              $(public_url)"
+if external_db; then
+  # shellcheck disable=SC2031 # from .env (load_env), not from the precheck
+  say "  Database:             external $(db_target "$SDLC_DATABASE_URL")"
+fi
 if [ "$token_generated" = true ]; then
   say "  Administrator token:  $SDLC_ADMIN_TOKEN"
   say "                        (shown once; it is also in .env - keep both private)"

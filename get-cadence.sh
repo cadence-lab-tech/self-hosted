@@ -8,8 +8,8 @@
 # Downloads the package of the release and its checksums.txt, verifies the
 # checksum, unpacks the package into a new directory and runs install.sh of
 # the package there with the other flags (--mode, --domain, --email,
-# --http-addr, --team, --team-name, --name, --yes; see docs/admin.md,
-# "Install"). A second installation on the same machine needs its own --dir
+# --http-addr, --team, --team-name, --name, --external-db, --external-db-ca,
+# --yes; see docs/admin.md, "Install"). A second installation on the same machine needs its own --dir
 # and its own --name (docs/admin.md, "Several installations on one machine").
 # Without a terminal - as above, where the script itself comes on stdin -
 # install.sh asks nothing and takes the answers from the flags.
@@ -46,7 +46,10 @@ get-cadence.sh [--version vX.Y.Z] [--dir DIR] [flags of install.sh]
   other flags        go to install.sh of the package: --mode, --domain,
                      --email, --http-addr, --team, --team-name, --name, --yes;
                      --name NAME names the installation on this machine
-                     (default cadence), a second one needs its own
+                     (default cadence), a second one needs its own;
+                     --external-db URL and --external-db-ca FILE put the data
+                     into your own PostgreSQL (docs/admin.md, "External
+                     PostgreSQL")
 
   CADENCE_RELEASES_URL   a mirror of the releases instead of GitHub
 USAGE
@@ -88,6 +91,18 @@ main() {
       esac
       shift
       n=$((n - 1))
+      ;;
+    --external-db-ca)
+      # install.sh runs in the new directory: a relative path to the CA
+      # would no longer be found there.
+      [ "$n" -gt 0 ] || die "$arg needs a value"
+      case "$1" in
+      /*) ca="$1" ;;
+      *) ca="$(pwd)/$1" ;;
+      esac
+      shift
+      n=$((n - 1))
+      set -- "$@" "$arg" "$ca"
       ;;
     -h | --help)
       usage

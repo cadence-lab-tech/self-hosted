@@ -65,6 +65,14 @@ the machine, its Docker Compose project, not a project inside Cadence Lab:
 The name is kept in `.env`; see
 [docs/admin.md](docs/admin.md#several-installations-on-one-machine).
 
+The data lives in the Postgres container of the stack by default. To keep it
+in your own PostgreSQL 15-18 instead (Amazon RDS, Cloud SQL, Azure, your
+cluster) pass its URL and the CA of the server; the database is checked
+before anything is written:
+`get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:8080 --external-db 'postgres://cadence:PASSWORD@db.internal:5432/cadence' --external-db-ca ./db-ca.pem`.
+See [docs/admin.md](docs/admin.md#external-postgresql) for the extensions,
+the privileges of the role, TLS, backups and moving an existing installation.
+
 The checksum protects against a broken or altered download, not against a
 release replaced at its source. From v0.9.0 the package and the images are
 signed by the release workflows of our repositories (Sigstore, no keys),
@@ -81,6 +89,7 @@ images by digest; the commands that check all of it are in
 | RAM | 4 GB | 8 GB |
 | Disk | 20 GB SSD | 50 GB SSD; code indexes and backups grow with repositories |
 | Software | Docker Engine 24+ with the compose v2 plugin, curl, tar, openssl | [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x to [verify a release](docs/admin.md#verifying-a-release) (recommended, not required) |
+| Database | none: the stack runs PostgreSQL 17 with pgvector | your own PostgreSQL 15-18 with pgvector 0.5+ and pgcrypto, and Docker Compose 2.20+ ([external PostgreSQL](docs/admin.md#external-postgresql)) |
 | Network | `tls`: ports 80 and 443 from the internet; `proxy`: one port for your proxy | outbound HTTPS to `ghcr.io`, GitHub and your embeddings provider, if any |
 
 GitHub has to reach `https://<host>/webhooks/github` if you connect a GitHub
@@ -112,12 +121,13 @@ production: when the evaluation is over, deploy on a server.
 | `VERSION` | the version of Cadence Lab this package runs; both images use it |
 | `docker-compose.yml` | Postgres with pgvector, the API, the worker, the UI and Caddy; only Caddy publishes ports, the API and the worker serve Prometheus metrics inside the network ([monitoring](docs/admin.md#monitoring)) |
 | `compose.tls.yml`, `compose.proxy.yml` | the published ports of each mode, picked by `COMPOSE_FILE` in `.env` |
+| `compose.external-db.yml` | your own PostgreSQL instead of the container (`CADENCE_DB=external`): no `postgres`, the backup client `db-client` |
 | `compose.override.yml` | not in the package: your local compose changes, created by `install.sh` and listed in `COMPOSE_FILE` |
 | `Caddyfile` | routing and TLS for both modes, picked by `CADENCE_MODE` |
 | `.env.example` | every setting, with where to get its value; `install.sh` turns it into `.env` |
 | `install.sh` | first installation: checks, secrets, `.env`, start |
 | `upgrade.sh` | backup, package files of the new release, new images, start, readiness check |
-| `backup.sh`, `restore.sh` | database dump and the artifact volume; restore with a version check |
+| `backup.sh`, `restore.sh` | database dump and the artifact volume, the bundled or an external database; restore with a version check |
 | `lib.sh` | helpers the scripts share |
 | `docs/admin.md` | the administrator guide |
 | `SECURITY.md` | the security policy: reporting a vulnerability, response times, supported versions |

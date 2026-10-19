@@ -7,7 +7,11 @@
 #   ./restore.sh --yes backups/cadence-v0.5.0-20261008-030000.sql.gz   # no prompt
 #
 # EVERYTHING written after the backup is lost: the database is dropped and
-# recreated from the dump.
+# recreated from the dump. With an external database (CADENCE_DB=external)
+# nothing is dropped but the objects of Cadence Lab in the schema public:
+# they go and the dump is loaded in one transaction, by the role of
+# SDLC_DATABASE_URL - no superuser, no DROP DATABASE; a failed load leaves
+# the database as it was.
 #
 # The backup must match the version in VERSION: migrations only go forward,
 # and a dump of one schema under images of another version is not a state
@@ -28,7 +32,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
   -y | --yes) assume_yes=true; shift ;;
   --ignore-version) ignore_version=true; shift ;;
-  -h | --help) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h | --help) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   -*) die "unknown option: $1" ;;
   *) [ -z "$file" ] || die "one backup file at a time"; file="$1"; shift ;;
   esac
@@ -81,26 +85,50 @@ fi
 db="${POSTGRES_DB:-sdlc}"
 user="${POSTGRES_USER:-sdlc}"
 
+if external_db; then
+  # Before anything stops: an unreachable database leaves the stack running.
+  info "checking the external database $(db_target "$SDLC_DATABASE_URL")"
+  db_client_check || die "the backup client cannot connect to the external database (see above); nothing was changed"
+fi
+
 info "stopping api and worker"
 docker compose stop api worker >/dev/null
 
-info "starting postgres"
-docker compose up -d postgres >/dev/null
-for _ in $(seq 1 60); do
-  docker compose exec -T postgres pg_isready -U "$user" -d postgres >/dev/null 2>&1 && break
-  sleep 2
-done
-docker compose exec -T postgres pg_isready -U "$user" -d postgres >/dev/null 2>&1 ||
-  die "postgres did not become ready"
+if external_db; then
+  db_url_parts "$SDLC_DATABASE_URL"
+  info "loading $name into $(db_target "$SDLC_DATABASE_URL") (one transaction)"
+  # transaction_timeout exists since PostgreSQL 17; a dump of a 17 server
+  # names it, a 15 or 16 server would refuse it.
+  if ! { db_reset_sql; gunzip -c "$file" | sed '/^SET transaction_timeout = 0;$/d'; } |
+    db_client psql -X -q -v ON_ERROR_STOP=1 --single-transaction -d "$DB_URL_SAFE" >/dev/null; then
+    die "loading $name failed (see above); the transaction is rolled back and the database is as it was.
+  Start the stack again: export CADENCE_VERSION=\$(cat VERSION) && docker compose up -d"
+  fi
+else
+  info "starting postgres"
+  docker compose up -d postgres >/dev/null
+  for _ in $(seq 1 60); do
+    docker compose exec -T postgres pg_isready -U "$user" -d postgres >/dev/null 2>&1 && break
+    sleep 2
+  done
+  docker compose exec -T postgres pg_isready -U "$user" -d postgres >/dev/null 2>&1 ||
+    die "postgres did not become ready"
 
-info "recreating database $db"
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U "$user" -d postgres \
-  -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE)" \
-  -c "CREATE DATABASE \"$db\" OWNER \"$user\"" >/dev/null
+  info "recreating database $db"
+  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U "$user" -d postgres \
+    -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE)" \
+    -c "CREATE DATABASE \"$db\" OWNER \"$user\"" >/dev/null
 
-info "loading $name"
-gunzip -c "$file" |
-  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U "$user" -d "$db" >/dev/null
+  # Dumps leave the extensions out (lib.sh, DUMP_OPTIONS): they are created
+  # first. A dump of an older version still has them and recreates them
+  # itself.
+  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U "$user" -d "$db" \
+    -c "CREATE EXTENSION IF NOT EXISTS vector" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto" >/dev/null
+
+  info "loading $name"
+  gunzip -c "$file" |
+    docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U "$user" -d "$db" >/dev/null
+fi
 
 if [ -n "$blobs" ]; then
   api="$(container_of api)"

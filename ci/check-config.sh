@@ -40,7 +40,7 @@ lacks() { ! grep -qF -- "$2" <<<"$1"; }
 version="$(tr -d '[:space:]' <VERSION)"
 
 info "layout"
-for f in docker-compose.yml compose.tls.yml compose.proxy.yml .env.example Caddyfile README.md docs/admin.md LICENSE SECURITY.md VERSION; do
+for f in docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml .env.example Caddyfile README.md docs/admin.md LICENSE SECURITY.md VERSION; do
   check "$f exists" [ -f "$f" ]
 done
 for f in install.sh upgrade.sh backup.sh restore.sh get-cadence.sh ci/package.sh; do
@@ -58,7 +58,7 @@ info "release package"
 # and nothing of the repository around them. The required list is kept here,
 # apart from the list in ci/package.sh, so that a file dropped from the
 # package turns this check red.
-required_files="VERSION docker-compose.yml compose.tls.yml compose.proxy.yml Caddyfile .env.example
+required_files="VERSION docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml Caddyfile .env.example
   install.sh upgrade.sh backup.sh restore.sh lib.sh bundles/starter.json docs/admin.md README.md LICENSE SECURITY.md
   package.sha256"
 dist="$(mktemp -d)"
@@ -259,7 +259,8 @@ check "the documentation shows the one-line installer with flags" [ "$documented
 # has clab server (v0.7.0); before that the check is skipped. A command the
 # tap's clab of VERSION does not list yet is documented ahead of its release
 # (CLAB-160): skipped with a note until VERSION catches up, checked with
-# CLAB_BIN of the branch that brings it.
+# CLAB_BIN of the branch that brings it. The same for a flag of clab server
+# install that install.sh of this checkout already takes.
 info "documented clab server flags"
 clab_server="${CLAB_BIN:-}"
 if [ -z "$clab_server" ] && ! version_lt "$version" v0.7.0; then
@@ -292,6 +293,11 @@ else
         documented=$((documented + 1))
         if grep -qxF -- "$flag" <<<"$sub_flags"; then
           pass "$f:$line: clab server $sub takes $flag"
+        elif [ -z "${CLAB_BIN:-}" ] && [ "$sub" = install ] && grep -qxF -- "$flag" <<<"$install_flags"; then
+          # clab server install takes the flags of install.sh: a flag
+          # install.sh of this checkout has is documented ahead of the clab
+          # release that brings it (CLAB-127), like a command above.
+          info "skipped $f:$line: clab $version has no 'clab server install $flag' yet (install.sh has it); CLAB_BIN=<clab with it> checks it"
         else
           fail "$f:$line: clab server $sub has no flag $flag"
         fi
@@ -332,7 +338,7 @@ check "every role of $bundle stands on a status" [ "$(jq -r '[.workflows[].statu
 info ".env.example"
 env_example="$(cat .env.example)"
 for kv in COMPOSE_PROJECT_NAME=cadence SDLC_TENANCY=single SDLC_PROJECT_CREATION=teams SDLC_AUTH_MODE=token SDLC_EMBEDDINGS_PROVIDER=none \
-  SDLC_SEED= SDLC_EMBEDDINGS_MODEL= POSTGRES_PASSWORD= SDLC_ADMIN_TOKEN=; do
+  SDLC_SEED= SDLC_EMBEDDINGS_MODEL= POSTGRES_PASSWORD= SDLC_ADMIN_TOKEN= CADENCE_DB=bundled SDLC_DATABASE_URL=; do
   check ".env.example sets $kv" grep -qxF "$kv" .env.example
 done
 check ".env.example sets no image version" lacks "$(grep -v '^#' <<<"$env_example")" "CADENCE_VERSION="
@@ -485,6 +491,64 @@ else
   fail "promtool check rules accepts them"
   printf '%s\n' "$promtool_out" >&2
 fi
+
+info "external database (compose.external-db.yml)"
+# CADENCE_DB=external: COMPOSE_FILE adds compose.external-db.yml after the
+# file of the mode. The postgres container and its volume are gone, the API
+# and the worker take SDLC_DATABASE_URL of .env, the backup client is a
+# service of the profile tools.
+ext_url='postgres://cadence:p%40ss@db.example.com:5432/cadence?sslmode=verify-full&sslrootcert=/secrets/db-ca.pem'
+ext_config() {
+  env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST POSTGRES_PASSWORD= CADENCE_VERSION="$version" \
+    COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE" "$@" docker compose config --format json
+}
+ext="$(ext_config SDLC_DATABASE_URL="$ext_url")"
+check "[external] compose takes the overlay" [ -n "$ext" ]
+check "[external] no postgres service" [ "$(jq -r '.services | has("postgres")' <<<"$ext")" = false ]
+check "[external] no pgdata volume" [ "$(jq -r '.volumes // {} | has("pgdata")' <<<"$ext")" = false ]
+check "[external] api and worker take SDLC_DATABASE_URL of .env" \
+  [ "$(jq -r '[.services.api.environment.SDLC_DATABASE_URL, .services.worker.environment.SDLC_DATABASE_URL] | unique | join(" ")' <<<"$ext")" = "$ext_url" ]
+check "[external] api does not wait for postgres (depends_on.required: false)" \
+  [ "$(jq -r '.services.api.depends_on.postgres.required' <<<"$ext")" = false ]
+check "[external] only caddy publishes ports" \
+  [ "$(jq -r '[.services | to_entries[] | select(.value.ports != null) | .key] | join(" ")' <<<"$ext")" = caddy ]
+tools="$(ext_config SDLC_DATABASE_URL="$ext_url" COMPOSE_PROFILES=tools)"
+check "[external] the backup client is pgvector/pgvector:pg18 with /secrets" \
+  [ "$(jq -r '.services["db-client"] | "\(.image) \(.volumes[0].target)"' <<<"$tools")" = "pgvector/pgvector:pg18 /secrets" ]
+missing="$(ext_config SDLC_DATABASE_URL= 2>&1 || true)"
+check "[external] without SDLC_DATABASE_URL compose refuses, naming it" contains "$missing" "SDLC_DATABASE_URL is not set in .env"
+bundled="$(POSTGRES_PASSWORD=x CADENCE_VERSION="$version" COMPOSE_FILE=docker-compose.yml:compose.proxy.yml docker compose config --format json)"
+check "[bundled] the postgres service stays" [ "$(jq -r '.services | has("postgres")' <<<"$bundled")" = true ]
+check "[bundled] SDLC_DATABASE_URL is the postgres container" \
+  contains "$(jq -r .services.api.environment.SDLC_DATABASE_URL <<<"$bundled")" "@postgres:5432/"
+check "[bundled] no backup client service" [ "$(jq -r '.services | has("db-client")' <<<"$bundled")" = false ]
+pool="$(POSTGRES_PASSWORD=x CADENCE_VERSION="$version" COMPOSE_FILE=docker-compose.yml:compose.proxy.yml SDLC_DB_MAX_CONNS=7 SDLC_DB_CONNECT_TIMEOUT=45s docker compose config --format json)"
+check "SDLC_DB_MAX_CONNS and SDLC_DB_CONNECT_TIMEOUT of .env reach api and worker" \
+  [ "$(jq -r '[.services.api.environment, .services.worker.environment] | map("\(.SDLC_DB_MAX_CONNS)/\(.SDLC_DB_CONNECT_TIMEOUT)") | unique | join(" ")' <<<"$pool")" = "7/45s" ]
+check "...and default to 10 and 30s" \
+  [ "$(jq -r '"\(.services.api.environment.SDLC_DB_MAX_CONNS)/\(.services.api.environment.SDLC_DB_CONNECT_TIMEOUT)"' <<<"$bundled")" = "10/30s" ]
+
+# check_db_mode of the scripts: CADENCE_DB, SDLC_DATABASE_URL and COMPOSE_FILE
+# agree, or the scripts refuse.
+db_mode_of() {
+  (env -u CADENCE_DB -u SDLC_DATABASE_URL "$@" bash -c '. ./lib.sh && check_db_mode && echo ok' 2>&1)
+}
+check "check_db_mode: bundled without the overlay" [ "$(db_mode_of COMPOSE_FILE=docker-compose.yml:compose.proxy.yml)" = ok ]
+check "check_db_mode: external with the URL and the overlay" \
+  [ "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL="$ext_url" COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" = ok ]
+check "check_db_mode: external without the overlay is refused" \
+  contains "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL="$ext_url" COMPOSE_FILE=docker-compose.yml:compose.proxy.yml)" "does not include $EXTERNAL_DB_FILE"
+check "check_db_mode: external without the URL is refused" \
+  contains "$(db_mode_of CADENCE_DB=external COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" "needs SDLC_DATABASE_URL"
+check "check_db_mode: the overlay with bundled is refused" \
+  contains "$(db_mode_of COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" "but CADENCE_DB is bundled"
+# db_url_parts: the password leaves the URL and is decoded for PGPASSWORD.
+parts="$(bash -c '. ./lib.sh && db_url_parts "$1" && printf "%s|%s|%s" "$DB_URL_SAFE" "$DB_PASSWORD" "$(db_target "$1")"' _ \
+  'postgres://cadence:Cad%40nce%2Fx%25y@db.example.com:5432/cadence?sslmode=require')"
+check "db_url_parts and db_target split and decode the URL" \
+  [ "$parts" = 'postgres://cadence@db.example.com:5432/cadence?sslmode=require|Cad@nce/x%y|db.example.com:5432/cadence' ]
+check "pg_dump options leave owners, privileges and extensions out" \
+  [ "$(bash -c '. ./lib.sh && echo "${DUMP_OPTIONS[*]}"')" = "--clean --if-exists --no-owner --no-privileges --exclude-extension=vector --exclude-extension=pgcrypto" ]
 
 info "Caddyfile"
 adapt() {

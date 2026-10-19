@@ -190,8 +190,20 @@ main() {
   fi
 
   # --- 3. backup ---------------------------------------------------------------------
-  running postgres || die "the stack is not running; start it before upgrading so that a backup can be taken:
+  if external_db; then
+    # The external database is checked by the images of the new version,
+    # with the compose files of its package, before the backup: a database
+    # the new version cannot use stops the upgrade while nothing has changed.
+    info "checking the external database $(db_target "$SDLC_DATABASE_URL") with the images of $target_version"
+    [ -f "$work/new/$EXTERNAL_DB_FILE" ] ||
+      die "the package of $target_version has no $EXTERNAL_DB_FILE: it cannot run on an external database. Nothing has changed."
+    CADENCE_VERSION="$target_version" docker compose --project-directory . \
+      -f "$work/new/docker-compose.yml" -f "$work/new/$EXTERNAL_DB_FILE" run --rm --no-deps -T api dbcheck ||
+      die "the external database is not ready for $target_version (see above). Nothing has changed."
+  else
+    running postgres || die "the stack is not running; start it before upgrading so that a backup can be taken:
   export CADENCE_VERSION=\$(cat VERSION) && docker compose up -d"
+  fi
   info "backup of $old_version"
   ./backup.sh
   # backup.sh names files by version and time, so the newest one is ours.
