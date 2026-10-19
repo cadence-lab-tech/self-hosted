@@ -43,6 +43,9 @@
 #   CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
 #     COMPOSE_PROJECT_NAME=check-<name> CHECK_HTTP_PORT=<port> ci/check-stack.sh
 #
+# The metrics of api and worker are checked on images of VERSION v0.10.0 or
+# later, and on images of a branch (a pin variable set) whatever VERSION is.
+#
 # The stacks are torn down with their volumes at the end: give them a
 # COMPOSE_PROJECT_NAME and a CHECK_HTTP_PORT (and the port after it) of their
 # own, never those of a running instance.
@@ -313,6 +316,52 @@ check "/ serves the UI" html
 webhook_code="$(http_code -X POST -H 'X-GitHub-Event: ping' -d '{}' "$base/webhooks/github")"
 check "/webhooks/github reaches the API and rejects an unsigned delivery ($webhook_code)" client_error "$webhook_code"
 check "caddy does not try ACME in proxy mode" lacks "$(docker compose logs caddy 2>&1 | tr '[:upper:]' '[:lower:]')" acme
+
+# --- metrics -------------------------------------------------------------------------
+# Prometheus metrics (since v0.10.0): each process listens on :9090 inside the
+# network, nothing is published, Caddy does not serve them. Read from the
+# caddy container - its busybox has wget. The images of VERSION before
+# v0.10.0 have no listener; images of a branch (a pin variable set) are
+# checked whatever VERSION says, since that is how a branch with metrics is
+# checked before its release.
+info "metrics"
+if version_lt "$version" v0.10.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+  info "skipped: the images of $version have no metrics (v0.10.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+else
+  scrape() { docker compose exec -T caddy wget -qO- "http://$1:9090/metrics" 2>/dev/null; }
+  # build_info SERVICE: its cadence_build_info line, labels in name order.
+  build_info() { scrape "$1" | grep '^cadence_build_info{' || true; }
+  # The worker starts once the API is healthy: give its listener a moment.
+  for _ in $(seq 30); do
+    [ -z "$(build_info worker)" ] || break
+    sleep 1
+  done
+  for service in api worker; do
+    line="$(build_info "$service")"
+    check "$service serves /metrics on :9090 with cadence_build_info of $version" \
+      contains "$line" "component=\"$service\""
+    check "...version=\"$version\"" contains "$line" "version=\"$version\""
+  done
+  api_metrics="$(scrape api)"
+  worker_metrics="$(scrape worker)"
+  check "api counts requests by route template (/readyz)" contains "$api_metrics" 'route="/readyz"'
+  check "api reports the database pool" contains "$api_metrics" "cadence_db_pool_max_connections "
+  check "worker reports the index queue" contains "$worker_metrics" 'cadence_index_queue_runs{state="queued"}'
+  check "worker reports leases" contains "$worker_metrics" 'cadence_leases{state="live"}'
+  check "worker has passed lease_sweep" contains "$worker_metrics" 'cadence_worker_job_last_success_timestamp_seconds{job="lease_sweep"}'
+  check "api has go_* and process_* metrics" contains "$api_metrics" "process_cpu_seconds_total "
+  check "/metrics through caddy serves no metrics" lacks "$(curl -s "$base/metrics")" cadence_build_info
+  # The table of docs/admin.md is the list: every cadence_* metric the
+  # processes expose is in it, and everything in it is exposed.
+  exposed="$(printf '%s\n%s\n' "$api_metrics" "$worker_metrics" | sed -n 's/^# TYPE \(cadence_[a-z_]*\) .*/\1/p' | sort -u)"
+  # shellcheck disable=SC2016 # backticks of the markdown table, not a command
+  documented="$(sed -n '/^## Monitoring/,/^## /p' "$repo/docs/admin.md" | sed -n 's/^| `\(cadence_[a-z_]*\)`.*/\1/p' | sort -u)"
+  check "every exposed cadence_* metric is in the table of docs/admin.md" \
+    [ -z "$(comm -23 <(printf '%s\n' "$exposed") <(printf '%s\n' "$documented"))" ]
+  check "every metric in the table of docs/admin.md is exposed" \
+    [ -z "$(comm -13 <(printf '%s\n' "$exposed") <(printf '%s\n' "$documented"))" ]
+  [ -n "$exposed" ] || fail "no cadence_* metrics exposed"
+fi
 
 info "tls mode configuration"
 tls_json="$(docker compose run --rm --no-deps -T -e CADENCE_MODE=tls -e SDLC_DOMAIN=cadence.example.com \

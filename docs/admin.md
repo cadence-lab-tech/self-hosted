@@ -2,7 +2,7 @@
 
 This guide takes a Cadence Lab installation from `./install.sh` to teams
 working with agents: first sign-in, teams and invites, GitHub, single sign-on,
-the CLI and agents, embeddings, backups and upgrades.
+the CLI and agents, embeddings, backups and upgrades, monitoring.
 
 Commands below run in the directory of the installation: where the package
 of a release is unpacked (`./cadence` by default). For a direct
@@ -29,6 +29,7 @@ public address of your proxy in the `proxy` mode.
 - [Upgrades and rollback](#upgrades-and-rollback)
   ([releases and mirrors](#releases-and-mirrors),
   [moving a git installation](#moving-a-git-installation-to-release-packages))
+- [Monitoring](#monitoring)
 - [Security](#security)
 - [Verifying a release](#verifying-a-release)
   ([known scanner findings](#known-scanner-findings))
@@ -837,6 +838,188 @@ no such file and its `COMPOSE_FILE` does not list one: create the file and
 append `:compose.override.yml` to `COMPOSE_FILE` in `.env`. `upgrade.sh`
 warns when an override file exists but `COMPOSE_FILE` does not list it.
 
+## Monitoring
+
+Since v0.10.0 the API and the worker expose metrics in the Prometheus format
+at `/metrics`, each on its own port inside the compose network:
+`http://api:9090/metrics` and `http://worker:9090/metrics`. The port comes
+from `SDLC_METRICS_ADDR` (`:9090` when unset; an empty value in `.env`
+turns the listeners off). The endpoints need no token, so the package
+publishes neither port and Caddy does not route `/metrics` — a request to
+`https://<host>/metrics` gets the UI. Logs are JSON already
+(`docker compose logs api worker`); metrics are for alerting.
+
+No metric carries project data: no project or task keys, repositories,
+handles or tokens. Routes appear as templates
+(`/v1/projects/:projectKey/tasks`), anything else as `unmatched`.
+
+### Letting Prometheus in
+
+Either way goes into `compose.override.yml` ([local compose
+changes](#local-compose-changes)) and is applied with `docker compose up -d`.
+
+**Prometheus in the same compose network** — nothing is published but its
+own UI on loopback. Put `prometheus.yml` and `cadence-alerts.yml` (below)
+next to `docker-compose.yml`:
+
+```yaml
+# compose.override.yml
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./cadence-alerts.yml:/etc/prometheus/cadence-alerts.yml:ro
+    ports: ["127.0.0.1:9091:9090"]
+```
+
+```yaml
+# prometheus.yml
+rule_files: [cadence-alerts.yml]
+scrape_configs:
+  - job_name: cadence-api
+    static_configs: [{targets: ["api:9090"]}]
+  - job_name: cadence-worker
+    static_configs: [{targets: ["worker:9090"]}]
+```
+
+**Prometheus elsewhere** — publish the two ports on loopback (for a
+Prometheus or an agent on this machine) or on an internal interface behind
+your firewall, never on a public address:
+
+```yaml
+# compose.override.yml
+services:
+  api:
+    ports: ["127.0.0.1:9101:9090"]
+  worker:
+    ports: ["127.0.0.1:9102:9090"]
+```
+
+and scrape `127.0.0.1:9101` as `cadence-api` and `127.0.0.1:9102` as
+`cadence-worker`. The job names are what the rules below expect in `up`.
+
+### Metrics
+
+The API reports its own process: requests, webhooks, its database pool. The
+state of the database — the index queue, leases, unreadable branches — is
+reported by the worker alone, taken on its lease tick (every minute,
+`SDLC_LEASE_SWEEP_INTERVAL`), not on every scrape. There is one worker; if
+you run several API replicas, sum their request metrics, the queue is never
+counted twice.
+
+| Metric | Type | Where | Meaning |
+|---|---|---|---|
+| `cadence_build_info` | gauge | both | always 1; labels `component` (`api`, `worker`), `version`, `go_version` |
+| `cadence_http_request_duration_seconds` | histogram | api | request duration by `method`, `route` (template or `unmatched`) and `code` class (`2xx`, `4xx`, `5xx`) |
+| `cadence_webhook_deliveries_total` | counter | api | webhook deliveries by `provider` and `outcome`: `queued` (accepted and applied), `ignored`, `duplicate`, `bad_signature`, `disabled` (no `SDLC_GITHUB_WEBHOOK_SECRET`), `error` |
+| `cadence_db_pool_connections` | gauge | both | pool connections by `state`: `acquired`, `idle`, `constructing` |
+| `cadence_db_pool_max_connections` | gauge | both | pool size, `SDLC_DB_MAX_CONNS` (10) |
+| `cadence_db_pool_acquires_total` | counter | both | connections taken from the pool |
+| `cadence_db_pool_acquire_seconds_total` | counter | both | total time spent taking connections, waiting included |
+| `cadence_db_pool_empty_acquires_total` | counter | both | takes that had to wait for a free connection |
+| `cadence_db_pool_empty_acquire_wait_seconds_total` | counter | both | total time spent waiting for a free connection |
+| `cadence_db_pool_canceled_acquires_total` | counter | both | takes abandoned before a connection came |
+| `cadence_db_pool_new_connections_total` | counter | both | connections the pool opened |
+| `cadence_worker_job_duration_seconds` | histogram | worker | duration of one pass of a job, by `job` |
+| `cadence_worker_job_errors_total` | counter | worker | failed passes by `job` |
+| `cadence_worker_job_last_success_timestamp_seconds` | gauge | worker | Unix time of the last pass without an error, by `job`; appears after the first one |
+| `cadence_worker_state_refreshed_timestamp_seconds` | gauge | worker | Unix time of the database snapshot behind the queue, lease and branch metrics |
+| `cadence_index_queue_runs` | gauge | worker | indexing runs by `state`: `queued` (retries included), `running` |
+| `cadence_index_queue_oldest_age_seconds` | gauge | worker | age of the oldest queued run; 0 when the queue is empty |
+| `cadence_index_runs_total` | counter | worker | executed indexing runs by `result`: `completed`, `failed` |
+| `cadence_index_run_duration_seconds` | histogram | worker | duration of an indexing run |
+| `cadence_leases` | gauge | worker | stages held by agents by `state`: `live`, `expired` (not returned yet) |
+| `cadence_leases_expired_total` | counter | worker | stages the worker returned to the queue because their lease expired |
+| `cadence_repository_head_failures` | gauge | worker | watched branches whose head could not be read on two passes or more |
+
+Both processes also expose the standard `go_*` and `process_*` metrics.
+The `job` label of the worker: `lease_sweep` (returning expired leases),
+`ops_state` (the database snapshot), and with indexing on (the default,
+`SDLC_INDEX_ENABLED`) `index_enqueue`, `index_run`, `drift`, `index_prune`,
+`repo_ref_sync`, `knowledge`, `embed_refresh`, `overlaps`; `blob_gc` and
+`embed_cache_gc` run hourly. A job that is turned off has no
+`last_success` series.
+
+For Postgres and Caddy use their own exporters: `postgres_exporter` and the
+`metrics` directive of Caddy.
+
+### Alert rules
+
+A starting set; thresholds are examples to tune. `promtool check rules`
+accepts the file as is:
+
+```yaml
+# cadence-alerts.yml
+groups:
+  - name: cadence
+    rules:
+      - alert: CadenceDown
+        expr: up{job=~"cadence-api|cadence-worker"} == 0
+        for: 2m
+        annotations:
+          summary: "{{ $labels.job }} does not answer on /metrics"
+      - alert: CadenceLeaseSweepStalled
+        expr: time() - cadence_worker_job_last_success_timestamp_seconds{job="lease_sweep"} > 600
+        for: 5m
+        annotations:
+          summary: "The worker has not returned expired leases for 10 minutes"
+      - alert: CadenceIndexingStalled
+        expr: time() - cadence_worker_job_last_success_timestamp_seconds{job="index_run"} > 1800
+        for: 5m
+        annotations:
+          summary: "The worker has not taken an indexing run for 30 minutes"
+      - alert: CadenceWorkerJobErrors
+        expr: increase(cadence_worker_job_errors_total[15m]) > 3
+        annotations:
+          summary: "Worker job {{ $labels.job }} keeps failing; see docker compose logs worker"
+      - alert: CadenceIndexQueueBacklog
+        expr: cadence_index_queue_oldest_age_seconds > 1800
+        for: 10m
+        annotations:
+          summary: "An indexing run has waited in the queue for over 30 minutes"
+      - alert: CadenceIndexRunsFailing
+        expr: increase(cadence_index_runs_total{result="failed"}[1h]) > 3
+        annotations:
+          summary: "Indexing runs fail; the project's Index page names the repository"
+      - alert: CadenceRepositoryUnreadable
+        expr: cadence_repository_head_failures > 0
+        for: 30m
+        annotations:
+          summary: "A watched branch cannot be read: check the GitHub App or token"
+      - alert: CadenceWebhookBadSignature
+        expr: increase(cadence_webhook_deliveries_total{outcome="bad_signature"}[15m]) > 0
+        annotations:
+          summary: "GitHub webhook signatures do not match SDLC_GITHUB_WEBHOOK_SECRET"
+      - alert: CadenceApiErrors
+        expr: |
+          sum(rate(cadence_http_request_duration_seconds_count{code="5xx"}[5m]))
+            / sum(rate(cadence_http_request_duration_seconds_count[5m])) > 0.05
+        for: 10m
+        annotations:
+          summary: "More than 5% of API requests fail with 5xx"
+      - alert: CadenceApiSlow
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(cadence_http_request_duration_seconds_bucket[5m]))) > 2
+        for: 10m
+        annotations:
+          summary: "The 95th percentile of API requests is above 2 seconds"
+      - alert: CadenceDbPoolSaturated
+        expr: |
+          cadence_db_pool_connections{state="acquired"}
+            / ignoring(state) cadence_db_pool_max_connections > 0.9
+          or rate(cadence_db_pool_empty_acquire_wait_seconds_total[5m]) > 0.5
+        for: 10m
+        annotations:
+          summary: "{{ $labels.job }} waits for database connections; raise SDLC_DB_MAX_CONNS"
+      - alert: CadenceLeasesExpiring
+        expr: increase(cadence_leases_expired_total[1h]) > 5
+        annotations:
+          summary: "Agents lose their leases: they crash or send heartbeats less often than SDLC_LEASE_TTL"
+```
+
 ## Security
 
 The security policy is [`SECURITY.md`](../SECURITY.md) in the root of the
@@ -1044,6 +1227,7 @@ docker compose logs --tail 100 worker   # indexing, embeddings, leases
 docker compose logs --tail 100 caddy    # TLS certificates and routing
 curl -s https://<host>/readyz           # {"status":"ok","database":"ok"}
 curl -s https://<host>/v1/instance      # version, profile and sign-in methods
+docker compose exec caddy wget -qO- http://worker:9090/metrics | grep '^cadence_'   # since v0.10.0
 ```
 
 - **`CADENCE_VERSION is not set`** — run compose with
