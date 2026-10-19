@@ -13,6 +13,17 @@
 # = TO and served from a local copy of the releases (CADENCE_RELEASES_URL), so
 # the images of TO must be published, or be in CADENCE_REGISTRY.
 #
+# docker-compose.yml pins the images of the VERSION of this checkout by
+# digest (ci/pins.sh). TO = that VERSION upgrades to exactly those bytes, and
+# the check compares the image of api with the pin. For another TO the pins
+# name other images: the check drops them (empty CADENCE_BACKEND_DIGEST and
+# CADENCE_FRONTEND_DIGEST) and the upgrade goes by the tag TO. Images of a
+# branch in a local registry are pulled by tag too - the same rule as in
+# ci/check-stack.sh:
+#
+#   CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
+#     ci/check-upgrade.sh vFROM vTO
+#
 # On FROM it creates a team, a project, a project document and a task with
 # an artifact (on a minimal cycle imported as a bundle), and checks:
 #
@@ -115,7 +126,12 @@ main() {
   }
 
   # --- releases: TO is the package of this checkout ------------------------------
-  local releases="$work/releases"
+  local releases="$work/releases" checkout_version
+  checkout_version="$(tr -d '[:space:]' <VERSION)"
+  if [ "$to" != "$checkout_version" ] && [ -z "${CADENCE_BACKEND_DIGEST+set}${CADENCE_FRONTEND_DIGEST+set}" ]; then
+    info "docker-compose.yml pins the images of $checkout_version, not of $to: the upgrade goes by the tag $to"
+    export CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST=""
+  fi
   info "package of this checkout as $to"
   ci/package.sh --version "$to" "$releases/download/$to" >/dev/null
   mkdir -p "$releases/latest"
@@ -406,6 +422,24 @@ JSON
     pass "VERSION and /v1/instance report $to"
   else
     fail "the installation does not report $to"
+  fi
+  # The containers run what compose names: by tag and pin when the package
+  # pins (no variable - as an upgrade.sh of an older version runs it), by
+  # tag when the pin is dropped.
+  local want_image api_image
+  want_image="$(CADENCE_VERSION="$to" docker compose config --format json | jq -r .services.api.image)"
+  api_image="$(docker inspect --format '{{.Config.Image}}' "$(CADENCE_VERSION="$to" docker compose ps -q api)")"
+  if [ "$api_image" = "$want_image" ]; then
+    pass "api runs $api_image, the image of docker-compose.yml"
+  else
+    fail "api runs $api_image, docker-compose.yml names $want_image"
+  fi
+  if [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+    if [[ "$api_image" == *":$to@sha256:"* ]]; then
+      pass "api is pinned: $to by digest"
+    else
+      fail "api is not pinned by digest: $api_image"
+    fi
   fi
   if [ "$(awk '$2 == "VERSION" {print $1}' "$PACKAGE_MANIFEST")" = "$(sha256_of VERSION)" ]; then
     pass "$PACKAGE_MANIFEST is the one of $to"

@@ -20,6 +20,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=lib.sh
 . ./lib.sh
+# shellcheck source=ci/pins.sh
+. ./ci/pins.sh
 
 failures=0
 pass() { printf '  ✓ %s\n' "$*"; }
@@ -299,6 +301,21 @@ else
   check "the documentation shows clab server with flags" [ "$documented" -gt 0 ]
 fi
 
+info "verifying a release (docs)"
+# The signature asset and the identities of the signers, as release.yml of
+# this repository, of the backend and of the frontend sign (ci/pins.sh).
+admin="$(cat docs/admin.md)"
+check "docs/admin.md names the asset checksums.txt.sigstore.json" contains "$admin" "checksums.txt.sigstore.json"
+check "docs/admin.md names the signer of the package" contains "$admin" "https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main"
+for image in $PIN_IMAGES; do
+  check "docs/admin.md names the signer of $image" contains "$admin" "$PIN_SOURCE/$(pin_repo "$image")/.github/workflows/release.yml@refs/tags/"
+done
+check "docs/admin.md names the issuer" contains "$admin" "$PIN_ISSUER"
+check "docs/admin.md has the known scanner findings with GO-2026-5932" contains "$admin" "GO-2026-5932"
+for f in README.md docs/admin.md; do
+  check "$f no longer says signatures are planned" lacks "$(cat "$f")" "are planned"
+done
+
 info "bundles/starter.json"
 bundle=bundles/starter.json
 check "$bundle exists" [ -f "$bundle" ]
@@ -380,10 +397,46 @@ check "compose refuses to run without CADENCE_VERSION" sh -c '! env -u CADENCE_V
 missing="$(env -u CADENCE_VERSION docker compose config 2>&1 || true)"
 check "the error names CADENCE_VERSION" contains "$missing" CADENCE_VERSION
 
+# The images are pinned to the digests of VERSION (ci/pins.sh): the digest is
+# the default of a variable next to the tag, so compose pins with no new
+# variable - an upgrade.sh of an older version included - and an empty
+# variable drops the pin for images of a branch. Whether the digests are the
+# images of VERSION in the registry is the check workflow (ci/check-pins.sh).
+backend_pin="$(pin_of backend || true)"
+frontend_pin="$(pin_of frontend || true)"
+check "docker-compose.yml pins backend to a digest (\${CADENCE_BACKEND_DIGEST-@sha256:<64 hex>})" [ -n "$backend_pin" ]
+check "docker-compose.yml pins frontend to a digest (\${CADENCE_FRONTEND_DIGEST-@sha256:<64 hex>})" [ -n "$frontend_pin" ]
+check "the image lines carry the tag of VERSION before the pin" \
+  [ "$(grep -cE '^ *image: \$\{CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech\}/sdlc-pipeline-(backend|frontend):\$\{CADENCE_VERSION:\?[^}]*\}\$\{CADENCE_(BACKEND|FRONTEND)_DIGEST-@sha256:[0-9a-f]{64}\}$' docker-compose.yml)" = 2 ]
+# Older Compose v2 (seen on v2.3 and v2.6) reads " - " in the message of
+# CADENCE_VERSION as a default value when the pin variable follows it.
+check "the message of CADENCE_VERSION has no ' - '" lacks "$(grep -E '^ *image: .*CADENCE_VERSION:\?' docker-compose.yml)" " - "
+# set_pin (the release pull request) rewrites one pin and leaves the other.
+set_pin_roundtrip() {
+  local f d rc=0
+  f="$(mktemp)"
+  d="sha256:$(printf '1%.0s' $(seq 64))"
+  cp docker-compose.yml "$f"
+  { set_pin backend "$d" "$f" && [ "$(pin_of backend "$f")" = "$d" ] && [ "$(pin_of frontend "$f")" = "$frontend_pin" ]; } || rc=1
+  rm -f "$f"
+  return "$rc"
+}
+check "set_pin rewrites the backend pin and keeps the frontend one" set_pin_roundtrip
+images() { env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST "$@" POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --images | sort -u | tr '\n' ' '; }
+check "no variable: api, worker and ui by tag and digest" \
+  [ "$(images)" = "$(printf '%s\n' caddy:2-alpine pgvector/pgvector:pg17 \
+    "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version@$backend_pin" \
+    "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$frontend_pin" | sort -u | tr '\n' ' ')" ]
+check "a mirror (CADENCE_REGISTRY) keeps the digests" \
+  contains "$(images CADENCE_REGISTRY=mirror.example.com/cadence)" "mirror.example.com/cadence/sdlc-pipeline-backend:$version@$backend_pin"
+check "images of a branch: CADENCE_REGISTRY=localhost:5050 and empty pin variables - by tag" \
+  [ "$(images CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= | tr ' ' '\n' | grep sdlc-pipeline | tr '\n' ' ')" = \
+    "localhost:5050/sdlc-pipeline-backend:$version localhost:5050/sdlc-pipeline-frontend:$version " ]
+
 for mode in tls proxy; do
   config="$(POSTGRES_PASSWORD=x CADENCE_VERSION="$version" COMPOSE_FILE="docker-compose.yml:compose.$mode.yml" docker compose config --format json)"
-  check "[$mode] backend image is :$version" contains "$config" "\"ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version\""
-  check "[$mode] frontend image is :$version" contains "$config" "\"ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version\""
+  check "[$mode] backend image is :$version@<pin>" contains "$config" "\"ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version@$backend_pin\""
+  check "[$mode] frontend image is :$version@<pin>" contains "$config" "\"ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$frontend_pin\""
   check "[$mode] no build: sections" lacks "$config" '"build"'
   # The images are multi-arch since v0.5.3: a platform pin would put arm64
   # machines back under emulation.

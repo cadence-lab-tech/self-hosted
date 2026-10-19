@@ -8,14 +8,26 @@
 #   - an open pull request for the version        nothing to do
 #   - otherwise                                   branch release/vX.Y.Z, PR
 #
-#   VERSION   the released version, vX.Y.Z
-#   GH_TOKEN  token that pushes the branch and opens the pull request; not
-#             GITHUB_TOKEN, whose pull requests start no workflows
+# The pull request moves VERSION and pins both images to the digests of
+# their indexes (docker-compose.yml, ci/pins.sh) - but only once both
+# images of the version are signed by release.yml of their repository on the
+# tag (cosign keyless, the identity is the workflow on refs/tags/vX.Y.Z).
+# An image without such a signature, or whose tag points at another digest
+# than the release event names, fails the run: no pull request.
+#
+#   VERSION         the released version, vX.Y.Z
+#   GH_TOKEN        token that pushes the branch and opens the pull request;
+#                   not GITHUB_TOKEN, whose pull requests start no workflows
+#   BACKEND_IMAGE   the images of the release event, ...:vX.Y.Z@sha256:...;
+#   FRONTEND_IMAGE  optional (a run by hand has none), compared with the
+#                   registry when given
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 # shellcheck source=lib.sh
 . ./lib.sh
+# shellcheck source=ci/pins.sh
+. ./ci/pins.sh
 
 version="${VERSION:?VERSION is not set}"
 valid_version "$version" || die "'$version' is not a version: expected vX.Y.Z"
@@ -38,19 +50,50 @@ if [ -n "$open" ]; then
   exit 0
 fi
 
+# The digest of each image of the version, checked against the event and
+# the signature, before anything is written.
+# digest_of IMAGE: the digest found for IMAGE below.
+digest_of() {
+  local v="digest_$1"
+  printf '%s' "${!v}"
+}
+for image in $PIN_IMAGES; do
+  repo="$(pin_repo "$image")"
+  ref="$PIN_REGISTRY/$repo:$version"
+  found="$(registry_digest "$ref")" || die "$ref is not published: no digest in the registry"
+  printf -v "digest_$image" '%s' "$found"
+  case "$image" in
+  backend) event="${BACKEND_IMAGE:-}" ;;
+  frontend) event="${FRONTEND_IMAGE:-}" ;;
+  esac
+  if [[ "$event" == *@sha256:* ]] && [ "${event##*@}" != "$found" ]; then
+    die "$ref is $found in the registry, but the release event names ${event##*@}: the tag was moved after the release - no pull request"
+  fi
+  identity="$(pin_identity "$image" "$version")"
+  if ! out="$(cosign verify --certificate-identity "$identity" --certificate-oidc-issuer "$PIN_ISSUER" \
+    "$PIN_REGISTRY/$repo@$found" 2>&1 >/dev/null)"; then
+    printf '%s\n' "$out" | tail -n 5 >&2
+    die "the signature of $PIN_REGISTRY/$repo@$found ($ref) did not verify for $identity: no pull request"
+  fi
+  ok "$ref is $found, signed by $identity"
+done
+
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git switch --quiet -C "$branch"
 printf '%s\n' "$version" >VERSION
-git commit --quiet -m "VERSION → $version" -- VERSION
+for image in $PIN_IMAGES; do
+  set_pin "$image" "$(digest_of "$image")" || die "could not pin $image to $(digest_of "$image") in docker-compose.yml"
+done
+git commit --quiet -m "VERSION → $version" -- VERSION docker-compose.yml
 # The branch belongs to this workflow: a leftover from a closed pull request
 # is replaced.
 git push --quiet --force origin "$branch"
 
-body="Released images:
+body="Released images, signatures verified, pinned in \`docker-compose.yml\`:
 
-- \`${BACKEND_IMAGE:-ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version}\`
-- \`${FRONTEND_IMAGE:-ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version}\`
+- \`$PIN_REGISTRY/$(pin_repo backend):$version@$(digest_of backend)\`
+- \`$PIN_REGISTRY/$(pin_repo frontend):$version@$(digest_of frontend)\`
 
 The \`check\` workflow brings the stack up on these images. Merge when it is
 green; the tag \`$version\` is then set on main automatically, and

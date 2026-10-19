@@ -30,6 +30,8 @@ public address of your proxy in the `proxy` mode.
   ([releases and mirrors](#releases-and-mirrors),
   [moving a git installation](#moving-a-git-installation-to-release-packages))
 - [Security](#security)
+- [Verifying a release](#verifying-a-release)
+  ([known scanner findings](#known-scanner-findings))
 - [Troubleshooting](#troubleshooting)
 
 ## Install
@@ -55,8 +57,12 @@ flags:
 It stops before unpacking anything if the checksum does not match, if there
 is no such release, or if the directory already has a `.env` (then
 `./upgrade.sh` there is what you want). The checksum protects against a
-broken or altered download, not against a release replaced at its source;
-signatures of the package and the images are planned.
+broken or altered download, not against a release replaced at its source.
+For that, from v0.9.0 `checksums.txt` and both images are signed by the
+release workflows of our repositories, and `docker-compose.yml` of the
+package pins the images by digest; the installer does not check the
+signatures itself yet — check them by hand as in
+[Verifying a release](#verifying-a-release) before you run it, or after.
 
 **With clab.** `clab` v0.8.0 and later installs the same way with one command
 and needs neither `curl`, `tar`, `sha256sum` nor `bash` — only Docker
@@ -709,8 +715,11 @@ clab server upgrade     # the same with clab v0.7.0+ (see "Managing the installa
 ```
 
 Each version is a release `vX.Y.Z` of this repository with the package of
-that version; `VERSION` in it names the images. git is not needed. The
-script:
+that version; `VERSION` in it names the images, and from v0.9.0
+`docker-compose.yml` pins them to the digests of that release, so the
+upgrade pulls exactly the bytes that were signed, even if a tag in the
+registry moves (see [Verifying a release](#verifying-a-release)). git is not
+needed. The script:
 
 1. finds the target — the latest release, or the one given — and refuses to
    go to an older version: migrations only go forward;
@@ -759,21 +768,33 @@ Releases are published as GitHub Releases of this repository; watch it
 
 ### Releases and mirrors
 
-Each release `vX.Y.Z` carries three assets with names that do not change:
+Each release `vX.Y.Z` carries assets with names that do not change:
 `cadence-self-hosted-vX.Y.Z.tar.gz` (the package: compose files, Caddyfile,
 `.env.example`, `VERSION`, the scripts, `bundles/`, `docs/`, `README.md`,
-`LICENSE`, `SECURITY.md` and `package.sha256`), `checksums.txt` and `get-cadence.sh`. A
+`LICENSE`, `SECURITY.md` and `package.sha256`), `checksums.txt`,
+`get-cadence.sh` and, from v0.9.0, `checksums.txt.sigstore.json` — the
+signature of `checksums.txt` (see [Verifying a release](#verifying-a-release)). A
 machine that cannot reach GitHub takes them from a mirror:
 `CADENCE_RELEASES_URL` points `get-cadence.sh` and `upgrade.sh` at any
 HTTP(S) address or directory (`file:///srv/cadence-releases`) with the
 layout
 
 ```
-download/v0.6.0/cadence-self-hosted-v0.6.0.tar.gz
-download/v0.6.0/checksums.txt
-download/v0.6.0/get-cadence.sh
+download/v0.9.0/cadence-self-hosted-v0.9.0.tar.gz
+download/v0.9.0/checksums.txt
+download/v0.9.0/checksums.txt.sigstore.json
+download/v0.9.0/get-cadence.sh
 latest/download/…              # a copy of the latest release, for "the latest"
 ```
+
+The images come from `ghcr.io/cadence-lab-tech`, or from a registry mirror
+in `CADENCE_REGISTRY` in `.env`. `docker-compose.yml` pins them by digest
+(`sdlc-pipeline-backend:v0.9.0@sha256:…`), so a mirror must keep the digests:
+copy the whole index with all its platforms and attestations, for example
+`crane copy ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 mirror.example.com/cadence/sdlc-pipeline-backend:v0.9.0`
+or `skopeo copy --all docker://… docker://…`; a mirror that rebuilds or
+re-pushes single-platform images has other digests, and the pull fails.
+Signatures are checked against `ghcr.io` by the same digest.
 
 ### Moving a git installation to release packages
 
@@ -841,6 +862,128 @@ vulnerability, response times, disclosure and CVE.
 - **After a fix.** Upgrade to the fixing release as described in
   [Upgrades and rollback](#upgrades-and-rollback); the advisory names the
   affected and fixed versions and any step beyond the upgrade.
+- **Is it ours?** Releases from v0.9.0 are signed; how to check the
+  package, the images, the CLI, their SBOM and provenance, and which scanner
+  findings are known not to apply — [Verifying a release](#verifying-a-release).
+
+## Verifying a release
+
+From v0.9.0 every part of a release can be traced to the workflow that built
+it. Nothing here needs a key or an account: the signatures are made by
+[Sigstore](https://www.sigstore.dev/) without keys — each one carries a
+short-lived certificate for the identity of the GitHub Actions workflow that
+signed it, and is recorded in the public transparency log. You need
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x
+and Docker with `buildx`; `cosign` is recommended on the machine of the
+installation but not required by the scripts. Versions before v0.9.0 are
+not signed.
+
+| what | signed by (`--certificate-identity`) |
+|---|---|
+| image `sdlc-pipeline-backend` | `https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/vX.Y.Z` |
+| image `sdlc-pipeline-frontend` | `https://github.com/cadence-lab-tech/sdlc-pipeline-frontend/.github/workflows/release.yml@refs/tags/vX.Y.Z` |
+| `checksums.txt` of the package | `https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main` |
+| `checksums.txt` of the `clab` archives | `https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/vX.Y.Z` |
+
+The issuer of every certificate is `https://token.actions.githubusercontent.com`.
+A signature by any other identity — another workflow, another repository,
+another tag — is not ours: if a check fails, do not install that release and
+report it privately (see [Security](#security)).
+
+**The package**, before unpacking it (`get-cadence.sh` verifies only the
+checksum):
+
+```bash
+v=v0.9.0
+base=https://github.com/cadence-lab-tech/self-hosted/releases/download/$v
+curl -fsSLO "$base/checksums.txt" -O "$base/checksums.txt.sigstore.json" -O "$base/cadence-self-hosted-$v.tar.gz"
+cosign verify-blob --bundle checksums.txt.sigstore.json \
+  --certificate-identity https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+```
+
+**The images**, by the digests `docker-compose.yml` of the installation
+pins — in the directory of the installation, before `./install.sh` or after
+an upgrade. The images are verified at `ghcr.io` whatever `CADENCE_REGISTRY`
+says: the digest names the same bytes in a mirror.
+
+```bash
+v=$(cat VERSION)
+for repo in sdlc-pipeline-backend sdlc-pipeline-frontend; do
+  ref=$(CADENCE_VERSION=$v docker compose config --images | grep "/$repo:" | head -n 1)
+  cosign verify \
+    --certificate-identity "https://github.com/cadence-lab-tech/$repo/.github/workflows/release.yml@refs/tags/$v" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "ghcr.io/cadence-lab-tech/$repo@${ref##*@}" >/dev/null && echo "$repo $v: signature verified"
+done
+```
+
+The signature covers the digest of the image index, and with it everything
+the index lists: the image of each platform and its attestations.
+
+**SBOM.** Each platform of each image has a software bill of materials
+(SPDX 2.3) — the Go modules of `/api`, `/worker` and `/clab` with their
+versions; for the frontend also the npm packages its bundle is built from
+(in `AdditionalSPDXs`):
+
+```bash
+docker buildx imagetools inspect ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 --format '{{json .SBOM}}' > sbom-backend.json
+jq -r '."linux/amd64".SPDX.packages[] | "\(.name) \(.versionInfo)"' sbom-backend.json
+docker buildx imagetools inspect ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:v0.9.0 --format '{{json .SBOM}}' |
+  jq -r '."linux/amd64".AdditionalSPDXs[].packages[] | "\(.name) \(.versionInfo)"'
+```
+
+**Provenance.** Each platform has a SLSA v1 provenance of its build: the run
+of `release.yml` that built it (`builder.id`), the repository and the commit
+of the tag, the build arguments:
+
+```bash
+docker buildx imagetools inspect ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 --format '{{json .Provenance}}' |
+  jq '."linux/amd64".SLSA | {builder: .runDetails.builder.id, vcs: [.. | objects | .vcs? // empty][0]}'
+```
+
+**The CLI.** The `clab` archives of a release lie in the releases of
+[cadence-lab-tech/homebrew-tap](https://github.com/cadence-lab-tech/homebrew-tap/releases)
+with their `checksums.txt` and its signature (Homebrew and the install
+script of the tap check the checksum):
+
+```bash
+v=v0.9.0
+base=https://github.com/cadence-lab-tech/homebrew-tap/releases/download/$v
+curl -fsSLO "$base/checksums.txt" -O "$base/checksums.txt.sigstore.json"
+cosign verify-blob --bundle checksums.txt.sigstore.json \
+  --certificate-identity "https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/$v" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+```
+
+### Known scanner findings
+
+A scanner that matches by module version may report vulnerabilities that do
+not affect Cadence Lab. Each such finding is stated in machine-readable
+[OpenVEX](https://openvex.dev/) — the file `.github/release/openvex.json` of
+the backend repository at the tag of the release, attached to the backend
+image as a signed attestation:
+
+| finding | component | status | why |
+|---|---|---|---|
+| [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) | `golang.org/x/crypto` in `/api` of the backend image | not affected, vulnerable code not present | the advisory is about the `golang.org/x/crypto/openpgp` packages; none of them is in the binaries, the module is there for other packages |
+
+```bash
+# the signed VEX attached to the image
+cosign verify-attestation --type openvex \
+  --certificate-identity "https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/v0.9.0" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 | jq -r .payload | base64 -d | jq .predicate.statements
+
+# scanners with the VEX: from the registry or from the file of the tag
+trivy image --vex oci --show-suppressed ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0
+curl -fsSLO https://raw.githubusercontent.com/cadence-lab-tech/sdlc-pipeline-backend/v0.9.0/.github/release/openvex.json
+trivy image --vex openvex.json ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0
+grype ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 --vex openvex.json
+```
 
 ## Managing the installation with clab server
 

@@ -24,9 +24,20 @@
 name: cadence
 
 # The images are built for linux/amd64 and linux/arm64; Docker picks the
-# platform of the machine, nothing is pinned here.
+# platform of the machine, no platform is pinned here.
+#
+# Each image is pinned to the digest of its release next to the tag: a tag in
+# a registry can be moved, a digest names the bytes. The release pull request
+# writes both digests together with VERSION, after checking the signatures of
+# both images (docs/admin.md, "Verifying a release"). A mirror in
+# CADENCE_REGISTRY must keep the digests (copy with crane copy or skopeo copy
+# --all). The variables CADENCE_BACKEND_DIGEST and CADENCE_FRONTEND_DIGEST
+# are not set in a normal installation; an empty value drops the pin - only
+# for development checks on images of a branch. (No " - " in the message of
+# CADENCE_VERSION: older Compose v2 - seen on v2.3 and v2.6 - reads it as a
+# default value when another variable follows.)
 x-image-backend: &image-backend
-  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set - use the scripts in this directory or export it from the VERSION file}
+  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_BACKEND_DIGEST-@sha256:3371ed04ca01b18b68ecc22629856b692efcbea16c149311b41a970b160b625f}
 
 # Settings the API and the worker must agree on.
 x-shared-env: &shared-env
@@ -154,7 +165,7 @@ services:
 
   # The UI: static files served by Caddy inside the image.
   ui:
-    image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set - use the scripts in this directory or export it from the VERSION file}
+    image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_FRONTEND_DIGEST-@sha256:3d87c787933cff95925789d16be3a561c7a38227eb05efcd32ca5199f475fdbc}
     restart: unless-stopped
 
   # The single entry point: the UI, /v1, /mcp, /webhooks, /healthz, /readyz.
