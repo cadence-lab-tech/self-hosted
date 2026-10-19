@@ -10,7 +10,11 @@
 #
 #   CLAB_BIN  clab whose "clab server ... --help" the documented clab server
 #             flags are checked against; default: the CLI of VERSION from the
-#             public tap, once VERSION has clab server (v0.7.0)
+#             public tap, once VERSION has clab server (v0.7.0). Without
+#             CLAB_BIN a documented command that the clab of VERSION does not
+#             have yet (documented ahead of the release that brings it) is
+#             skipped with a note; with CLAB_BIN it fails. An unknown flag of
+#             an existing command fails either way.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -250,7 +254,10 @@ check "the documentation shows the one-line installer with flags" [ "$documented
 # clab server: every "clab server <command> ..." of the documentation uses
 # only flags that "clab server <command> --help" lists. The clab is CLAB_BIN,
 # else the CLI of VERSION from the public tap once VERSION is a release that
-# has clab server (v0.7.0); before that the check is skipped.
+# has clab server (v0.7.0); before that the check is skipped. A command the
+# tap's clab of VERSION does not list yet is documented ahead of its release
+# (CLAB-160): skipped with a note until VERSION catches up, checked with
+# CLAB_BIN of the branch that brings it.
 info "documented clab server flags"
 clab_server="${CLAB_BIN:-}"
 if [ -z "$clab_server" ] && ! version_lt "$version" v0.7.0; then
@@ -266,11 +273,16 @@ if [ -z "$clab_server" ]; then
   info "skipped: clab $version has no clab server; CLAB_BIN=<clab with clab server> checks it"
 else
   documented=0
+  server_help="$("$clab_server" server --help 2>/dev/null || true)"
   for f in README.md docs/admin.md; do
     while IFS=: read -r line command; do
       sub="$(awk '{print $3}' <<<"$command")"
       if ! sub_help="$("$clab_server" server "$sub" --help 2>/dev/null)"; then
-        fail "$f:$line: clab server has no command '$sub'"
+        if [ -z "${CLAB_BIN:-}" ] && ! grep -qE "^  $sub " <<<"$server_help"; then
+          info "skipped $f:$line: clab $version has no 'clab server $sub'; CLAB_BIN=<clab with it> checks it"
+        else
+          fail "$f:$line: clab server has no command '$sub'"
+        fi
         continue
       fi
       sub_flags="$(grep -oE -- '(^|[ ,])-{1,2}[a-z][a-z-]*' <<<"$sub_help" | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u)"

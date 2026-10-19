@@ -2,9 +2,9 @@
 #
 # End-to-end check of the package on the images of VERSION: builds the
 # release package of this checkout (ci/package.sh), installs it the way the
-# documentation says - the one-line installer piped into sh, from a local
-# copy of the releases, with git out of reach - in proxy mode into a scratch
-# directory, exercises the stack the way an administrator and an agent would,
+# documentation says - the one-line installer piped into sh (or clab server
+# install, see CADENCE_DRIVER), from a local copy of the releases, with git
+# out of reach - in proxy mode into a scratch directory, exercises the stack the way an administrator and an agent would,
 # backs it up, restores it, and tears it down. CI runs it on every pull
 # request; it runs the same way on any Linux machine with Docker.
 #
@@ -19,11 +19,14 @@
 #   CLAB_BIN              clab to use; default: install the CLI of VERSION
 #                         from the public tap (the path docs/admin.md describes)
 #   CHECK_KEEP=1          leave the stack (and its directory) after the check
-#   CADENCE_DRIVER        scripts (default) - back up and restore with
-#                         backup.sh and restore.sh; clab - with clab server
-#                         backup and restore of CLAB_BIN (clab server
-#                         appeared in v0.7.0), plus the checks of clab server
-#                         status. The same scenarios in both prove parity.
+#   CADENCE_DRIVER        scripts (default) - install with get-cadence.sh,
+#                         back up and restore with backup.sh and restore.sh;
+#                         clab - install with clab server install (clab
+#                         v0.8.0+; an older clab falls back to get-cadence.sh
+#                         with a note), back up and restore with clab server
+#                         backup and restore of CLAB_BIN (v0.7.0+), plus the
+#                         checks of clab server status. The same scenarios
+#                         in both prove parity.
 #
 # The installation name (CLAB-164): install.sh keeps it in .env, so after the
 # install every command runs without COMPOSE_PROJECT_NAME, as from cron or a
@@ -124,9 +127,50 @@ mkdir -p "$work/nogit"
 printf '#!/bin/sh\necho "git $*" >>"%s/git-calls"\nexit 1\n' "$work" >"$work/nogit/git"
 chmod 755 "$work/nogit/git"
 
-info "get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:$port --yes"
-(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" SDLC_ADMIN_TOKEN="$admin_token" \
-  sh -s -- --mode proxy --http-addr "127.0.0.1:$port" --yes <"$repo/get-cadence.sh")
+# The CLI comes first: with the clab driver it is the installer.
+clab="${CLAB_BIN:-}"
+clab_dir="$(mktemp -d)"
+if [ -z "$clab" ]; then
+  curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh |
+    CLAB_VERSION="$version" CLAB_INSTALL_DIR="$clab_dir/bin" sh
+  clab="$clab_dir/bin/clab"
+fi
+export CLAB_CONFIG_DIR="$clab_dir/config"
+# install_with: how this run installs - clab server install, or the one-line
+# installer when the driver is scripts or the clab has no install (before
+# v0.8.0).
+install_with=scripts
+if [ "$driver" = clab ]; then
+  if "$clab" server --help 2>/dev/null | grep -qE '^  install '; then
+    install_with=clab
+  else
+    info "clab $("$clab" version 2>/dev/null | head -n 1) has no clab server install (v0.8.0+): installing with get-cadence.sh"
+  fi
+fi
+# clab_install DIR ARGS...: clab server install from the local releases, as
+# from a new terminal in $work, with git out of reach.
+clab_install() {
+  local d="$1"
+  shift
+  (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
+    "$clab" server install --dir "$d" "$@" </dev/null)
+}
+
+if [ "$install_with" = clab ]; then
+  info "clab server install --mode proxy --http-addr 127.0.0.1:$port --yes"
+  install_out="$(SDLC_ADMIN_TOKEN="$admin_token" clab_install "$work/cadence" --mode proxy --http-addr "127.0.0.1:$port" --yes 2>&1)" ||
+    { printf '%s\n' "$install_out" >&2; die "clab server install failed"; }
+  printf '%s\n' "$install_out"
+  check "clab server install says the stack is up" contains "$install_out" "Cadence Lab $version is up"
+  check "clab server install does not print a supplied token" lacks "$install_out" "$admin_token"
+  check "...and says it was supplied" contains "$install_out" "the one supplied in SDLC_ADMIN_TOKEN"
+  check "clab server install prints the cron line of clab server backup --dir" \
+    contains "$install_out" "server backup --dir $work/cadence >> $work/cadence/backups/backup.log 2>&1"
+else
+  info "get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:$port --yes"
+  (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" SDLC_ADMIN_TOKEN="$admin_token" \
+    sh -s -- --mode proxy --http-addr "127.0.0.1:$port" --yes <"$repo/get-cadence.sh")
+fi
 check "the stack is installed from the package into $work/cadence" [ -f "$work/cadence/.env" ]
 check "the installation is not a git clone" [ ! -e "$work/cadence/.git" ]
 check "git was never called" [ ! -s "$work/git-calls" ]
@@ -142,8 +186,20 @@ secrets_distinct() {
   [ -n "$pg" ] && [ -n "$admin" ] && [ -n "$hook" ] && [ "$pg" != "$admin" ] && [ "$pg" != "$hook" ] && [ "$admin" != "$hook" ]
 }
 check "secrets in .env are set and distinct" secrets_distinct
+check "the installation has backups/ (700) and secrets/ (711)" \
+  [ "$(stat -c %a backups secrets 2>/dev/null || stat -f %Lp backups secrets)" = "700"$'\n'"711" ]
+check "compose.override.yml is there" [ -f compose.override.yml ]
 
 before="$(sha256sum .env 2>/dev/null || shasum -a 256 .env)"
+if [ "$install_with" = clab ]; then
+  if out="$(clab_install "$work/cadence" --mode proxy --http-addr "127.0.0.1:$port" --yes 2>&1)"; then
+    fail "a second clab server install must refuse to run"
+  else
+    check "a second clab server install refuses to run, pointing at clab server upgrade --dir" \
+      contains "$out" "clab server upgrade --dir $work/cadence"
+  fi
+  check "a second clab server install leaves .env untouched" [ "$before" = "$(sha256sum .env 2>/dev/null || shasum -a 256 .env)" ]
+fi
 if ./install.sh --mode proxy --http-addr "127.0.0.1:$port" --yes </dev/null >/dev/null 2>&1; then
   fail "a second install.sh must refuse to run"
 else
@@ -167,9 +223,15 @@ started() {
   fresh "$1" docker compose ps -a -q | xargs docker inspect -f '{{.Name}} {{.State.StartedAt}}' | sort
 }
 started_before="$(started "$work/cadence")"
-info "get-cadence.sh --dir same-name with COMPOSE_PROJECT_NAME=$name: the name is taken"
-if out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" COMPOSE_PROJECT_NAME="$name" \
-  sh -s -- --dir same-name --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" 2>&1)"; then
+if [ "$install_with" = clab ]; then
+  info "clab server install --dir same-name with COMPOSE_PROJECT_NAME=$name: the name is taken"
+  out="$(COMPOSE_PROJECT_NAME="$name" clab_install "$work/same-name" --mode proxy --http-addr "127.0.0.1:$second_port" --yes 2>&1)" && taken_ok=1 || taken_ok=0
+else
+  info "get-cadence.sh --dir same-name with COMPOSE_PROJECT_NAME=$name: the name is taken"
+  out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" COMPOSE_PROJECT_NAME="$name" \
+    sh -s -- --dir same-name --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" 2>&1)" && taken_ok=1 || taken_ok=0
+fi
+if [ "$taken_ok" = 1 ]; then
   fail "a second installation under the name $name must be refused"
 else
   check "a second installation under the name $name is refused, naming it and --name" \
@@ -177,6 +239,16 @@ else
   check "...and the refusal suggests --name" contains "$out" "--name $name-2"
 fi
 check "the refused installation wrote no .env" [ ! -e "$work/same-name/.env" ]
+if [ "$install_with" = clab ]; then
+  # A free name on the port of the first installation: the port is busy.
+  if out="$(clab_install "$work/busy-port" --name "$second_name" --mode proxy --http-addr "127.0.0.1:$port" --yes 2>&1)"; then
+    fail "clab server install on the port of the first installation must be refused"
+  else
+    check "clab server install on the port of the first installation is refused: port $port is in use" \
+      contains "$out" "port $port is already in use"
+  fi
+  check "the refused installation on a busy port wrote no .env" [ ! -e "$work/busy-port/.env" ]
+fi
 check "the first installation was not touched (same containers, same start times)" [ "$(started "$work/cadence")" = "$started_before" ]
 
 # --- local compose changes -------------------------------------------------------
@@ -235,14 +307,6 @@ check "the administrator token signs in (is_admin)" contains "$me" '"is_admin":t
 
 # --- CLI ---------------------------------------------------------------------------------------
 info "clab"
-clab="${CLAB_BIN:-}"
-clab_dir="$(mktemp -d)"
-if [ -z "$clab" ]; then
-  curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh |
-    CLAB_VERSION="$version" CLAB_INSTALL_DIR="$clab_dir/bin" sh
-  clab="$clab_dir/bin/clab"
-fi
-export CLAB_CONFIG_DIR="$clab_dir/config"
 printf '%s\n' "$admin_token" | "$clab" auth login --host "$base" --with-token
 check "clab version" "$clab" --host "$base" version
 check "clab team create" "$clab" --host "$base" team create check --name "Package check"
@@ -423,4 +487,4 @@ if [ "$failures" -gt 0 ]; then
   docker compose logs --tail 30 api caddy || true
   die "$failures check(s) failed"
 fi
-ok "all checks passed on $version ($driver)"
+ok "all checks passed on $version ($driver, installed with $install_with)"
