@@ -112,7 +112,7 @@ if [ -n "$taken" ]; then
   esac
   die "the installation name '$name' is taken on this machine: $where.
   Every installation on one machine needs a name of its own; pick another one with --name:
-    ./install.sh --name ${name}-2 ...   (or get-cadence.sh ... --name ${name}-2)
+    cd $(pwd) && ./install.sh --name ${name}-2 ...   (or get-cadence.sh ... --dir <a new directory> --name ${name}-2)
   The name is the Docker Compose project of the installation, not a project inside Cadence Lab. Nothing was changed."
 fi
 # The images are built for linux/amd64 and linux/arm64 (uname -m says
