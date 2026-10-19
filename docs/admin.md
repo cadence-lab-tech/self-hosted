@@ -398,8 +398,9 @@ external database.
 There is no automatic move; it takes one backup and one restore, with a
 downtime of both:
 
-1. Prepare the database, the role and the extensions as above, and check
-   them from the installation:
+1. Prepare the database, the role and the extensions as above; put the CA
+   into `secrets/db-ca.pem` (mode 644) if the URL names it. Check them from
+   the installation:
    `docker compose run --rm --no-deps -T -e SDLC_DATABASE_URL='postgres://…' api dbcheck --install`
    (in the bundled mode the variable has to be given explicitly like this).
 2. Take a backup: `./backup.sh` (on v0.10.0 or later, whose dumps carry no
@@ -407,10 +408,12 @@ downtime of both:
 3. Stop the stack: `docker compose down` (keep the volumes).
 4. In `.env` set `CADENCE_DB=external`, `SDLC_DATABASE_URL='postgres://…'`
    and add `compose.external-db.yml` to `COMPOSE_FILE` after the file of the
-   mode; put the CA into `secrets/db-ca.pem` (mode 644) if the URL names it.
-5. Restore the backup into the new database:
-   `./restore.sh --yes backups/cadence-<version>-<date>.sql.gz` — it starts
-   the stack on the external database.
+   mode.
+5. Create the containers on the new settings and restore the backup into the
+   new database (the restore reaches the blobs volume through the `api`
+   container, which `down` removed):
+   `docker compose create && ./restore.sh --yes backups/cadence-<version>-<date>.sql.gz`
+   — it starts the stack on the external database.
 6. When everything is in place, remove the old volume:
    `docker volume rm <name>_pgdata`.
 
