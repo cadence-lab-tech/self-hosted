@@ -1,0 +1,37 @@
+# CADENCE_DB=external: the database is your own PostgreSQL (Amazon RDS, Cloud
+# SQL, Azure, your cluster) at SDLC_DATABASE_URL in .env, not the postgres
+# container. COMPOSE_FILE in .env adds this file after the file of the mode;
+# install.sh --external-db writes both (docs/admin.md, "External
+# PostgreSQL").
+#
+# Needs Docker Compose 2.20 or newer (depends_on.required); the bundled mode
+# keeps working on older ones.
+services:
+  # Never started: its profile is never enabled. Its volume pgdata is not
+  # created either.
+  postgres:
+    profiles: ["bundled-db"]
+
+  api:
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    environment:
+      SDLC_DATABASE_URL: ${SDLC_DATABASE_URL:?SDLC_DATABASE_URL is not set in .env (CADENCE_DB=external)}
+
+  worker:
+    environment:
+      SDLC_DATABASE_URL: ${SDLC_DATABASE_URL:?SDLC_DATABASE_URL is not set in .env (CADENCE_DB=external)}
+
+  # The client of backup.sh and restore.sh: pg_dump and psql of the newest
+  # supported server version, in the network of the installation, with the
+  # CA in /secrets. Started only by the scripts (docker compose run). The
+  # password reaches it as PGPASSWORD, never on a command line.
+  db-client:
+    image: pgvector/pgvector:pg18
+    profiles: ["tools"]
+    entrypoint: []
+    command: ["psql", "--version"]
+    volumes:
+      - ./secrets:/secrets:ro

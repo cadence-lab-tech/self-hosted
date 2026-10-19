@@ -185,6 +185,159 @@ check_mode() {
   *"compose.${CADENCE_MODE:-tls}.yml"*) ;;
   *) die "COMPOSE_FILE in .env ('${COMPOSE_FILE:-}') does not include compose.${CADENCE_MODE:-tls}.yml for CADENCE_MODE=${CADENCE_MODE:-tls}" ;;
   esac
+  check_db_mode
+}
+
+# --- database ----------------------------------------------------------------------
+# CADENCE_DB in .env: bundled - the postgres container of the stack; external
+# - your own PostgreSQL at SDLC_DATABASE_URL, with compose.external-db.yml in
+# COMPOSE_FILE (docs/admin.md, "External PostgreSQL"). clab server follows the
+# same rules (cmd/clab/server_db.go of the backend) with the same messages.
+EXTERNAL_DB_FILE=compose.external-db.yml
+# depends_on.required of compose.external-db.yml came with Compose 2.20.
+EXTERNAL_DB_MIN_COMPOSE=2.20.0
+# pg_dump options of every backup, in both modes: a dump without owners,
+# privileges and the extensions loads into an empty database as its owner,
+# no superuser needed - the bundled one into an external one and back. The
+# extensions are created before the load (restore.sh).
+# shellcheck disable=SC2034 # used by backup.sh, which sources lib.sh
+DUMP_OPTIONS=(--clean --if-exists --no-owner --no-privileges --exclude-extension=vector --exclude-extension=pgcrypto)
+
+external_db() {
+  [ "${CADENCE_DB:-bundled}" = external ]
+}
+
+# check_db_mode verifies that CADENCE_DB, SDLC_DATABASE_URL and COMPOSE_FILE
+# agree.
+check_db_mode() {
+  local listed=false
+  case ":${COMPOSE_FILE:-}:" in *":$EXTERNAL_DB_FILE:"*) listed=true ;; esac
+  case "${CADENCE_DB:-bundled}" in
+  bundled)
+    [ "$listed" = false ] ||
+      die "COMPOSE_FILE in .env ('${COMPOSE_FILE:-}') lists $EXTERNAL_DB_FILE, but CADENCE_DB is bundled: set CADENCE_DB=external with SDLC_DATABASE_URL, or drop the file from COMPOSE_FILE"
+    ;;
+  external)
+    [ -n "${SDLC_DATABASE_URL:-}" ] || die "CADENCE_DB=external needs SDLC_DATABASE_URL in .env"
+    [ "$listed" = true ] ||
+      die "COMPOSE_FILE in .env ('${COMPOSE_FILE:-}') does not include $EXTERNAL_DB_FILE for CADENCE_DB=external: add it after compose.${CADENCE_MODE:-tls}.yml"
+    ;;
+  *) die "CADENCE_DB in .env is '${CADENCE_DB}', expected bundled or external" ;;
+  esac
+}
+
+# compose_version prints the version of Docker Compose without the leading v
+# and any suffix (2.38.1-desktop.1 -> 2.38.1).
+compose_version() {
+  docker compose version --short 2>/dev/null | sed 's/^v//; s/[-+].*//'
+}
+
+# require_compose_for_external_db: the external mode needs a newer Compose
+# than the bundled one.
+require_compose_for_external_db() {
+  local v
+  v="$(compose_version)"
+  if [ -z "$v" ] || version_lt "v$v" "v$EXTERNAL_DB_MIN_COMPOSE"; then
+    die "the external database needs Docker Compose $EXTERNAL_DB_MIN_COMPOSE or newer ($EXTERNAL_DB_FILE uses depends_on.required); this machine has ${v:-an unknown version}.
+  Update the docker-compose-plugin package: https://docs.docker.com/compose/install/linux/"
+  fi
+}
+
+# url_decode TEXT decodes %XX of a URL.
+url_decode() {
+  printf '%b' "${1//%/\\x}"
+}
+
+# db_url_parts URL sets DB_URL_SAFE - the URL without the password - and
+# DB_PASSWORD, decoded. The backup client gets the password as PGPASSWORD:
+# a command line is visible to every user of the machine (ps).
+db_url_parts() {
+  local re='^(postgres(ql)?://)([^:@/?#]*)(:([^@/?#]*))?@(.*)$'
+  DB_URL_SAFE="$1"
+  DB_PASSWORD=""
+  if [[ "$1" =~ $re ]]; then
+    DB_URL_SAFE="${BASH_REMATCH[1]}${BASH_REMATCH[3]}@${BASH_REMATCH[6]}"
+    DB_PASSWORD="$(url_decode "${BASH_REMATCH[5]}")"
+  fi
+}
+
+# db_target URL prints host:port/database of the URL - what the scripts name,
+# never the password.
+db_target() {
+  local s="${1#*://}"
+  s="${s##*@}"
+  printf '%s\n' "${s%%\?*}"
+}
+
+# db_check [ARGS...]: the check of the database in the backend image
+# (/api dbcheck) - the driver and the TLS of the service: the URL, the
+# connection, the server version, the extensions, the privileges, the schema.
+db_check() {
+  docker compose run --rm --no-deps -T api dbcheck "$@"
+}
+
+# db_client ARGS...: a command of the backup client (db-client of
+# compose.external-db.yml) with PGPASSWORD of SDLC_DATABASE_URL; the URL on
+# its command line is DB_URL_SAFE.
+db_client() {
+  db_url_parts "$SDLC_DATABASE_URL"
+  PGPASSWORD="$DB_PASSWORD" docker compose run --rm --no-deps -T -e PGPASSWORD db-client "$@"
+}
+
+# db_client_check: the backup client (libpq) connects with the same URL - a
+# URL the service takes but pg_dump does not would surface only at the first
+# backup.
+db_client_check() {
+  db_url_parts "$SDLC_DATABASE_URL"
+  db_client psql -X -q -At -d "$DB_URL_SAFE" -c 'SELECT 1' >/dev/null
+}
+
+# db_reset_sql prints what restore.sh runs before the dump in an external
+# database: the extensions (created if this role may, kept if they exist)
+# and no objects of the application left in the schema public - without
+# DROP DATABASE and without the database postgres, which a role of a managed
+# server may not touch. The list is collected first: casting a dropped
+# function to text would fail.
+db_reset_sql() {
+  cat <<'SQL'
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+DO $cadence$
+DECLARE
+  stmts text[];
+  stmt text;
+BEGIN
+  SELECT coalesce(array_agg(s ORDER BY o), '{}') INTO stmts FROM (
+    SELECT 1 AS o, format('DROP %s IF EXISTS public.%I CASCADE',
+             CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW'
+               WHEN 'S' THEN 'SEQUENCE' WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END, c.relname) AS s
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                      WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+    UNION ALL
+    SELECT 2, format('DROP %s IF EXISTS %s CASCADE',
+             CASE p.prokind WHEN 'p' THEN 'PROCEDURE' WHEN 'a' THEN 'AGGREGATE' ELSE 'FUNCTION' END,
+             p.oid::regprocedure)
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public' AND p.prokind IN ('f', 'p', 'a')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                      WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+    UNION ALL
+    SELECT 3, format('DROP %s IF EXISTS public.%I CASCADE', CASE t.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END, t.typname)
+    FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname = 'public' AND t.typtype IN ('c', 'd', 'e', 'r')
+      AND (t.typrelid = 0 OR (SELECT c.relkind FROM pg_class c WHERE c.oid = t.typrelid) = 'c')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                      WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  ) x;
+  FOREACH stmt IN ARRAY stmts LOOP
+    EXECUTE stmt;
+  END LOOP;
+END
+$cadence$;
+SQL
 }
 
 # --- releases ----------------------------------------------------------------------

@@ -11,6 +11,12 @@
 #          installer: sign-in, clab, MCP, backup and restore
 #          (ci/check-stack.sh); once on an amd64 runner and once on an arm64
 #          runner, the two platforms the images are built for
+#   external-db  the same stack on an external PostgreSQL (CHECK_DB=external,
+#          ci/external-db.sh): a pgvector 18 server of its own with TLS and a
+#          role that is no superuser; the refusals of the precheck, backup,
+#          restore, the upgrade check and its rollback. Needs the images of
+#          v0.10.0 or newer (/api dbcheck): for older VERSION it is skipped
+#          with a notice
 #
 # Run by hand with two versions, it also checks the upgrade between them
 # (ci/check-upgrade.sh): FROM as installed, TO as the package of this commit.
@@ -110,6 +116,33 @@ jobs:
           echo "skip=$skip" >>"$GITHUB_OUTPUT"
       - name: stack on the images of VERSION
         if: steps.images.outputs.skip != 'true'
+        run: ci/check-stack.sh
+
+  # The external database (CLAB-127). Images before v0.10.0 have no /api
+  # dbcheck: the job prints a notice and skips instead of failing, so a pull
+  # request of the package that brings the mode stays green until the release
+  # of the images catches up (the release pull request of v0.10.0 runs it).
+  external-db:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - id: images
+        name: images of VERSION have /api dbcheck
+        run: |
+          . ./lib.sh
+          v="$(tr -d '[:space:]' <VERSION)"
+          if version_lt "$v" v0.10.0; then
+            echo "::notice::VERSION is $v: its backend image has no /api dbcheck (v0.10.0+), the external database check is skipped"
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+      - name: stack on an external PostgreSQL
+        if: steps.images.outputs.skip != 'true'
+        env:
+          CHECK_DB: external
         run: ci/check-stack.sh
 
   upgrade:

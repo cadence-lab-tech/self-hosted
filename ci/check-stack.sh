@@ -27,6 +27,19 @@
 #                         backup and restore of CLAB_BIN (v0.7.0+), plus the
 #                         checks of clab server status. The same scenarios
 #                         in both prove parity.
+#   CHECK_DB              bundled (default) - the postgres container of the
+#                         stack; external - a stand-in for the PostgreSQL of
+#                         a customer (ci/external-db.sh: a pgvector container
+#                         of its own with TLS and a CA of its own, a role that
+#                         is no superuser), installed with --external-db and
+#                         --external-db-ca: the refusals of the precheck,
+#                         backup, restore, the upgrade check and its printed
+#                         rollback (with a package of this checkout as
+#                         v99.0.0), status. Needs images of v0.10.0 or newer
+#                         (/api dbcheck).
+#   CHECK_DB_PORT         port of the stand-in, default CHECK_HTTP_PORT + 2;
+#                         the PostgreSQL 14 of the version refusal takes the
+#                         next one
 #
 # The installation name (CLAB-164): install.sh keeps it in .env, so after the
 # install every command runs without COMPOSE_PROJECT_NAME, as from cron or a
@@ -58,6 +71,12 @@ case "$driver" in
 scripts | clab) ;;
 *) die "CADENCE_DRIVER is '$driver', expected scripts or clab" ;;
 esac
+db="${CHECK_DB:-bundled}"
+case "$db" in
+bundled | external) ;;
+*) die "CHECK_DB is '$db', expected bundled or external" ;;
+esac
+db_port="${CHECK_DB_PORT:-$((port + 2))}"
 base="http://127.0.0.1:$port"
 version="$(tr -d '[:space:]' <VERSION)"
 failures=0
@@ -111,6 +130,7 @@ cleanup() {
       fresh "$d" docker compose -p "$n" down -v --remove-orphans >/dev/null 2>&1 || true
     fi
   done
+  [ "$db" = bundled ] || ext_db_down
   # Files of the containers (backups of the blobs volume) may belong to
   # another uid; the stack is gone, so what is left is ours to remove.
   rm -rf "$work" "${clab_dir:-}" 2>/dev/null || true
@@ -121,6 +141,24 @@ trap cleanup EXIT
 admin_token="sdlc_$(openssl rand -hex 24)"
 if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$admin_token"; fi
 auth=(-H "Authorization: Bearer $admin_token")
+
+# --- external database -------------------------------------------------------------
+# install_db: the flags of the installation's database; the CA by a path
+# relative to $work, where every installer of this check runs (get-cadence.sh
+# changes into the new directory: the relative path must survive that).
+install_db=()
+if [ "$db" = external ]; then
+  # shellcheck source=ci/external-db.sh
+  . ./ci/external-db.sh
+  info "external database: a stand-in $name-db on port $db_port"
+  ext_db_up "$name-db" "$db_port" "$work/extdb"
+  cp "$work/extdb/ca.pem" "$work/ca.pem"
+  cp "$work/extdb/other-ca.pem" "$work/other-ca.pem"
+  install_db=(--external-db "$(ext_db_url cadence)" --external-db-ca ca.pem)
+  # The URL install.sh and clab server write to .env.
+  external_url="$(ext_db_url cadence)&sslrootcert=/secrets/db-ca.pem"
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$EXT_DB_PASSWORD"; fi
+fi
 
 # --- install ---------------------------------------------------------------------
 # The releases as the installer sees them: download/<version>/ and
@@ -166,7 +204,7 @@ clab_install() {
 
 if [ "$install_with" = clab ]; then
   info "clab server install --mode proxy --http-addr 127.0.0.1:$port --yes"
-  install_out="$(SDLC_ADMIN_TOKEN="$admin_token" clab_install "$work/cadence" --mode proxy --http-addr "127.0.0.1:$port" --yes 2>&1)" ||
+  install_out="$(SDLC_ADMIN_TOKEN="$admin_token" clab_install "$work/cadence" --mode proxy --http-addr "127.0.0.1:$port" ${install_db[@]+"${install_db[@]}"} --yes 2>&1)" ||
     { printf '%s\n' "$install_out" >&2; die "clab server install failed"; }
   printf '%s\n' "$install_out"
   check "clab server install says the stack is up" contains "$install_out" "Cadence Lab $version is up"
@@ -175,9 +213,11 @@ if [ "$install_with" = clab ]; then
   check "clab server install prints the cron line of clab server backup --dir" \
     contains "$install_out" "server backup --dir $work/cadence >> $work/cadence/backups/backup.log 2>&1"
 else
-  info "get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:$port --yes"
-  (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" SDLC_ADMIN_TOKEN="$admin_token" \
-    sh -s -- --mode proxy --http-addr "127.0.0.1:$port" --yes <"$repo/get-cadence.sh")
+  info "get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:$port ${install_db[*]:+--external-db ... --external-db-ca ca.pem} --yes"
+  install_out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" SDLC_ADMIN_TOKEN="$admin_token" \
+    sh -s -- --mode proxy --http-addr "127.0.0.1:$port" ${install_db[@]+"${install_db[@]}"} --yes <"$repo/get-cadence.sh" 2>&1)" ||
+    { printf '%s\n' "$install_out" >&2; die "get-cadence.sh failed"; }
+  printf '%s\n' "$install_out"
 fi
 check "the stack is installed from the package into $work/cadence" [ -f "$work/cadence/.env" ]
 check "the installation is not a git clone" [ ! -e "$work/cadence/.git" ]
@@ -191,6 +231,9 @@ secrets_distinct() {
   pg="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
   admin="$(grep '^SDLC_ADMIN_TOKEN=' .env | cut -d= -f2-)"
   hook="$(grep '^SDLC_GITHUB_WEBHOOK_SECRET=' .env | cut -d= -f2-)"
+  # The external database has the password of its URL; POSTGRES_PASSWORD
+  # stays empty.
+  if [ "$db" = external ]; then pg="-"; fi
   [ -n "$pg" ] && [ -n "$admin" ] && [ -n "$hook" ] && [ "$pg" != "$admin" ] && [ "$pg" != "$hook" ] && [ "$admin" != "$hook" ]
 }
 check "secrets in .env are set and distinct" secrets_distinct
@@ -216,6 +259,87 @@ fi
 check "a second install.sh leaves .env untouched" [ "$before" = "$(sha256sum .env 2>/dev/null || shasum -a 256 .env)" ]
 
 load_env
+
+# --- the database of the installation ------------------------------------------------
+dbline() { grep -E '^(Database|  Database):' <<<"$1" | head -n 1; }
+if [ "$db" = external ]; then
+  info "external database"
+  check "the installer names the external database $EXT_DB_HOST:$db_port/cadence" \
+    contains "$install_out" "Database:             external $EXT_DB_HOST:$db_port/cadence"
+  check "the installer printed no password of the database" lacks "$install_out" "$EXT_DB_PASSWORD"
+  check ".env: CADENCE_DB=external" grep -qxF "CADENCE_DB=external" .env
+  check ".env: SDLC_DATABASE_URL with the CA in /secrets and verify-full" [ "${SDLC_DATABASE_URL:-}" = "$external_url" ]
+  check ".env: POSTGRES_PASSWORD is empty" grep -qxF "POSTGRES_PASSWORD=" .env
+  check ".env: COMPOSE_FILE lists compose.external-db.yml" \
+    [ "$COMPOSE_FILE" = "docker-compose.yml:compose.proxy.yml:compose.external-db.yml:compose.override.yml" ]
+  check "the CA is secrets/db-ca.pem (644), the one given by a relative path" \
+    [ "$(stat -c %a secrets/db-ca.pem 2>/dev/null || stat -f %Lp secrets/db-ca.pem) $(sha256_of secrets/db-ca.pem)" = "644 $(sha256_of "$work/ca.pem")" ]
+  check "no postgres container" [ -z "$(docker compose ps -a -q postgres 2>/dev/null)" ]
+  check "no pgdata volume" [ -z "$(docker volume ls -q --filter "name=^${name}_pgdata\$")" ]
+  check "the service applied the schema in the external database (schema_migrations)" \
+    [ "$(ext_db_query cadence 'SELECT count(*) > 0 FROM schema_migrations')" = t ]
+  check "the API reads the CA as uid 65532: /api dbcheck in the api container passes" \
+    docker compose exec -T api /api dbcheck
+  check "/api dbcheck --json reports the server and the schema" \
+    contains "$(docker compose exec -T api /api dbcheck --json)" '"schema": "cadence"'
+else
+  check ".env: the bundled database (CADENCE_DB=bundled)" grep -qxF "CADENCE_DB=bundled" .env
+fi
+
+# --- refusals of the external database ------------------------------------------------
+# Each before .env: the directory of an unpacked package stays fit for the
+# next attempt. The scripts run ./install.sh there, clab installs in place.
+if [ "$db" = external ]; then
+  info "refusals of the external database ($install_with)"
+  refusals="$work/refusals"
+  mkdir -p "$refusals"
+  tar -xpzf "$work/releases/download/$version/$(package_name "$version")" -C "$refusals"
+  cp "$work/ca.pem" "$work/other-ca.pem" "$refusals/"
+  # refuse WHAT EXPECTED ARGS...: an installation with ARGS is refused before
+  # .env, the output has EXPECTED and no password of the database.
+  refuse() {
+    local what="$1" expected="$2" out
+    shift 2
+    if [ "$install_with" = clab ]; then
+      out="$(cd "$refusals" && env -u COMPOSE_PROJECT_NAME "$clab" server install --dir "$refusals" --name "$name-r" --mode proxy \
+        --http-addr "127.0.0.1:$second_port" --yes "$@" </dev/null 2>&1)" && { fail "$what must be refused"; return; }
+    else
+      out="$(cd "$refusals" && env -u COMPOSE_PROJECT_NAME ./install.sh --name "$name-r" --mode proxy --http-addr "127.0.0.1:$second_port" \
+        --yes "$@" </dev/null 2>&1)" && { fail "$what must be refused"; return; }
+    fi
+    if contains "$out" "$expected" && lacks "$out" "$EXT_DB_PASSWORD" && lacks "$out" "$EXT_DB_PASSWORD_URL" && [ ! -e "$refusals/.env" ]; then
+      pass "$what is refused before .env: $expected"
+    else
+      fail "$what: no '$expected', a password in the output or .env written: $out"
+    fi
+  }
+  refuse "a CA that did not sign the server" "TLS to $EXT_DB_HOST:$db_port/cadence failed" \
+    --external-db "$(ext_db_url cadence)" --external-db-ca other-ca.pem
+  wrong_url="$(ext_db_url cadence)"
+  wrong_url="${wrong_url/$EXT_DB_PASSWORD_URL/Wrong-pw-$EXT_DB_PASSWORD_URL}"
+  refuse "a wrong password" "the server refused the role" --external-db "$wrong_url" --external-db-ca ca.pem
+  refuse "no sslmode and no CA" "sslmode is not set" --external-db "$(ext_db_url cadence "connect_timeout=5")"
+  refuse "a parameter libpq does not know" "has the parameter pool_max_conns" \
+    --external-db "$(ext_db_url cadence "sslmode=verify-full&pool_max_conns=5")" --external-db-ca ca.pem
+  refuse "no vector, and the role cannot create it" "CREATE EXTENSION IF NOT EXISTS vector;" \
+    --external-db "$(ext_db_url cadence_noext)" --external-db-ca ca.pem
+  refuse "no CREATE on the schema public" "has no CREATE privilege on the schema public" \
+    --external-db "$(ext_db_url cadence_nopriv)" --external-db-ca ca.pem
+  refuse "tables that are not Cadence's" "the schema public holds tables that are not Cadence's (orders)" \
+    --external-db "$(ext_db_url cadence_foreign)" --external-db-ca ca.pem
+  ext_db_old_up "$name-db14" "$((db_port + 1))"
+  refuse "PostgreSQL 14" "PostgreSQL 14." --external-db "$EXT_DB_OLD_URL"
+  docker rm -f "$name-db14" >/dev/null 2>&1 || true
+  # An older Compose than the overlay needs: docker answers 2.19.0.
+  mkdir -p "$work/oldcompose"
+  # shellcheck disable=SC2016 # the text of the shim, expanded when it runs
+  printf '#!/bin/sh\nif [ "$1 $2" = "compose version" ]; then echo 2.19.0; exit 0; fi\nexec %s "$@"\n' "$(command -v docker)" >"$work/oldcompose/docker"
+  chmod 755 "$work/oldcompose/docker"
+  PATH="$work/oldcompose:$PATH" refuse "Docker Compose 2.19.0" "needs Docker Compose 2.20.0 or newer" \
+    --external-db "$(ext_db_url cadence)" --external-db-ca ca.pem
+  check "the refusals left no containers of $name-r" [ -z "$(docker ps -a -q --filter "label=com.docker.compose.project=$name-r")" ]
+  check "...and no network" [ -z "$(docker network ls -q --filter "label=com.docker.compose.project=$name-r")" ]
+fi
 
 # --- installation name -------------------------------------------------------------
 info "installation name"
@@ -399,6 +523,17 @@ if [ "$driver" = clab ]; then
   check "status reports an installation from the package" contains "$status" "package"
   check "status reports the services" contains "$status" "api"
   check "status names the installation: $name (.env)" grep -qE "^Name: +$name \(\.env\)\$" <<<"$status"
+  if ! "$clab" server status --help | grep -q 'the database'; then
+    info "clab $("$clab" version 2>/dev/null | head -n 1) does not report the database (v0.10.0+): not checked"
+  elif [ "$db" = external ]; then
+    check "status names the external database with its sslmode" \
+      grep -qE "^Database: +external $EXT_DB_HOST:$db_port/cadence \(sslmode=verify-full\)\$" <<<"$status"
+    check "status --json .database" \
+      [ "$("$clab" server status --json | jq -r .database)" = "external $EXT_DB_HOST:$db_port/cadence (sslmode=verify-full)" ]
+    check "status shows no password of the database" lacks "$status$("$clab" server status --json)" "$EXT_DB_PASSWORD_URL"
+  else
+    check "status names the bundled database" grep -qE "^Database: +bundled\$" <<<"$status"
+  fi
   check "status --json reports .name $name from .env" \
     [ "$("$clab" server status --json | jq -r '"\(.name) \(.name_from)"')" = "$name .env" ]
   if out="$(COMPOSE_PROJECT_NAME=other "$clab" server status 2>&1)"; then
@@ -429,13 +564,63 @@ restore_cmd() {
   if [ "$driver" = clab ]; then "$clab" server restore "$@"; else ./restore.sh "$@"; fi
 }
 
+# portable_dump FILE: no owners, privileges or extensions in the dump.
+portable_dump() {
+  ! gunzip -c "$1" | grep -qE '^(ALTER .* OWNER TO|GRANT |REVOKE |CREATE EXTENSION|COMMENT ON EXTENSION)'
+}
+
 # --- backup and restore ----------------------------------------------------------------------------
 info "backup ($driver)"
-backup_cmd
+if [ "$db" = external ]; then
+  # Every command line of the machine while the backup runs: the password of
+  # the database must be in none of them (ps shows them to every user; on
+  # Linux the processes of containers too).
+  (while :; do ps -eo args 2>/dev/null; sleep 0.1; done) >"$work/ps.log" &
+  sampler=$!
+  backup_out="$(backup_cmd 2>&1)" || { printf '%s\n' "$backup_out" >&2; fail "backup of the external database failed"; }
+  kill "$sampler" 2>/dev/null || true
+  wait "$sampler" 2>/dev/null || true
+  printf '%s\n' "$backup_out"
+  check "backup names the external database" contains "$backup_out" "dumping the external database $EXT_DB_HOST:$db_port/cadence"
+  check "backup prints no password" lacks "$backup_out" "$EXT_DB_PASSWORD"
+  check "no command line during the backup carried the password ($(grep -c . "$work/ps.log") lines sampled)" \
+    lacks "$(cat "$work/ps.log")" "$EXT_DB_PASSWORD"
+  check "...nor its URL-encoded form" lacks "$(cat "$work/ps.log")" "$EXT_DB_PASSWORD_URL"
+  check "pg_dump of the backup client ran" grep -q 'pg_dump -d postgres://cadence@' "$work/ps.log"
+else
+  backup_cmd
+fi
 dump="$(find backups -maxdepth 1 -name "cadence-$version-*.sql.gz" | sort | tail -n 1)"
 check "backup writes cadence-$version-*.sql.gz" [ -n "$dump" ]
 check "the dump is larger than 1 KB" [ "$(wc -c <"${dump:-/dev/null}" | tr -d ' ')" -gt 1024 ]
+check "the dump has mode 600" [ "$(stat -c %a "${dump:-/dev/null}" 2>/dev/null || stat -f %Lp "${dump:-/dev/null}")" = 600 ]
 check "the blobs volume is archived next to it" [ -f "${dump%.sql.gz}.blobs.tar.gz" ]
+check "the dump carries no owners, privileges or extensions (portable between the modes)" \
+  portable_dump "$dump"
+
+if [ "$db" = external ]; then
+  info "backup of an unreachable external database ($driver)"
+  dumps_before="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort)"
+  docker stop "$EXT_DB_NAME" >/dev/null
+  sleep 1
+  if out="$(backup_cmd 2>&1)"; then
+    fail "backup of an unreachable database must fail"
+  else
+    pass "backup of an unreachable database fails"
+  fi
+  check "...and leaves no dump" [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort)" = "$dumps_before" ]
+  check "...and prints no password" lacks "$out" "$EXT_DB_PASSWORD"
+  docker start "$EXT_DB_NAME" >/dev/null
+  for _ in $(seq 1 60); do
+    ext_db_query cadence 'SELECT 1' >/dev/null 2>&1 && break
+    sleep 1
+  done
+  # The API may have lost its connections: wait until it answers again.
+  for _ in $(seq 1 30); do
+    [ "$(http_code "$base/readyz")" = 200 ] && break
+    sleep 2
+  done
+fi
 
 "$clab" --host "$base" project create AFTER --name "Created after the backup" --team check >/dev/null
 check "a project created after the backup exists" contains "$("$clab" --host "$base" project list --json)" '"AFTER"'
@@ -483,8 +668,75 @@ COMPOSE_PROJECT_NAME="" backup_cmd >/dev/null
 check "an empty COMPOSE_PROJECT_NAME is no variable: backup works" \
   [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l)" -gt "$(grep -c . <<<"$dumps_before")" ]
 
+# --- upgrade on the external database ------------------------------------------------
+# A package of this checkout as v99.0.0 with the same images: the images of
+# the new version check the database before the backup, and the rollback the
+# upgrade prints restores into the external database.
+if [ "$db" = external ]; then
+  info "upgrade on the external database ($driver)"
+  next=v99.0.0
+  "$repo/ci/package.sh" --version "$next" "$work/releases/download/$next" >/dev/null
+  registry="${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}"
+  if [ -n "${CADENCE_BACKEND_DIGEST+set}" ] && [ -z "${CADENCE_BACKEND_DIGEST}" ]; then
+    # Images of a branch go by the tag: give the same images the tag of
+    # $next where they live - in the local registry of the branch.
+    for image in backend frontend; do
+      docker buildx imagetools create -t "$registry/sdlc-pipeline-$image:$next" "$registry/sdlc-pipeline-$image:$version" >/dev/null 2>&1 ||
+        info "could not tag $registry/sdlc-pipeline-$image:$version as $next"
+    done
+  fi
+  upgrade_state() { printf '%s %s\n' "$(tr -d '[:space:]' <VERSION)" "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort | tr '\n' ' ')"; }
+  before_upgrade="$(upgrade_state)"
+  docker stop "$EXT_DB_NAME" >/dev/null
+  if out="$(CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$next" 2>&1)"; then
+    fail "an upgrade with the external database down must stop"
+  else
+    check "an upgrade with the external database down stops at the check of $next" \
+      contains "$out" "the external database is not ready for $next"
+  fi
+  check "...before the backup and before any file changed" [ "$(upgrade_state)" = "$before_upgrade" ]
+  check "...without asking for the postgres container" lacks "$out" "postgres container"
+  docker start "$EXT_DB_NAME" >/dev/null
+  for _ in $(seq 1 60); do
+    ext_db_query cadence 'SELECT 1' >/dev/null 2>&1 && break
+    sleep 1
+  done
+  for _ in $(seq 1 30); do
+    [ "$(http_code "$base/readyz")" = 200 ] && break
+    sleep 2
+  done
+
+  "$clab" --host "$base" project create UPG --name "Before the upgrade" --team check >/dev/null
+  # compose up waits for the API to be healthy before it starts the worker,
+  # so only a zero timeout makes "not ready" certain.
+  mkdir -p "$work/clab-bin"
+  ln -sf "$clab" "$work/clab-bin/clab"
+  if out="$(PATH="$work/clab-bin:$PATH" CADENCE_RELEASES_URL="file://$work/releases" CADENCE_READY_TIMEOUT=0 upgrade_cmd "$next" 2>&1)"; then
+    fail "the upgrade to $next with a zero timeout must report it is not ready"
+  else
+    printf '%s\n' "$out" | tail -n 8
+    check "it checked the external database with the images of $next before the backup" \
+      [ "$(grep -nF "checking the external database $EXT_DB_HOST:$db_port/cadence with the images of $next" <<<"$out" | cut -d: -f1)" -lt \
+        "$(grep -nF "backup of $version" <<<"$out" | cut -d: -f1)" ]
+    rollback="$(grep -E '^  (tar -xpzf |\./restore\.sh --yes |clab server restore --yes )' <<<"$out" || true)"
+    if [ "$(grep -c . <<<"$rollback")" = 2 ]; then
+      pass "it prints the rollback: package files and the backup"
+      info "running the rollback as printed"
+      "$clab" --host "$base" project create LOST --name "Lost by the rollback" --team check >/dev/null 2>&1 || true
+      PATH="$work/clab-bin:$PATH" bash -euc "$rollback" >/dev/null
+      check "after the rollback VERSION is $version" [ "$(tr -d '[:space:]' <VERSION)" = "$version" ]
+      projects="$("$clab" --host "$base" project list --json)"
+      check "after the rollback the project from before the upgrade is there" contains "$projects" '"UPG"'
+      check "after the rollback the project written after the backup is gone" lacks "$projects" '"LOST"'
+      check "/readyz answers 200 after the rollback" [ "$(http_code "$base/readyz")" = 200 ]
+    else
+      fail "the rollback is not two commands: $out"
+    fi
+  fi
+fi
+
 # --- two installations on one machine ------------------------------------------------
-if [ "$driver" = scripts ]; then
+if [ "$driver" = scripts ] && [ "$db" = bundled ]; then
   info "a second installation: --name $second_name on port $second_port"
   (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
     sh -s -- --dir second --name "$second_name" --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" >/dev/null)

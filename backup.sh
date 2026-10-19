@@ -11,6 +11,13 @@
 #
 # Files: cadence-<version>-<YYYYmmdd-HHMMSS>.sql.gz and, next to it, the same
 # name with .blobs.tar.gz. The version in the name is what restore.sh checks.
+# The dump is the same in both database modes: plain SQL without owners,
+# privileges and extensions, so a backup of the bundled database restores
+# into an external one and back (docs/admin.md, "Backups").
+#
+# With an external database (CADENCE_DB=external) pg_dump runs in the backup
+# client db-client of compose.external-db.yml against SDLC_DATABASE_URL; the
+# postgres container is not needed.
 #
 # Backups stay on this machine: they protect against a bad upgrade or a
 # mistaken deletion, not against losing the machine. Copy the directory
@@ -31,24 +38,39 @@ dir="${BACKUP_DIR:-$(pwd)/backups}"
 mkdir -p "$dir"
 dir="$(cd "$dir" && pwd)"
 
-running postgres || die "the postgres container is not running: nothing to back up"
+check_db_mode
+if ! external_db; then
+  running postgres || die "the postgres container is not running: nothing to back up"
+fi
 
 stem="$dir/cadence-${CADENCE_VERSION}-$(date +%Y%m%d-%H%M%S)"
 dump="$stem.sql.gz"
 
-# pg_dump runs INSIDE the database container: the host has no Postgres
-# client, and a client of another version breaks the dump.
-info "dumping the database to $dump"
-if ! docker compose exec -T postgres \
-  pg_dump -U "${POSTGRES_USER:-sdlc}" -d "${POSTGRES_DB:-sdlc}" --clean --if-exists --no-owner |
-  gzip >"$dump"; then
-  rm -f "$dump"
-  die "pg_dump failed"
+# pg_dump runs INSIDE a container: the host has no Postgres client, and a
+# client of another version breaks the dump. Bundled: the database container
+# itself; external: the backup client, whose pg_dump is of the newest
+# supported server version.
+if external_db; then
+  db_url_parts "$SDLC_DATABASE_URL"
+  info "dumping the external database $(db_target "$SDLC_DATABASE_URL") to $dump"
+  if ! db_client pg_dump -d "$DB_URL_SAFE" "${DUMP_OPTIONS[@]}" | gzip >"$dump"; then
+    rm -f "$dump"
+    die "pg_dump of the external database failed (see above)"
+  fi
+else
+  info "dumping the database to $dump"
+  if ! docker compose exec -T postgres \
+    pg_dump -U "${POSTGRES_USER:-sdlc}" -d "${POSTGRES_DB:-sdlc}" "${DUMP_OPTIONS[@]}" |
+    gzip >"$dump"; then
+    rm -f "$dump"
+    die "pg_dump failed"
+  fi
 fi
 
 # An empty dump is a failure that would otherwise surface only on restore.
 size="$(wc -c <"$dump" | tr -d ' ')"
 if [ "$size" -lt 1024 ]; then
+  rm -f "$dump"
   die "the dump is suspiciously small ($size bytes): $dump"
 fi
 
