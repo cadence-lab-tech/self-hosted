@@ -474,12 +474,17 @@ check "an empty SDLC_METRICS_ADDR in .env turns the listeners off" [ "$metrics_o
 # The example alert rules of docs/admin.md ("Monitoring") are what an
 # administrator copies into Prometheus: they must load.
 info "alert rules (docs)"
-rules_dir="$dist/rules"
-mkdir -p "$rules_dir"
-awk '/^# cadence-alerts.yml$/ { on = 1 } on && /^```$/ { exit } on' docs/admin.md >"$rules_dir/cadence-alerts.yml"
-check "docs/admin.md has the example rules (# cadence-alerts.yml)" [ -s "$rules_dir/cadence-alerts.yml" ]
-check "promtool check rules accepts them" docker run --rm -v "$rules_dir:/rules:ro" --entrypoint promtool \
-  prom/prometheus:v3.5.0 check rules /rules/cadence-alerts.yml
+rules="$(awk '/^# cadence-alerts.yml$/ { on = 1 } on && /^```$/ { exit } on' docs/admin.md)"
+check "docs/admin.md has the example rules (# cadence-alerts.yml)" [ -n "$rules" ]
+# The rules go in on stdin: a bind mount of a scratch directory is not
+# readable for the user of the image on every CI runner.
+if promtool_out="$(docker run --rm -i --entrypoint promtool prom/prometheus:v3.5.0 \
+  check rules /dev/stdin <<<"$rules" 2>&1)"; then
+  pass "promtool check rules accepts them"
+else
+  fail "promtool check rules accepts them"
+  printf '%s\n' "$promtool_out" >&2
+fi
 
 info "Caddyfile"
 adapt() {
