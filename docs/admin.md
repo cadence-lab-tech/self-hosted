@@ -986,7 +986,8 @@ When the machine is gone, the bucket has the backups:
 
 `fetch` writes the dump (and the blobs archive) into `backups/`, checks the
 sums of `.sha256` and prints the `restore.sh` command; a damaged copy is
-refused and nothing is left in `backups/`. If the installed version is not
+refused, and a file whose sum does not match never lands in `backups/` nor
+replaces a file there. If the installed version is not
 the version of the backup, `restore.sh` refuses and prints the command that
 puts the package files of that version in place first, as for any backup
 of another version (below). `clab server backup fetch` and
