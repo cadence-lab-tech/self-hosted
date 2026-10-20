@@ -39,7 +39,7 @@ name: cadence
 # CADENCE_VERSION: older Compose v2 - seen on v2.3 and v2.6 - reads it as a
 # default value when another variable follows.)
 x-image-backend: &image-backend
-  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_BACKEND_DIGEST-@sha256:ec40ff80b0abdfc35cdd6b9dbe9a6a48cddba870d3a9c7f1b71882610dee08ac}
+  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_BACKEND_DIGEST-@sha256:96c374e6ea6dec4d1970323742475f2f07053ef8959418b83fa002b240da8a77}
 
 # Settings the API and the worker must agree on.
 x-shared-env: &shared-env
@@ -179,7 +179,7 @@ services:
 
   # The UI: static files served by Caddy inside the image.
   ui:
-    image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_FRONTEND_DIGEST-@sha256:2d2795d60ed6f6a6eeb830bc6ec5e44c73642178c605b497fbe6583515262cf9}
+    image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_FRONTEND_DIGEST-@sha256:3e433c894ada3bfbdab60ef0422001d30e210bf6dedb4aecc7621fb078e3f06c}
     restart: unless-stopped
 
   # The single entry point: the UI, /v1, /mcp, /webhooks, /healthz, /readyz.
