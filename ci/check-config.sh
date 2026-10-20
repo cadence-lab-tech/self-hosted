@@ -14,7 +14,8 @@
 #             CLAB_BIN a documented command that the clab of VERSION does not
 #             have yet (documented ahead of the release that brings it) is
 #             skipped with a note; with CLAB_BIN it fails. An unknown flag of
-#             an existing command fails either way.
+#             an existing command fails either way. The same clab checks the
+#             line docs/admin.md quotes for clab without a host (from v0.10.1).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -330,6 +331,30 @@ else
     done < <(grep -noE -- 'clab server [a-z]+[^`#]*' "$f" || true)
   done
   check "the documentation shows clab server with flags" [ "$documented" -gt 0 ]
+fi
+
+# clab without a host: docs/admin.md quotes the line clab prints when no host
+# is configured (clab v0.10.1, CLAB-147). The clab is CLAB_BIN, else the CLI
+# of VERSION from the tap installed above; before v0.10.1 it went to
+# localhost instead, and the check is skipped.
+info "documented clab without a host"
+clab_nohost="${CLAB_BIN:-}"
+if [ -z "$clab_nohost" ] && ! version_lt "$version" v0.10.1; then
+  clab_nohost="$clab_server"
+fi
+if [ -z "$clab_nohost" ]; then
+  if version_lt "$version" v0.10.1; then
+    info "skipped: clab $version goes to localhost without a host; CLAB_BIN=<clab v0.10.1 or newer> checks it"
+  fi
+else
+  nohost_config="$(mktemp -d "$dist/clab-config.XXXXXX")"
+  nohost_code=0
+  nohost="$(cd "$dist" && CLAB_CONFIG_DIR="$nohost_config" env -u SDLC_API_URL -u SDLC_TOKEN "$clab_nohost" tasks 2>&1 >/dev/null)" ||
+    nohost_code=$?
+  nohost="${nohost%%$'\n'*}"
+  check "clab with no host exits with code 1" [ "$nohost_code" = 1 ]
+  check "clab with no host prints a line" [ -n "$nohost" ]
+  check "docs/admin.md quotes what clab prints with no host: $nohost" grep -qF -- "$nohost" docs/admin.md
 fi
 
 info "verifying a release (docs)"
