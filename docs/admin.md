@@ -745,12 +745,39 @@ clab auth login --host https://cadence.acme.internal
 clab --host https://cadence.acme.internal tasks
 ```
 
+The CLI has no default host. Until you sign in with
+`clab auth login --host https://<host>` (or set
+`SDLC_API_URL=https://<host>/v1` in the environment), every command makes
+no network request, prints this line to stderr and exits with code 1:
+
+```
+хост не настроен: clab auth login --host https://sdlc.example.com
+```
+
+`clab version` prints its own version and the same line, and exits with
+code 0. The line is the CLI's own message, quoted as it prints it; it reads
+"host is not configured". This is so from clab v0.10.1; older CLIs without
+a host went to `http://localhost:8088`.
+
 Agents that run unattended (CI, `clab-runner`) get a token of their own,
 issued by a project or team admin, rather than a person's session:
 
 ```bash
 clab token create --name ci --for agent:ci-bot --project PLAT --roles developer --days 90
 ```
+
+`clab-runner` comes with `clab` (Homebrew and the release archives) and
+takes its address and token from the environment only: it does not read the
+configuration of `clab auth login`.
+
+```bash
+SDLC_API_URL=https://<host>/v1 SDLC_TOKEN=<token> SDLC_PROJECT=PLAT clab-runner
+```
+
+Without `SDLC_API_URL` the runner does not start: it logs an error naming
+the variable and exits with code 2, before any request. This is so from
+clab-runner v0.10.2; older runners without the variable went to
+`http://localhost:8088/v1`.
 
 ## Embeddings
 
@@ -1596,6 +1623,10 @@ docker compose exec caddy wget -qO- http://worker:9090/metrics | grep '^cadence_
   Behind a corporate proxy use the `proxy` mode instead.
 - **Agents hang on MCP calls behind a proxy** — the proxy buffers `/mcp/`;
   see [Behind your reverse proxy](#behind-your-reverse-proxy).
+- **`clab`: `хост не настроен`** ("host is not configured") — the CLI has
+  no host yet: `clab auth login --host https://<host>`; see
+  [CLI and agents](#cli-and-agents). `clab-runner` refuses to start for the
+  same reason without `SDLC_API_URL=https://<host>/v1`.
 - **GitHub App: `Bad credentials`** — the key file is unreadable for uid
   65532 or the machine clock is off.
 - **External database: the API does not become ready** — run
