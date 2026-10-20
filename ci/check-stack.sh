@@ -37,6 +37,8 @@
 #                         rollback (with a package of this checkout as
 #                         v99.0.0), status. Needs images of v0.10.0 or newer
 #                         (/api dbcheck).
+#   CHECK_S3_PORT         host port of the stand-in bucket of the off-machine
+#                         copy (ci/s3.sh), default CHECK_HTTP_PORT + 4
 #   CHECK_DB_PORT         port of the stand-in, default CHECK_HTTP_PORT + 2;
 #                         the PostgreSQL 14 of the version refusal takes the
 #                         next one
@@ -56,8 +58,10 @@
 #   CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
 #     COMPOSE_PROJECT_NAME=check-<name> CHECK_HTTP_PORT=<port> ci/check-stack.sh
 #
-# The metrics of api and worker are checked on images of VERSION v0.10.0 or
-# later, and on images of a branch (a pin variable set) whatever VERSION is.
+# The metrics of api and worker, and the off-machine copy of backups with
+# backup verify (a stand-in bucket, ci/s3.sh), are checked on images of
+# VERSION v0.10.0 or later, and on images of a branch (a pin variable set)
+# whatever VERSION is.
 #
 # The stacks are torn down with their volumes at the end: give them a
 # COMPOSE_PROJECT_NAME and a CHECK_HTTP_PORT (and the port after it) of their
@@ -123,6 +127,9 @@ fresh() {
 
 cleanup() {
   [ "${CHECK_KEEP:-}" != 1 ] || { info "kept: $work/cadence${second_up:+ and $work/second}"; return; }
+  # The stand-in bucket sits in the network of the installation: it goes
+  # first, or compose could not remove that network.
+  if declare -F s3_down >/dev/null; then s3_down; fi
   # By the names this check gave, never by what a .env says.
   local d n
   for d in cadence:"$name" second:"$second_name"; do
@@ -689,6 +696,258 @@ projects="$("$clab" --host "$base" project list --json)"
 check "after restore the project from before the backup is there" contains "$projects" '"CHECK"'
 check "after restore the project created after the backup is gone" lacks "$projects" '"AFTER"'
 check "/readyz answers 200 after restore" [ "$(http_code "$base/readyz")" = 200 ]
+
+# --- off-machine copy and verify (CLAB-132) --------------------------------------------
+# A stand-in bucket (ci/s3.sh) in the network of the installation: the copy
+# after every backup, the retention of BACKUP_S3_KEEP, a multipart upload,
+# the refusals of a wrong key and an unreachable endpoint, verify from the
+# bucket and from a file - the stack keeps running, nothing is left behind -
+# and its refusals, fetch, and the warning of an upgrade. Needs /api
+# backup-s3 (v0.10.0+): images of VERSION from v0.10.0 on, or images of a
+# branch (a pin variable set).
+backup_with() {
+  if [ "$driver" = clab ]; then "$clab" server backup "$@"; else ./backup.sh "$@"; fi
+}
+# shellcheck disable=SC2120 # FILE is passed through check
+verify_cmd() {
+  if [ "$driver" = clab ]; then "$clab" server backup verify "$@"; else ./backup.sh verify "$@"; fi
+}
+fetch_cmd() {
+  if [ "$driver" = clab ]; then "$clab" server backup fetch "$@"; else ./backup.sh fetch "$@"; fi
+}
+upgrade_cmd() {
+  if [ "$driver" = clab ]; then "$clab" server upgrade "$@"; else ./upgrade.sh "$@"; fi
+}
+# env_set KEY VALUE: KEY=VALUE in .env of the installation.
+env_set() {
+  if grep -q "^$1=" .env; then
+    sed -i.bak "s|^$1=.*|$1=$2|" .env && rm -f .env.bak
+  else
+    printf '%s=%s\n' "$1" "$2" >>.env
+  fi
+}
+counts_sql="SELECT (SELECT count(*) FROM projects) || ' ' || (SELECT count(*) FROM tasks) || ' ' || (SELECT count(*) FROM artifacts)"
+live_counts() {
+  if [ "$db" = external ]; then
+    ext_db_query cadence "$counts_sql"
+  else
+    docker compose exec -T postgres psql -X -At -U "${POSTGRES_USER:-sdlc}" -d "${POSTGRES_DB:-sdlc}" -c "$counts_sql"
+  fi
+}
+# verify_left: what a verify of this installation could leave - containers
+# and networks with its label, and dangling volumes.
+verify_left() {
+  docker ps -a -q --filter "label=com.cadence.verify=$name"
+  docker network ls -q --filter "label=com.cadence.verify=$name"
+  docker volume ls -q --filter dangling=true | sort
+}
+# with_ps CMD...: CMD with every command line of the machine sampled into
+# $work/ps.log (the secret of the bucket must be in none of them).
+with_ps() {
+  local sampler rc=0
+  (while :; do ps -eo args 2>/dev/null; sleep 0.1; done) >>"$work/ps.log" &
+  sampler=$!
+  "$@" || rc=$?
+  kill "$sampler" 2>/dev/null || true
+  wait "$sampler" 2>/dev/null || true
+  return "$rc"
+}
+
+if version_lt "$version" v0.10.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+  info "skipped: the images of $version have no /api backup-s3 (v0.10.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+elif [ "$driver" = clab ] && ! "$clab" server backup --help 2>/dev/null | grep -q 'backup verify'; then
+  info "skipped: clab $("$clab" version 2>/dev/null | head -n 1) has no clab server backup verify (v0.10.0+)"
+else
+  info "off-machine copy ($driver)"
+  out="$(backup_cmd 2>&1)"
+  check "without BACKUP_S3_BUCKET backup says nothing about S3" lacks "$out" "s3://"
+  check "...and uploads nothing" lacks "$out" "upload"
+
+  # shellcheck source=ci/s3.sh
+  . "$repo/ci/s3.sh"
+  s3_up "$name-s3" "${CHECK_S3_PORT:-$((port + 4))}" "${name}_default"
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$S3_SECRET"; fi
+  env_set BACKUP_S3_BUCKET "$S3_BUCKET"
+  env_set BACKUP_S3_ENDPOINT "$S3_ENDPOINT"
+  env_set BACKUP_S3_PREFIX nightly/
+  env_set BACKUP_S3_ACCESS_KEY_ID "$S3_ACCESS_KEY"
+  env_set BACKUP_S3_SECRET_ACCESS_KEY "$S3_SECRET"
+  env_set BACKUP_S3_KEEP 2
+  printf 'not a backup\n' >"$work/other.txt"
+  s3_put "$work/other.txt" nightly/other.txt
+  s3_put "$work/other.txt" "elsewhere/cadence-$version-20000101-000000.sql.gz"
+  s3_put "$work/other.txt" "nightly/deeper/cadence-$version-20000101-000000.sql.gz"
+  : >"$work/ps.log"
+
+  if out="$(with_ps backup_cmd 2>&1)"; then pass "backup with the bucket succeeds"; else fail "backup with the bucket failed: $out"; fi
+  printf '%s\n' "$out" | tail -n 3
+  dump="$(find backups -maxdepth 1 -name "cadence-$version-*.sql.gz" | sort | tail -n 1)"
+  stem="$(basename "${dump%.sql.gz}")"
+  check "it prints ✓ uploaded to s3://$S3_BUCKET/nightly/" contains "$out" "✓ uploaded $stem.sql.gz, $stem.blobs.tar.gz, $stem.sha256 to s3://$S3_BUCKET/nightly/"
+  keys="$(s3_keys nightly/)"
+  for suffix in .sql.gz .blobs.tar.gz .sha256; do
+    check "the bucket has nightly/$stem$suffix" grep -qxF "nightly/$stem$suffix" <<<"$keys"
+  done
+  s3_get "nightly/$stem.sql.gz" "$work/from-s3.sql.gz"
+  check "the dump in the bucket is the local dump byte for byte" [ "$(sha256_of "$work/from-s3.sql.gz")" = "$(sha256_of "$dump")" ]
+  s3_get "nightly/$stem.sha256" "$work/from-s3.sha256"
+  check ".sha256 in the bucket holds the sum of the dump" grep -qxF "$(sha256_of "$dump")  $stem.sql.gz" "$work/from-s3.sha256"
+
+  # A dump larger than a part goes up in parts and comes back whole.
+  mkdir -p "$work/big"
+  head -c $((12 * 1024 * 1024 + 4321)) /dev/urandom >"$work/big/cadence-$version-20000101-000001.sql.gz"
+  chmod 600 "$work/big/cadence-$version-20000101-000001.sql.gz"
+  BACKUP_S3_BUCKET="$S3_BUCKET" BACKUP_S3_ENDPOINT="$S3_ENDPOINT" BACKUP_S3_PREFIX=big/ BACKUP_S3_KEEP=5 \
+    BACKUP_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY" BACKUP_S3_SECRET_ACCESS_KEY="$S3_SECRET" \
+    docker compose run --rm --no-deps -T --user "$(id -u):$(id -g)" -e BACKUP_S3_BUCKET -e BACKUP_S3_ENDPOINT \
+    -e BACKUP_S3_PREFIX -e BACKUP_S3_KEEP -e BACKUP_S3_ACCESS_KEY_ID -e BACKUP_S3_SECRET_ACCESS_KEY \
+    -v "$work/big:/backups" api backup-s3 put --part-size 5242880 "/backups/cadence-$version-20000101-000001.sql.gz" >/dev/null
+  s3_get "big/cadence-$version-20000101-000001.sql.gz" "$work/big.back"
+  check "a 12 MB dump goes up in 5 MiB parts and comes back whole" \
+    [ "$(sha256_of "$work/big.back")" = "$(sha256_of "$work/big/cadence-$version-20000101-000001.sql.gz")" ]
+
+  # Retention: BACKUP_S3_KEEP=2 after four backups.
+  for _ in 1 2 3; do
+    sleep 1
+    with_ps backup_cmd >/dev/null 2>&1 || fail "a backup with the bucket failed"
+  done
+  # Right under the prefix: the objects of nightly/deeper/ are not backups.
+  keys="$(s3_keys nightly/ | grep -E '^nightly/[^/]+$')"
+  check "the bucket keeps BACKUP_S3_KEEP=2 backups" [ "$(grep -c '\.sha256$' <<<"$keys")" = 2 ]
+  check "...each with its dump and blobs archive" \
+    [ "$(grep -c '\.sql\.gz$' <<<"$keys")$(grep -c '\.blobs\.tar\.gz$' <<<"$keys")" = 22 ]
+  newest="$(find backups -maxdepth 1 -name "cadence-$version-*.sql.gz" | sort | tail -n 2 | xargs -n 1 basename | sed 's/\.sql\.gz$//' | sort)"
+  check "...the newest two" [ "$(grep '\.sha256$' <<<"$keys" | sed 's:^nightly/::; s/\.sha256$//' | sort)" = "$newest" ]
+  check "...and leaves a foreign object of the prefix" grep -qxF nightly/other.txt <<<"$keys"
+  check "...and the objects of a deeper prefix" [ -n "$(s3_keys nightly/deeper/)" ]
+  check "...and the objects outside the prefix" [ -n "$(s3_keys elsewhere/)" ]
+
+  # Refusals: the local backup stays, the bucket is untouched, status 1.
+  for broken in "BACKUP_S3_SECRET_ACCESS_KEY:wrong$(openssl rand -hex 8)" "BACKUP_S3_ENDPOINT:http://s3stand-nowhere:7070"; do
+    key="${broken%%:*}"
+    env_set "$key" "${broken#*:}"
+    sleep 1
+    dumps_before="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')"
+    if out="$(with_ps backup_cmd 2>&1)"; then
+      fail "backup with a broken $key must exit with status 1"
+    else
+      pass "backup with a broken $key exits with status 1"
+    fi
+    check "...prints why the copy failed" contains "$out" "✗ the off-machine copy of"
+    check "...keeps the local backup" [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" -gt "$dumps_before" ]
+    check "...and the copies in the bucket" [ "$(s3_keys nightly/ | grep -E '^nightly/[^/]+$')" = "$keys" ]
+    if [ "$key" = BACKUP_S3_SECRET_ACCESS_KEY ]; then
+      check "...with the answer of S3: 403" contains "$out" "403"
+      env_set "$key" "$S3_SECRET"
+    else
+      check "...naming the endpoint it could not reach" contains "$out" "s3stand-nowhere"
+      env_set "$key" "$S3_ENDPOINT"
+    fi
+    check "...and no secret" lacks "$out" "$S3_SECRET"
+    printf '%s\n' "$out" | grep -E '^✗' | head -n 2
+  done
+  sleep 1
+  with_ps backup_cmd >/dev/null 2>&1 || fail "backup after the refusals failed"
+  check "--no-upload takes a backup without the copy" lacks "$(sleep 1; backup_with --no-upload 2>&1)" "upload"
+
+  info "verify ($driver)"
+  expected="$(live_counts)"
+  read -r e_projects e_tasks e_artifacts <<<"$expected"
+  started_before="$(started "$work/cadence")"
+  left_before="$(verify_left)"
+  (while :; do http_code "$base/readyz"; echo; sleep 0.5; done) >"$work/readyz.log" &
+  poller=$!
+  [ "$db" = bundled ] || dbs_before="$(ext_db_query postgres 'SELECT string_agg(datname, $$ $$ ORDER BY datname) FROM pg_database')"
+  if out="$(with_ps verify_cmd 2>&1)"; then pass "verify of the newest backup succeeds"; else fail "verify failed: $out"; fi
+  kill "$poller" 2>/dev/null || true
+  wait "$poller" 2>/dev/null || true
+  printf '%s\n' "$out"
+  newest="$(grep '\.sha256$' <<<"$(s3_keys nightly/)" | sed 's:^nightly/::; s/\.sha256$//' | sort | tail -n 1)"
+  check "verify takes the newest backup from the bucket" contains "$out" "▸ verifying $newest.sql.gz"
+  check "...names the bucket" contains "$out" "from s3://$S3_BUCKET/nightly/"
+  check "...names the schema of the images" contains "$out" "the schema of the images of $version"
+  check "...counts what the database holds: $e_projects projects, $e_tasks tasks, $e_artifacts artifacts" \
+    contains "$out" "$e_projects projects, $e_tasks tasks, $e_artifacts artifacts"
+  check "...reads the blobs archive" contains "$out" "✓ blobs archive $newest.blobs.tar.gz:"
+  check "/readyz answered 200 all along ($(grep -c . "$work/readyz.log") probes)" [ -z "$(grep -v '^200$' "$work/readyz.log")" ]
+  check "...no container of the stack restarted" [ "$(started "$work/cadence")" = "$started_before" ]
+  check "...and nothing is left: containers, networks, volumes" [ "$(verify_left)" = "$left_before" ]
+  check "...nor the download in backups/" [ -z "$(find backups -maxdepth 1 -name '.verify-*')" ]
+  if [ "$db" = external ]; then
+    check "...and no database was created on the external server" \
+      [ "$(ext_db_query postgres 'SELECT string_agg(datname, $$ $$ ORDER BY datname) FROM pg_database')" = "$dbs_before" ]
+  fi
+  check "verify FILE checks a local backup" verify_cmd "$dump"
+
+  # A damaged copy: refused by its sum. A dump that does not load (with a
+  # sum that matches): refused with the error of psql.
+  s3_get "nightly/$newest.sql.gz" "$work/good.sql.gz"
+  s3_get "nightly/$newest.sha256" "$work/good.sha256"
+  cat "$work/good.sql.gz" >"$work/bad.sql.gz"
+  printf 'tampered' >>"$work/bad.sql.gz"
+  s3_put "$work/bad.sql.gz" "nightly/$newest.sql.gz"
+  if out="$(verify_cmd 2>&1)"; then fail "verify of a damaged copy must fail"; else pass "verify of a damaged copy fails"; fi
+  check "...by its checksum" contains "$out" "does not match"
+  check "...and leaves nothing behind" [ "$(verify_left)" = "$left_before" ]
+  gunzip -c "$work/good.sql.gz" >"$work/good.sql"
+  head -c 4000 "$work/good.sql" | gzip >"$work/cut.sql.gz"
+  printf '%s  %s.sql.gz\n' "$(sha256_of "$work/cut.sql.gz")" "$newest" >"$work/cut.sha256"
+  grep -F '.blobs.tar.gz' "$work/good.sha256" >>"$work/cut.sha256" || true
+  s3_put "$work/cut.sql.gz" "nightly/$newest.sql.gz"
+  s3_put "$work/cut.sha256" "nightly/$newest.sha256"
+  if out="$(verify_cmd 2>&1)"; then fail "verify of a dump that does not load must fail"; else pass "verify of a dump that does not load fails"; fi
+  check "...with the error of psql" contains "$out" "psql"
+  check "...and says it does not restore" contains "$out" "does not restore"
+  check "...and leaves nothing behind" [ "$(verify_left)" = "$left_before" ]
+  s3_put "$work/good.sql.gz" "nightly/$newest.sql.gz"
+  s3_put "$work/good.sha256" "nightly/$newest.sha256"
+
+  # Nothing to verify: an empty prefix and an empty BACKUP_DIR.
+  env_set BACKUP_S3_PREFIX empty/
+  env_set BACKUP_DIR "$work/no-backups"
+  if out="$(verify_cmd 2>&1)"; then fail "verify with nothing to verify must fail"; else
+    check "verify with nothing to verify fails: nothing to verify" contains "$out" "nothing to verify"
+  fi
+  env_set BACKUP_S3_PREFIX nightly/
+  env_set BACKUP_DIR ""
+  rm -rf "$work/no-backups"
+
+  info "fetch ($driver)"
+  rm -f "backups/$newest.sql.gz" "backups/$newest.blobs.tar.gz"
+  if out="$(fetch_cmd "$newest" 2>&1)"; then pass "fetch $newest succeeds"; else fail "fetch failed: $out"; fi
+  check "...puts the dump into backups/ as it was uploaded" [ "$(sha256_of "backups/$newest.sql.gz")" = "$(sha256_of "$work/good.sql.gz")" ]
+  check "...with the blobs archive" [ -f "backups/$newest.blobs.tar.gz" ]
+  check "...and prints the restore command" contains "$out" "--yes backups/$newest.sql.gz"
+
+  check "no command line carried the secret of the bucket ($(grep -c . "$work/ps.log") lines sampled)" \
+    lacks "$(cat "$work/ps.log")" "$S3_SECRET"
+  check "...and the docker run of the copy passed it by name" grep -q -- '-e BACKUP_S3_SECRET_ACCESS_KEY ' "$work/ps.log"
+
+  # The backup of an upgrade: copied to the bucket, and an unreachable one is
+  # only a warning. A package of this checkout as v98.0.0, whose images do
+  # not exist: the upgrade gets past the backup and stops at the pull, with
+  # the files of $version back.
+  if [ "$db" = bundled ]; then
+    info "the backup of an upgrade ($driver)"
+    up=v98.0.0
+    "$repo/ci/package.sh" --version "$up" "$work/releases/download/$up" >/dev/null
+    sleep 1
+    out="$(CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
+    check "the upgrade copies its backup to the bucket" contains "$out" "✓ uploaded cadence-$version-"
+    env_set BACKUP_S3_ENDPOINT "http://s3stand-nowhere:7070"
+    sleep 1
+    out="$(CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
+    check "an unreachable bucket is a warning of the upgrade" contains "$out" "! the off-machine copy of cadence-$version-"
+    check "...and the upgrade goes on" contains "$out" "the upgrade goes on: its rollback uses the local backup"
+    check "...past the backup to the images of $up" contains "$out" "$up"
+    check "...and stops at them with the files of $version back" [ "$(tr -d '[:space:]' <VERSION)" = "$version" ]
+    printf '%s\n' "$out" | grep -E '^(!|✗)' | head -n 4
+    env_set BACKUP_S3_ENDPOINT "$S3_ENDPOINT"
+  fi
+
+  for k in BUCKET ENDPOINT PREFIX ACCESS_KEY_ID SECRET_ACCESS_KEY KEEP; do env_set "BACKUP_S3_$k" ""; done
+  s3_down
+fi
 
 # --- another installation name in the environment ------------------------------------
 # backup, restore and upgrade of this installation with COMPOSE_PROJECT_NAME

@@ -127,7 +127,7 @@ production: when the evaluation is over, deploy on a server.
 | `.env.example` | every setting, with where to get its value; `install.sh` turns it into `.env` |
 | `install.sh` | first installation: checks, secrets, `.env`, start |
 | `upgrade.sh` | backup, package files of the new release, new images, start, readiness check |
-| `backup.sh`, `restore.sh` | database dump and the artifact volume, the bundled or an external database; restore with a version check |
+| `backup.sh`, `restore.sh` | database dump and the artifact volume, the bundled or an external database, and an off-machine copy in an S3 bucket; `backup.sh verify` checks that a backup restores; restore with a version check |
 | `lib.sh` | helpers the scripts share |
 | `docs/admin.md` | the administrator guide |
 | `SECURITY.md` | the security policy: reporting a vulnerability, response times, supported versions |

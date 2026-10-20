@@ -8,7 +8,9 @@
 #          (ci/check-pins.sh: a moved tag fails it), secret scan
 #   stack  the stack on the published images of VERSION, in proxy mode,
 #          installed from the package of this commit with the one-line
-#          installer: sign-in, clab, MCP, backup and restore
+#          installer: sign-in, clab, MCP, backup and restore, the
+#          off-machine copy to a stand-in S3 bucket and backup.sh verify
+#          (ci/s3.sh; on images of v0.10.0 or newer, /api backup-s3)
 #          (ci/check-stack.sh); once on an amd64 runner and once on an arm64
 #          runner, the two platforms the images are built for
 #   external-db  the same stack on an external PostgreSQL (CHECK_DB=external,
