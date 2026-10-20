@@ -391,3 +391,5 @@ fi
 say ""
 say "Next: sign in with the token and follow docs/admin.md (teams, GitHub App, OIDC, CLI)."
 say "Set up nightly backups: 0 3 * * * $(pwd)/backup.sh >> $(pwd)/backups/backup.log 2>&1"
+say "and a weekly restore check: 0 5 * * 0 $(pwd)/backup.sh verify >> $(pwd)/backups/backup.log 2>&1"
+say "Copy the backups off this machine: BACKUP_S3_* in .env (docs/admin.md, \"Off-machine copy\")."

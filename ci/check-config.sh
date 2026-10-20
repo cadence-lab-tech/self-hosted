@@ -253,6 +253,28 @@ for f in README.md docs/admin.md; do
 done
 check "the documentation shows the one-line installer with flags" [ "$documented" -gt 0 ]
 
+# backup.sh: the flags and the commands (verify, fetch) of its argument loop;
+# every ./backup.sh of the documentation uses only those (CLAB-132).
+backup_flags="$(sed -n '/^while \[ \$# -gt 0 \]; do$/,/^done$/p' backup.sh |
+  sed -n 's/^ *\(-[^)]*\)).*/\1/p' | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u || true)"
+check "backup.sh takes --no-upload and --ignore-version" [ "$(grep -cxE -- '--no-upload|--ignore-version' <<<"$backup_flags")" = 2 ]
+documented=0
+for f in README.md docs/admin.md; do
+  while IFS=: read -r line command; do
+    for flag in $(grep -oE -- ' -{1,2}[a-z][a-z-]*' <<<"$command" | tr -d ' ' || true); do
+      documented=$((documented + 1))
+      if grep -qxF -- "$flag" <<<"$backup_flags"; then
+        pass "$f:$line: backup.sh takes $flag"
+      else
+        fail "$f:$line: backup.sh has no flag $flag"
+      fi
+    done
+  done < <(grep -noE -- '\./backup\.sh[^`#>]*' "$f" || true)
+done
+check "the documentation shows backup.sh with flags" [ "$documented" -gt 0 ]
+check "the documentation shows ./backup.sh verify" grep -qF "./backup.sh verify" docs/admin.md
+check "the documentation shows ./backup.sh fetch" grep -qF "./backup.sh fetch" docs/admin.md
+
 # clab server: every "clab server <command> ..." of the documentation uses
 # only flags that "clab server <command> --help" lists. The clab is CLAB_BIN,
 # else the CLI of VERSION from the public tap once VERSION is a release that
@@ -293,6 +315,9 @@ else
         documented=$((documented + 1))
         if grep -qxF -- "$flag" <<<"$sub_flags"; then
           pass "$f:$line: clab server $sub takes $flag"
+        elif [ -z "${CLAB_BIN:-}" ] && [ "$sub" = backup ] && grep -qxF -- "$flag" <<<"$backup_flags"; then
+          # The same for clab server backup and the flags of backup.sh (CLAB-132).
+          info "skipped $f:$line: clab $version has no 'clab server backup $flag' yet (backup.sh has it); CLAB_BIN=<clab with it> checks it"
         elif [ -z "${CLAB_BIN:-}" ] && [ "$sub" = install ] && grep -qxF -- "$flag" <<<"$install_flags"; then
           # clab server install takes the flags of install.sh: a flag
           # install.sh of this checkout has is documented ahead of the clab
@@ -346,6 +371,23 @@ check ".env.example sets no image version" lacks "$(grep -v '^#' <<<"$env_exampl
 # installation: the default lives in docker-compose.yml.
 check ".env.example documents SDLC_METRICS_ADDR, commented out" grep -qxF "# SDLC_METRICS_ADDR=:9090" .env.example
 check ".env.example does not set SDLC_METRICS_ADDR" lacks "$(grep -v '^#' <<<"$env_example")" "SDLC_METRICS_ADDR="
+
+# Off-machine backups (CLAB-132): every variable is in .env.example with an
+# empty value - a new installation behaves as before - and is described in
+# docs/admin.md.
+for v in BACKUP_S3_BUCKET BACKUP_S3_ENDPOINT BACKUP_S3_REGION BACKUP_S3_PREFIX BACKUP_S3_ACCESS_KEY_ID \
+  BACKUP_S3_SECRET_ACCESS_KEY BACKUP_S3_PATH_STYLE BACKUP_S3_KEEP; do
+  check ".env.example sets $v=" grep -qxF "$v=" .env.example
+done
+while read -r v; do
+  check "docs/admin.md describes $v" grep -qF "$v" docs/admin.md
+done < <(grep -oE '^BACKUP_S3_[A-Z_]+' .env.example | sort -u)
+check "lib.sh passes every BACKUP_S3_* of .env.example to /api backup-s3" \
+  [ "$(bash -c '. ./lib.sh && printf "%s\n" "${BACKUP_S3_VARS[@]}"' | sort)" = "$(grep -oE '^BACKUP_S3_[A-Z_]+' .env.example | sort -u)" ]
+check "backup_s3_location trims the prefix" \
+  [ "$(BACKUP_S3_BUCKET=bk BACKUP_S3_PREFIX=' /a/b/ ' bash -c '. ./lib.sh && backup_s3_location')" = "s3://bk/a/b/" ]
+check "backup_s3_location without a prefix" \
+  [ "$(BACKUP_S3_BUCKET=bk BACKUP_S3_PREFIX='' bash -c '. ./lib.sh && backup_s3_location')" = "s3://bk/" ]
 
 info "installation name"
 # The name of an installation is COMPOSE_PROJECT_NAME of its .env, and

@@ -376,6 +376,11 @@ the schema `public` except those of the extensions, and load the dump. No
 role of the URL is enough. A failed load is rolled back and leaves the
 database as it was.
 
+`./backup.sh verify` and `clab server backup verify` load the dump into a
+throwaway PostgreSQL on this machine (the image of `db-client`), not into
+your server: nothing is created there (see
+[Checking that a backup restores](#checking-that-a-backup-restores)).
+
 Snapshots and point-in-time recovery of your provider complement the dumps;
 `pg_dump` stays the backup the scripts know about. To go back to a snapshot:
 restore it into a new instance with the tools of the provider, point
@@ -837,18 +842,163 @@ Schedule it nightly for root (or a user in the `docker` group):
 
 ```bash
 0 3 * * * /opt/cadence/backup.sh >> /opt/cadence/backups/backup.log 2>&1
+0 5 * * 0 /opt/cadence/backup.sh verify >> /opt/cadence/backups/backup.log 2>&1
 ```
+
+The second line checks every Sunday that the newest backup restores (see
+[Checking that a backup restores](#checking-that-a-backup-restores)).
+`./backup.sh --help` lists the commands and the variables.
 
 With `clab` v0.7.0 or later the same backup is `clab server backup` — see
 [Managing the installation with clab server](#managing-the-installation-with-clab-server).
 
 Backups on the same machine protect against a bad upgrade or a mistaken
-deletion, not against losing the machine: copy `backups/` elsewhere —
-`rsync` or `rclone` to another host or bucket after the backup, or snapshots
-of the disk. With an S3 bucket for artifact content, the bucket is yours to
-back up (versioning or replication).
+deletion, not against losing the machine: set up the
+[off-machine copy](#off-machine-copy). With an S3 bucket for artifact
+content (`SDLC_BLOB_S3_*`), that bucket is yours to back up (versioning or
+replication): the backups then hold the database only.
 
-Restore:
+### Off-machine copy
+
+With a bucket in `.env`, every backup — the nightly one, `./backup.sh` by
+hand and the one `upgrade.sh` takes — also goes to S3: AWS S3, MinIO,
+Cloudflare R2, Yandex Object Storage, Timeweb S3 and other S3-compatible
+storage.
+
+```bash
+# .env
+BACKUP_S3_BUCKET=acme-cadence-backups
+BACKUP_S3_ENDPOINT=https://s3.eu-central-1.amazonaws.com   # empty: the AWS endpoint of the region
+BACKUP_S3_REGION=eu-central-1                               # empty: us-east-1
+BACKUP_S3_PREFIX=cadence/                                   # empty: the root of the bucket
+BACKUP_S3_ACCESS_KEY_ID=AKIA...
+BACKUP_S3_SECRET_ACCESS_KEY=...
+BACKUP_S3_PATH_STYLE=true                                   # empty: true; false - bucket.endpoint/key
+BACKUP_S3_KEEP=14                                           # empty: 14
+```
+
+No restart is needed: the scripts read `.env` on every run. After the local
+files are written, `./backup.sh` uploads under `BACKUP_S3_PREFIX`
+
+- `cadence-<version>-<date>.sql.gz` — the dump;
+- `cadence-<version>-<date>.blobs.tar.gz` — the archive of the `blobs`
+  volume, when there is one;
+- `cadence-<version>-<date>.sha256` — the sha256 of both, in the format of
+  `sha256sum`, uploaded last: a backup without it is an upload that did not
+  finish.
+
+Large dumps go up in parts (multipart, 16 MiB each): the memory used does
+not grow with the dump. Then the bucket keeps the newest `BACKUP_S3_KEEP`
+complete backups and deletes the older ones — backups taken before an
+upgrade count like the nightly ones. Only objects named
+`cadence-vX.Y.Z-<date>.sql.gz`, `.blobs.tar.gz` or `.sha256` right under the
+prefix are ever deleted; other objects of the bucket, and anything in
+deeper "directories", are never touched. The local rotation (`KEEP_DAYS`)
+stays as it is.
+
+The output names what went where:
+
+```
+✓ 2026-10-20 03:00:04 /opt/cadence/backups/cadence-v0.10.0-20261020-030000.sql.gz (1.2M)
+▸ uploading cadence-v0.10.0-20261020-030000.sql.gz to s3://acme-cadence-backups/cadence/
+✓ uploaded cadence-v0.10.0-20261020-030000.sql.gz, cadence-v0.10.0-20261020-030000.blobs.tar.gz, cadence-v0.10.0-20261020-030000.sha256 to s3://acme-cadence-backups/cadence/ (1.4M)
+✓ s3://acme-cadence-backups/cadence/ keeps 14 of BACKUP_S3_KEEP=14 backups; removed cadence-v0.10.0-20261006-030000
+```
+
+A failed upload — the network, the keys, no such bucket — prints the reason
+(the HTTP status and the code of S3, never the keys), keeps the local backup
+and the copies already in the bucket, and **exits with status 1**, so cron
+mail and your monitoring see it. In `upgrade.sh` (and `clab server
+upgrade`) it is only a warning: the upgrade goes on, its rollback uses the
+local file. `./backup.sh --no-upload` takes one backup without the copy.
+
+The upload runs in a throwaway container of the backend image (`/api
+backup-s3`, v0.10.0+): the machine needs no `aws`, `rclone` or other tool,
+and no other image is pulled. The keys reach it through its environment,
+never on a command line, and are not printed.
+
+The bucket: give the backups a bucket — or at least a prefix — and keys of
+their own, allowed only to put, get, list and delete objects there (for AWS:
+`s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` on
+`arn:aws:s3:::acme-cadence-backups/cadence/*` and `s3:ListBucket` on the
+bucket with the prefix as a condition). Keep it in another account, region or
+provider than the machine. Versioning or object lock on the bucket protects
+the copies against a leaked key: with them the retention deletes only the
+current versions. The copy is not encrypted by Cadence Lab: use the
+encryption of the storage (SSE) and keep the keys out of reach of the
+machine's other users (`.env` is mode 600).
+
+### Checking that a backup restores
+
+```bash
+./backup.sh verify                                               # the newest backup of VERSION
+./backup.sh verify backups/cadence-v0.10.0-20261020-030000.sql.gz   # this file
+clab server backup verify                                        # the same with clab v0.10.0+
+```
+
+`verify` takes the newest backup of the version in `VERSION` from the bucket
+(when `BACKUP_S3_BUCKET` is set; it checks the sums of `.sha256` on the way
+down), else from `backups/`, or the file you name. It loads the dump into a
+**throwaway PostgreSQL** next to the stack — a container of the image of
+the installation (`postgres`, or `db-client` with an external database) on a
+network of its own — checks the schema with `/api dbcheck` of the images of
+this version, counts the rows and reads the blobs archive through:
+
+```
+▸ verifying cadence-v0.10.0-20261020-030000.sql.gz (1.2M) from s3://acme-cadence-backups/cadence/
+▸ loading it into a throwaway PostgreSQL (pgvector/pgvector:pg17); the stack keeps running
+✓ loaded in 3s
+✓ schema 51: the schema of the images of v0.10.0
+✓ blobs archive cadence-v0.10.0-20261020-030000.blobs.tar.gz: 214 files
+✓ backup cadence-v0.10.0-20261020-030000.sql.gz restores: schema 51, 4 projects, 312 tasks, 1480 artifacts
+```
+
+The running stack and its database are not touched — nothing stops, there
+is no downtime — and with an external database nothing is created on your
+server. The throwaway container, its volume and its network are removed
+whatever the outcome, and so is the copy downloaded from the bucket. Exit
+status: 0 — the backup restores; 1 — it does not, with the reason: a sum
+that does not match (`the checksum of … does not match`: the copy in the
+bucket is damaged or was changed), the error of `psql` on a dump that does
+not load, a schema the images of this version do not take, a damaged blobs
+archive, or `nothing to verify`. A backup of another version is refused
+with the same hint as `restore.sh`; `--ignore-version` checks it anyway
+and reports the version of its schema. With a bucket that has no backup of
+this version yet (right after an upgrade, before the next nightly backup)
+`verify` warns and checks the newest local one.
+
+### Restoring on a new machine
+
+When the machine is gone, the bucket has the backups:
+
+1. Install Cadence Lab on the new machine ([Install](#install)), best the
+   version of the backup — it is in the name of the backup,
+   `cadence-v0.10.0-…`. With an external database point it at the database
+   you restore into.
+2. Put the `BACKUP_S3_*` lines into `.env` of the new installation.
+3. Download the backup and restore it:
+
+   ```bash
+   ./backup.sh fetch                                   # the newest backup in the bucket
+   ./backup.sh fetch cadence-v0.10.0-20261020-030000   # or this one
+   ./restore.sh --yes backups/cadence-v0.10.0-20261020-030000.sql.gz
+   ```
+
+`fetch` writes the dump (and the blobs archive) into `backups/`, checks the
+sums of `.sha256` and prints the `restore.sh` command; a damaged copy is
+refused and nothing is left in `backups/`. If the installed version is not
+the version of the backup, `restore.sh` refuses and prints the command that
+puts the package files of that version in place first, as for any backup
+of another version (below). `clab server backup fetch` and
+`clab server restore --yes` do the same. Without `fetch` any S3 client
+works too: download the three files of the backup into `backups/`, check
+them with `sha256sum -c cadence-<version>-<date>.sha256` and restore.
+
+Then put back what is not in a backup: `secrets/` (the key of the GitHub
+App, the CA of an external database) and the settings of `.env` you
+changed — keep a copy of both somewhere safe, apart from the bucket.
+
+### Restore
 
 ```bash
 ./restore.sh backups/cadence-v0.5.0-20261008-030000.sql.gz
@@ -1376,7 +1526,9 @@ rollback — so the same steps go without bash and its tools:
 ```bash
 clab server install --mode proxy --http-addr 127.0.0.1:8080   # = get-cadence.sh | sh: a new installation in ./cadence (v0.8.0+)
 clab server status                       # directory, installation name, versions of the stack and of clab, mode, database, services
-clab server backup                       # = ./backup.sh
+clab server backup                       # = ./backup.sh (with the off-machine copy when BACKUP_S3_BUCKET is set)
+clab server backup verify                # = ./backup.sh verify: does the newest backup restore (v0.10.0+)
+clab server backup fetch                 # = ./backup.sh fetch: the newest backup from the bucket (v0.10.0+)
 clab server restore backups/cadence-v0.7.0-20261008-030000.sql.gz   # = ./restore.sh (asks; --yes skips)
 clab server upgrade                      # = ./upgrade.sh: the latest release
 clab server upgrade --force v0.7.1       # = ./upgrade.sh --force v0.7.1
@@ -1389,7 +1541,7 @@ directory or the nearest one above it with `VERSION` and `package.sha256`;
 `clab server install` creates it in `--dir DIR`, else `CADENCE_DIR`, else
 `./cadence` (see [Install](#install)).
 It reads the same `.env` and the same variables as the scripts
-(`BACKUP_DIR`, `KEEP_DAYS`, `CADENCE_READY_TIMEOUT`, `CADENCE_RELEASES_URL`),
+(`BACKUP_DIR`, `KEEP_DAYS`, `BACKUP_S3_*`, `CADENCE_READY_TIMEOUT`, `CADENCE_RELEASES_URL`),
 takes the installation name from `COMPOSE_PROJECT_NAME` in `.env` and refuses
 another one in the environment, like the scripts (see
 [Several installations on one machine](#several-installations-on-one-machine)),
@@ -1404,7 +1556,13 @@ directory:
 
 ```bash
 0 3 * * * /usr/local/bin/clab server backup --dir /opt/cadence >> /opt/cadence/backups/backup.log 2>&1
+0 5 * * 0 /usr/local/bin/clab server backup verify --dir /opt/cadence >> /opt/cadence/backups/backup.log 2>&1
 ```
+
+The off-machine copy needs the backend image of v0.10.0 or later (`/api
+backup-s3`): a newer `clab` on an older installation with `BACKUP_S3_BUCKET`
+set makes the local backup, refuses the copy with `need Cadence Lab v0.10.0
+or newer` and exits with status 1.
 
 Versions: `clab server` manages installations from v0.6.0 on (older ones are
 git clones: upgrade them with their own `./upgrade.sh` first). The stack may
@@ -1447,6 +1605,22 @@ docker compose exec caddy wget -qO- http://worker:9090/metrics | grep '^cadence_
 - **External database: `too many connections`** — lower
   `SDLC_DB_MAX_CONNS` in `.env` or raise `max_connections` of the server;
   see [Connections and pools](#connections-and-pools).
+- **Off-machine copy fails** — `./backup.sh` names the reason after
+  `upload to s3://… failed`: `403 Forbidden AccessDenied` or
+  `SignatureDoesNotMatch` — the keys or their rights (see
+  [Off-machine copy](#off-machine-copy)); `404 Not Found NoSuchBucket` — the
+  bucket or `BACKUP_S3_ENDPOINT`/`BACKUP_S3_REGION`; `dial tcp` or
+  `no such host` — the containers cannot reach the endpoint (a firewall, a
+  proxy, `BACKUP_S3_PATH_STYLE=false` for storage that needs path-style).
+  The local backup is kept; `./backup.sh verify` shows whether the copies
+  already in the bucket restore.
+- **`verify` fails** — the reason is the last line: a checksum that does not
+  match means the copy in the bucket is damaged (verify an older one by name
+  after `./backup.sh fetch NAME`, and check what changed it); a `psql` error
+  means the dump does not load — take a new backup and verify it at once.
+  A `verify` killed half-way leaves nothing behind: its container and network
+  carry the label `com.cadence.verify` (`docker ps -a --filter
+  label=com.cadence.verify`).
 - **External database: backups fail, the service works** — the backup
   client (`psql`, `pg_dump`) reads the URL with libpq; the installer checks
   both, but a URL edited in `.env` later is not checked:

@@ -340,6 +340,55 @@ $cadence$;
 SQL
 }
 
+# --- off-machine backups -----------------------------------------------------------
+# BACKUP_S3_* in .env: a copy of every backup in an S3 bucket - the dump, the
+# blobs archive and a .sha256 of both - and the newest BACKUP_S3_KEEP backups
+# kept there (docs/admin.md, "Off-machine copy"). The bucket is reached by
+# /api backup-s3 of the backend image (v0.10.0+): the host needs no aws or
+# rclone, and no other image is pulled. clab server follows the same rules
+# (cmd/clab/server_offsite.go of the backend) with the same messages.
+BACKUP_S3_VARS=(BACKUP_S3_BUCKET BACKUP_S3_ENDPOINT BACKUP_S3_REGION BACKUP_S3_PREFIX
+  BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY BACKUP_S3_PATH_STYLE BACKUP_S3_KEEP)
+
+backup_s3_configured() {
+  [ -n "${BACKUP_S3_BUCKET:-}" ]
+}
+
+# backup_s3_location prints s3://bucket/prefix/ for the messages.
+backup_s3_location() {
+  local prefix
+  prefix="$(printf '%s' "${BACKUP_S3_PREFIX:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s:^/*::; s:/*$::')"
+  printf 's3://%s/%s\n' "${BACKUP_S3_BUCKET:-}" "${prefix:+$prefix/}"
+}
+
+# backup_s3 DIR ARGS...: /api backup-s3 of the backend image in a throwaway
+# container, DIR mounted as /backups, run as the caller (backups are mode 600
+# of the caller; the image is nonroot). The variables go by name only: their
+# values reach the container through the environment of docker, never a
+# command line (ps shows those to every user of the machine).
+backup_s3() {
+  local dir="$1" env=() v
+  shift
+  for v in "${BACKUP_S3_VARS[@]}"; do env+=(-e "$v"); done
+  docker compose run --rm --no-deps -T --user "$(id -u):$(id -g)" "${env[@]}" -v "$dir:/backups" api backup-s3 "$@"
+}
+
+# backup_upload DUMP: the copy of DUMP (and the blobs archive next to it) in
+# the bucket, then the retention of BACKUP_S3_KEEP. False when it failed;
+# the local backup stays either way.
+backup_upload() {
+  local dump="$1" dir
+  # An absolute path: a bare name after -v is a volume, not a directory.
+  dir="$(cd "$(dirname "$dump")" && pwd)"
+  info "uploading $(basename "$dump") to $(backup_s3_location)"
+  backup_s3 "$dir" put "/backups/$(basename "$dump")"
+}
+
+# upload_failed DUMP prints the refusal of a failed upload.
+upload_failed() {
+  printf '%s\n' "the off-machine copy of $(basename "$1") to $(backup_s3_location) failed (see above); the local backup is kept: $1"
+}
+
 # --- releases ----------------------------------------------------------------------
 # Every release vX.Y.Z of this repository carries three assets:
 #

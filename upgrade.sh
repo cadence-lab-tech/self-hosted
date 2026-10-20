@@ -15,6 +15,10 @@
 # in backups/package-<old version>-<date>.tar.gz. .env, compose.override.yml,
 # backups/, secrets/ and other files of the directory are never touched.
 #
+# With BACKUP_S3_BUCKET set the backup is also copied to the bucket
+# (./backup.sh --help); a failed copy is only a warning here - the rollback
+# uses the local backup.
+#
 # Skipping versions is fine: migrations of every version in between are
 # built into the new image. Going down is refused - migrations only go
 # forward; to return to an older version restore its backup (restore.sh).
@@ -81,7 +85,7 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
     --force) force=true; shift ;;
-    -h | --help) sed -n '3,28p' "$0" | sed 's/^# \{0,1\}//'; return 0 ;;
+    -h | --help) sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'; return 0 ;;
     -*) die "unknown option: $1" ;;
     *) [ -z "$target_version" ] || die "one version at a time"; target_version="$1"; shift ;;
     esac
@@ -205,11 +209,17 @@ main() {
   export CADENCE_VERSION=\$(cat VERSION) && docker compose up -d"
   fi
   info "backup of $old_version"
-  ./backup.sh
+  # The off-machine copy is no condition of the upgrade: its rollback uses
+  # the local file.
+  ./backup.sh --no-upload
   # backup.sh names files by version and time, so the newest one is ours.
   local backup
   backup="$(find "$backups" -maxdepth 1 -name "cadence-$old_version-*.sql.gz" -print | sort | tail -n 1)"
   [ -n "$backup" ] || die "backup.sh reported success but no cadence-$old_version-*.sql.gz is in $backups"
+  if backup_s3_configured && ! backup_upload "$backup"; then
+    warn "$(upload_failed "$backup")"
+    warn "the upgrade goes on: its rollback uses the local backup"
+  fi
 
   # The package files as they are now - of the old manifest and every file
   # the new package overwrites - for the rollback.
