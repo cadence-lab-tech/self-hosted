@@ -926,17 +926,20 @@ else
   # The backup of an upgrade: copied to the bucket, and an unreachable one is
   # only a warning. A package of this checkout as v98.0.0, whose images do
   # not exist: the upgrade gets past the backup and stops at the pull, with
-  # the files of $version back.
+  # the files of $version back. The package keeps the pins of $version, and
+  # by a digest Docker pulls the images of $version whatever the tag says:
+  # the upgrade drops the pins (empty CADENCE_*_DIGEST, as for images of a
+  # branch) and goes by the tag v98.0.0, which no registry has.
   if [ "$db" = bundled ]; then
     info "the backup of an upgrade ($driver)"
     up=v98.0.0
     "$repo/ci/package.sh" --version "$up" "$work/releases/download/$up" >/dev/null
     sleep 1
-    out="$(CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
+    out="$(CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST="" CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
     check "the upgrade copies its backup to the bucket" contains "$out" "✓ uploaded cadence-$version-"
     env_set BACKUP_S3_ENDPOINT "http://s3stand-nowhere:7070"
     sleep 1
-    out="$(CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
+    out="$(CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST="" CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
     check "an unreachable bucket is a warning of the upgrade" contains "$out" "! the off-machine copy of cadence-$version-"
     check "...and the upgrade goes on" contains "$out" "the upgrade goes on: its rollback uses the local backup"
     check "...past the backup to the images of $up" contains "$out" "$up"
