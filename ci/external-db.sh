@@ -10,7 +10,15 @@
 #
 #   Docker Desktop  host.docker.internal, port published on 127.0.0.1
 #   Linux           the address of docker0 (172.17.0.1), the container in
-#                   the host network listening on that address only
+#                   the host network listening on that address and on
+#                   127.0.0.1 of the machine
+#
+# The superuser works on it with docker exec psql -h 127.0.0.1: TCP, so the
+# wait sees the real server, not the one initdb runs on the socket, and
+# trust in pg_hba of the image, so no password. On Docker Desktop that is
+# the loopback of the container; in the host network it is the loopback of
+# the machine, so the server listens there too - the containers of the stack
+# still reach it only by EXT_DB_HOST, under the certificate for that name.
 #
 # The role cadence owns the database cadence and is no superuser; vector and
 # pgcrypto are created in advance by the superuser, as on a managed server.
@@ -73,7 +81,7 @@ ext_db_up() {
   EXT_DB_PASSWORD_URL="$(printf '%s' "$EXT_DB_PASSWORD" | sed 's/%/%25/g; s/@/%40/g; s:/:%2F:g')"
   if [ "$EXT_DB_MODE" = linux ]; then
     net=(--network host)
-    listen="$EXT_DB_BIND"
+    listen="$EXT_DB_BIND,127.0.0.1"
   else
     publish=(-p "$EXT_DB_BIND:$port:$port")
     listen='*'
@@ -134,7 +142,7 @@ ext_db_old_up() {
   EXT_DB_OLD_NAME="$name"
   if [ "$EXT_DB_MODE" = linux ]; then
     net=(--network host)
-    listen="$EXT_DB_BIND"
+    listen="$EXT_DB_BIND,127.0.0.1"
   else
     publish=(-p "$EXT_DB_BIND:$port:$port")
     listen='*'
