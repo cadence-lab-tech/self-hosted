@@ -54,7 +54,7 @@
 #                         .env stop the API, naming the variables; the rest of
 #                         the check runs on the files, and at the end no value
 #                         of a secret is in the logs of the stack. Needs
-#                         images of v0.12.0 or newer, or images of a branch (a
+#                         images of v0.13.0 or newer, or images of a branch (a
 #                         pin variable set).
 #
 # The installation name (CLAB-164): install.sh keeps it in .env, so after the
@@ -483,8 +483,8 @@ api_log_has() {
   return 1
 }
 if [ "$secrets_mode" = files ]; then
-  if version_lt "$version" v0.12.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
-    die "CHECK_SECRETS=files needs images that read *_FILE (v0.12.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+  if version_lt "$version" v0.13.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+    die "CHECK_SECRETS=files needs images that read *_FILE (v0.13.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
   fi
   info "secrets in files"
   # A missing file stops the API on start, naming the variable and the path,

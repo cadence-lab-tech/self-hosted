@@ -165,9 +165,9 @@ jobs:
 
   # Secrets in files (CLAB-200): the installation moved to compose.secrets.yml
   # and *_FILE, with the bundled and the external database. Images before
-  # v0.12.0 do not read *_FILE: the job prints a notice and skips, so the
+  # v0.13.0 do not read *_FILE: the job prints a notice and skips, so the
   # pull request of the package stays green until the release of the images
-  # catches up (the release pull request of v0.12.0 runs it).
+  # catches up (the release pull request of v0.13.0 runs it).
   secrets-files:
     needs: lint
     runs-on: ubuntu-latest
@@ -179,8 +179,8 @@ jobs:
         run: |
           . ./lib.sh
           v="$(tr -d '[:space:]' <VERSION)"
-          if version_lt "$v" v0.12.0; then
-            echo "::notice::VERSION is $v: its backend image reads no *_FILE (v0.12.0+), the check of secrets in files is skipped"
+          if version_lt "$v" v0.13.0; then
+            echo "::notice::VERSION is $v: its backend image reads no *_FILE (v0.13.0+), the check of secrets in files is skipped"
             echo "skip=true" >>"$GITHUB_OUTPUT"
           else
             echo "skip=false" >>"$GITHUB_OUTPUT"
