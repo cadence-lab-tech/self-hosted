@@ -21,8 +21,23 @@
 # branch in a local registry are pulled by tag too - the same rule as in
 # ci/check-stack.sh:
 #
-#   CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
+#   CADENCE_VERIFY=off CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
 #     ci/check-upgrade.sh vFROM vTO
+#
+# CADENCE_VERIFY=off there: images of a branch are no images of a release,
+# their signatures are not ours to check (with auto they are "not pinned,
+# not verified", require refuses them).
+#
+# Signatures (CADENCE_VERIFY, lib.sh "signatures"): the package of TO is
+# this checkout, not signed; it gets a stand-in bundle (ci/package.sh
+# --bundle), and with a real cosign 3.x in PATH a wrapper accepts its
+# verify-blob and hands the images to the real cosign (ci/verify-stubs.sh).
+# When the upgrade verifies at all - clab server with CADENCE_VERIFY in its
+# help, or an upgrade.sh of FROM that has it (the first upgrade to a release
+# with the verification runs the old script, which has none) - a stub cosign
+# with a bad signature of checksums.txt of TO, and of its backend image when
+# TO is pinned, makes the upgrade refuse with nothing changed: FROM keeps
+# running.
 #
 # On FROM it creates a team, a project, a project document and a task with
 # an artifact (on a minimal cycle imported as a bundle), and checks:
@@ -133,7 +148,7 @@ main() {
     export CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST=""
   fi
   info "package of this checkout as $to"
-  ci/package.sh --version "$to" "$releases/download/$to" >/dev/null
+  ci/package.sh --bundle --version "$to" "$releases/download/$to" >/dev/null
   mkdir -p "$releases/latest"
   cp -R "$releases/download/$to" "$releases/latest/download"
 
@@ -155,6 +170,12 @@ main() {
   [ -f "$dir/.env" ] || die "$from is not installed"
   cd "$dir"
   export CADENCE_RELEASES_URL="file://$releases"
+  # shellcheck source=ci/verify-stubs.sh
+  . "$repo/ci/verify-stubs.sh"
+  if stub_cosign_local "$work/cosign-local" "$work/cosign.log"; then
+    export PATH="$work/cosign-local:$PATH"
+    info "a real cosign is in PATH: the images of $to are verified at ghcr.io"
+  fi
 
   clab="${CLAB_BIN:-}"
   if [ -z "$clab" ]; then
@@ -296,6 +317,48 @@ JSON
     pass "the stack still runs $from"
   else
     fail "the stack does not report $from after the failed pull"
+  fi
+
+  # --- signatures of TO -------------------------------------------------------------------
+  local verifies=false pinned=true
+  if [ "$driver" = clab ]; then
+    "$clab" server upgrade --help 2>/dev/null | grep -q CADENCE_VERIFY && verifies=true
+  elif grep -q CADENCE_VERIFY upgrade.sh; then
+    verifies=true
+  fi
+  [ -z "${CADENCE_BACKEND_DIGEST+set}${CADENCE_FRONTEND_DIGEST+set}" ] || pinned=false
+  if [ "$verifies" = true ]; then
+    stub_cosign "$work/cosign-bad" "$work/cosign-bad.log"
+    local bad backups_before
+    for bad in package sdlc-pipeline-backend; do
+      if [ "$bad" != package ] && [ "$pinned" = false ]; then
+        info "the images of $to are not pinned here: the bad signature of an image is not checked"
+        continue
+      fi
+      info "$up_name $to with a bad signature ($bad)"
+      before="$(files_state)"
+      backups_before="$(find backups -maxdepth 1 \( -name '*.tar.gz' -o -name '*.sql.gz' \) | sort)"
+      if out="$(PATH="$work/cosign-bad:$PATH" CADENCE_VERIFY=auto FAKE_COSIGN_BAD="$bad" upgrade_cmd "$to" 2>&1)"; then
+        fail "$up_name $to went on with a bad signature ($bad)"
+      elif grep -qF "did not verify for" <<<"$out" && grep -qF "Nothing has changed." <<<"$out"; then
+        pass "$up_name $to refuses a bad signature ($bad): did not verify, nothing has changed"
+      else
+        fail "$up_name $to refused a bad signature ($bad) without saying so: $out"
+      fi
+      if [ "$(files_state)" = "$before" ] && [ "$(find backups -maxdepth 1 \( -name '*.tar.gz' -o -name '*.sql.gz' \) | sort)" = "$backups_before" ] &&
+        [ -z "$(find . -maxdepth 1 -name '.upgrade.*')" ]; then
+        pass "...VERSION, the files and .env as they were, no backup, no .upgrade.*"
+      else
+        fail "...the refused upgrade changed the files or took a backup"
+      fi
+      if [ "$(instance_version)" = "$from" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' "$base/readyz")" = 200 ]; then
+        pass "...the stack still runs $from and is ready"
+      else
+        fail "...the stack does not report $from or is not ready"
+      fi
+    done
+  else
+    info "$up_name of $from does not verify signatures: the refusals are not checked"
   fi
 
   # --- an edited package file ------------------------------------------------------------
