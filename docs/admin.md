@@ -31,7 +31,7 @@ public address of your proxy in the `proxy` mode.
   ([releases and mirrors](#releases-and-mirrors),
   [moving a git installation](#moving-a-git-installation-to-release-packages))
 - [Monitoring](#monitoring)
-- [Security](#security)
+- [Security](#security) ([audit log](#audit-log))
 - [Verifying a release](#verifying-a-release)
   ([known scanner findings](#known-scanner-findings))
 - [Troubleshooting](#troubleshooting)
@@ -1364,6 +1364,7 @@ counted twice.
 |---|---|---|---|
 | `cadence_build_info` | gauge | both | always 1; labels `component` (`api`, `worker`), `version`, `go_version` |
 | `cadence_http_request_duration_seconds` | histogram | api | request duration by `method`, `route` (template or `unmatched`) and `code` class (`2xx`, `4xx`, `5xx`) |
+| `cadence_audit_write_failures_total` | counter | api | [audit log](#audit-log) entries that could not be saved; the call itself went through (from v0.11.0) |
 | `cadence_webhook_deliveries_total` | counter | api | webhook deliveries by `provider` and `outcome`: `queued` (accepted and applied), `ignored`, `duplicate`, `bad_signature`, `disabled` (no `SDLC_GITHUB_WEBHOOK_SECRET`), `error` |
 | `cadence_db_pool_connections` | gauge | both | pool connections by `state`: `acquired`, `idle`, `constructing` |
 | `cadence_db_pool_max_connections` | gauge | both | pool size, `SDLC_DB_MAX_CONNS` (10) |
@@ -1390,7 +1391,9 @@ The `job` label of the worker: `lease_sweep` (returning expired leases),
 `ops_state` (the database snapshot), and with indexing on (the default,
 `SDLC_INDEX_ENABLED`) `index_enqueue`, `index_run`, `drift`, `index_prune`,
 `repo_ref_sync`, `knowledge`, `embed_refresh`, `overlaps`; `blob_gc` runs
-hourly and `embed_cache_gc` every six hours, neither at start. A job that
+hourly and `embed_cache_gc` every six hours, neither at start; `audit_gc`
+(the [audit log](#audit-log) retention) runs hourly unless
+`SDLC_AUDIT_RETENTION_DAYS=0`, not at start either. A job that
 is turned off or has not run yet has no `last_success` series.
 
 For Postgres and Caddy use their own exporters: `postgres_exporter` and the
@@ -1499,6 +1502,64 @@ vulnerability, response times, disclosure and CVE.
 - **Is it ours?** Releases from v0.9.0 are signed; how to check the
   package, the images, the CLI, their SBOM and provenance, and which scanner
   findings are known not to apply — [Verifying a release](#verifying-a-release).
+
+### Audit log
+
+Cadence Lab records who did what — a person in the web interface, a person
+through their own AI (`clab`, MCP with a personal token), or an agent of a
+stage — in an audit log in the database (from the release that adds the
+`audit_log` table; no step on upgrade, the migration runs on start).
+
+**What is written.** Every MCP tool call that reaches the tool, successful
+or failed, except `sdlc_heartbeat` (a lease renewal every five minutes);
+every change through the API (`POST`, `PUT`, `PATCH`, `DELETE` under `/v1`):
+tasks, artifacts, transitions and gate decisions, roles, workflows,
+bundles, documents, repositories, members, teams and tokens; every refusal
+with `401` or `403`, reads included, when a token was presented — a revoked
+or expired token is named. Each entry has the time, the project and task,
+the principal, the token (name, prefix and kind: `api` for a personal
+token, `session` for the web interface, or a newer kind), the channel
+(`mcp` or `rest`), the tool or route, the parameters, the outcome (`ok` or
+the error code, and the HTTP status for the API) and the request id that
+links it to the log of the `api` container.
+
+**What is not written.** Successful reads; responses; the content of
+artifacts and documents and any string longer than 4 KB — only its size and
+sha256; tokens, sign-in codes, invite links, passwords and other secrets
+(`[redacted]`); requests without a token at all (scanners); the worker's own
+passes. A failed write to the log never fails the call: it is logged at
+`error` by the `api` container and counted by
+`cadence_audit_write_failures_total` ([Monitoring](#monitoring)).
+
+**Retention.** `SDLC_AUDIT_RETENTION_DAYS` in `.env`, 180 by default; the
+worker deletes older entries hourly (the `audit_gc` job). `0` keeps the log
+forever. A negative or non-numeric value stops the `worker` on start with
+an error naming the variable (the `api` does not read it). Deleting a
+project deletes its log; the deletion itself stays in the instance log.
+
+**Reading it.** A maintainer of a project reads the log of a task and of the
+project, the system administrator also the entries without a project
+(teams, principals, tokens without a project, deleted projects):
+
+```bash
+clab audit CLAB-42                         # one task
+clab audit --project CLAB --outcome forbidden --since 2026-10-01
+clab audit --instance --channel rest       # entries without a project
+clab audit CLAB-42 --json                  # the server's answer as is
+```
+
+Filters: `--task`, `--principal`, `--token` (id or prefix), `--channel`,
+`--action`, `--outcome`, `--since`, `--until`, `--limit`, `--cursor` —
+`clab audit --help`. The same is `GET /v1/tasks/{KEY}/audit`,
+`GET /v1/projects/{KEY}/audit` and `GET /v1/audit`. The web interface shows
+the log from the release that adds its audit pages; until then use `clab
+audit`.
+
+**Size.** An entry is about a kilobyte, and an agent makes hundreds of tool
+calls per task: the log is usually the fastest-growing table. It is part of
+the database, so it is in every backup (`./backup.sh`) and restored with
+it; shorten `SDLC_AUDIT_RETENTION_DAYS` if the database or the backups grow
+faster than you want.
 
 ## Verifying a release
 
