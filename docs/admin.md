@@ -779,6 +779,81 @@ the variable and exits with code 2, before any request. This is so from
 clab-runner v0.10.2; older runners without the variable went to
 `http://localhost:8088/v1`.
 
+### What the runner gives the agent
+
+The runner's own token (`SDLC_TOKEN`) stays with the runner: it polls the
+queue, claims tasks, keeps the lease alive, releases tasks and reports the
+cost of a run. The agent it starts gets a **task token** instead: after the
+claim the runner issues a token bound to the claimed stage run of that task
+(`POST /v1/tasks/<KEY>/task-token`). With it the agent writes only to its
+own task and run and reads only around that task, whatever the runner's
+token or a person's session may do. The token
+lives as long as the lease: it stops working on the transition, on release
+and when the lease expires, and when the agent exits - successfully, with an
+error, on `SDLC_RUNNER_TIMEOUT` or because the runner is stopping - the
+runner also revokes it. The token is never written to the runner's log, to
+the agent's command line or to the output of `SDLC_RUNNER_DRY_RUN` (a dry
+run issues no token at all).
+
+The agent gets the task token in two places, both in a temporary directory
+(mode `0700`) removed after the agent exits:
+
+- `mcp.json` - the MCP server `sdlc` of the project with
+  `Authorization: Bearer <task token>`;
+- `CLAB_CONFIG_DIR` - a `clab` configuration with this one host and the task
+  token, so `clab` inside the agent goes with the task token, not with the
+  configuration of the person who runs the runner. `clab whoami` there shows
+  the task and the role of the run.
+
+The agent does not inherit the runner's environment. It gets only these
+variables, if the runner has them:
+
+| Group | Variables |
+|---|---|
+| shell and user | `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`, `TZ`, `LANG`, `LC_*`, `XDG_*` |
+| proxy and certificates | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and in lower case), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS` |
+| git over SSH | `SSH_AUTH_SOCK` |
+| Claude Code | `ANTHROPIC_*`, `CLAUDE_*` |
+
+plus `SDLC_API_URL`, `SDLC_PROJECT`, `SDLC_TOKEN` (the task token) and
+`CLAB_CONFIG_DIR`, which the runner sets itself. Anything else the agent
+needs - `GH_TOKEN` for `gh`, `AWS_*` for Bedrock, the variables of your own
+agent - name in `SDLC_RUNNER_ENV`, comma-separated, a trailing `*` for a
+prefix:
+
+```bash
+SDLC_RUNNER_ENV=GH_TOKEN,AWS_* SDLC_API_URL=https://<host>/v1 SDLC_TOKEN=<token> SDLC_PROJECT=PLAT clab-runner
+```
+
+`GH_TOKEN` and `GITHUB_TOKEN` are not passed unless named there. Names
+starting with `SDLC_` or `CLAB_` are never passed, even if named in
+`SDLC_RUNNER_ENV`: the runner logs a warning at start and ignores them.
+
+The default agent command runs Claude Code with `--strict-mcp-config`: the
+agent sees only the `sdlc` server from the runner's `mcp.json`, not the MCP
+servers in the Claude Code settings of the person running the runner (where
+`clab mcp install` puts the person's own token). If you set your own
+`SDLC_RUNNER_COMMAND`, isolating the MCP configuration of your agent is up
+to you.
+
+A runner talking to a server that cannot issue task tokens (older than
+v0.11.0) logs a warning - the server does not issue a task token, the agent
+got the runner's token - and starts the agent with the runner's token, as
+before; the environment is still cleared. Upgrade the runner together with
+the server: an older runner against a new server still hands the agent its
+own token. Any other refusal to issue the token (the lease is lost or held
+by someone else, no access, a server error) does not start the agent: the
+runner releases the task with a note saying the task token was not issued
+and why.
+
+The limit of all this: without a sandbox the agent runs as the same user on
+the same machine, so it can still read that person's `~/.config/clab` and
+other files in their home directory. The task token keeps an honest agent
+from reaching beyond its task by default; hard isolation of the agent's
+process is the job of a sandbox, which is not part of the runner yet.
+
+This is so from clab-runner v0.11.0.
+
 ## Embeddings
 
 Search over code and artifacts is full-text by default
