@@ -391,6 +391,9 @@ for kv in COMPOSE_PROJECT_NAME=cadence SDLC_TENANCY=single SDLC_PROJECT_CREATION
   SDLC_SEED= SDLC_EMBEDDINGS_MODEL= POSTGRES_PASSWORD= SDLC_ADMIN_TOKEN= CADENCE_DB=bundled SDLC_DATABASE_URL=; do
   check ".env.example sets $kv" grep -qxF "$kv" .env.example
 done
+# Audit log retention (CLAB-210): set in .env.example, defaulted in compose
+# for an .env written before the variable existed.
+check ".env.example sets SDLC_AUDIT_RETENTION_DAYS=180" grep -qxF "SDLC_AUDIT_RETENTION_DAYS=180" .env.example
 check ".env.example sets no image version" lacks "$(grep -v '^#' <<<"$env_example")" "CADENCE_VERSION="
 # An uncommented empty line would turn the metrics listeners off on every new
 # installation: the default lives in docker-compose.yml.
@@ -543,6 +546,9 @@ done
 metrics_off="$(SDLC_METRICS_ADDR='' POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --format json |
   jq -r '[.services.api.environment.SDLC_METRICS_ADDR, .services.worker.environment.SDLC_METRICS_ADDR] | join(",")')"
 check "an empty SDLC_METRICS_ADDR in .env turns the listeners off" [ "$metrics_off" = "," ]
+retention() { env -u SDLC_AUDIT_RETENTION_DAYS "$@" POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --format json | jq -r '.services.worker.environment.SDLC_AUDIT_RETENTION_DAYS'; }
+check "the worker gets SDLC_AUDIT_RETENTION_DAYS=180 without the line in .env" [ "$(retention)" = "180" ]
+check "SDLC_AUDIT_RETENTION_DAYS of .env reaches the worker" [ "$(retention SDLC_AUDIT_RETENTION_DAYS=30)" = "30" ]
 
 # The example alert rules of docs/admin.md ("Monitoring") are what an
 # administrator copies into Prometheus: they must load.
