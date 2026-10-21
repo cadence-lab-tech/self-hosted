@@ -127,9 +127,9 @@ kind create cluster --name "$cluster" --config "$work/kind.yaml" --kubeconfig "$
 # The controller of the guide; the version is pinned like every image here.
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/kind/deploy.yaml >/dev/null
 kubectl -n ingress-nginx wait --for=condition=Available deploy/ingress-nginx-controller --timeout=180s >/dev/null
-kubectl -n ingress-nginx wait --for=condition=Complete job --all --timeout=120s >/dev/null
 # The admission webhook of the controller answers a little after it is
-# Available: until then every Ingress is refused.
+# Available (its certificate comes from Jobs that delete themselves): until
+# then every Ingress is refused.
 probe_ingress() {
   kubectl apply --dry-run=server -f - >/dev/null 2>&1 <<EOF
 apiVersion: networking.k8s.io/v1
