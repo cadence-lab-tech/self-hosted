@@ -737,6 +737,39 @@ project comes from the `origin` remote of the current directory, or from
 `--project <KEY>`. For other agents, `clab mcp config` prints the JSON to
 paste.
 
+### Connecting developers
+
+Send your colleagues to `https://<host>/docs` (the "Подключение" item of the
+side menu): the page has the commands for your instance and the project they
+pick, each with a copy button - install the CLI, sign in, link the local
+project, connect MCP by hand, and the list of agent skills. In short, after
+`clab auth login`, in the root of a local clone of the project's repository:
+
+```bash
+clab setup                                  # MCP of the project + the agent kit in .claude/
+clab setup --dry-run                        # what it would do, changing nothing
+clab setup --scope user                     # the kit in ~/.claude/ and MCP for every directory
+clab setup --agent other                    # no Claude Code: print the MCP configuration for another agent
+```
+
+`clab setup` registers the project's MCP server with Claude Code (as
+`clab mcp install` does) and writes the agent kit - the skills `clab-work`,
+`clab-run`, `clab-backlog`, `clab-status`, `clab-rules`, the reference
+`clab-guide` and the sub-agent `clab-stage` - into `.claude/` of the
+project, with a manifest `.claude/clab-kit.json`. The project comes from
+`--project <KEY>`, `SDLC_PROJECT` or the `origin` remote. No token is
+written to any of these files; `--scope project` with a token is refused,
+as with `clab mcp install`.
+
+The kit comes from your instance (`GET /v1/agent-kit`, open like
+`/v1/instance`), and its version is the version of your server: after
+`./upgrade.sh`, running `clab setup` again updates it. GitHub is needed only
+to install the CLI, not for the kit. A second run changes nothing that is
+already up to date, and files a developer edited after installation are
+kept with a warning (`--force` overwrites them). A server released before
+`clab setup` existed answers 404 there: `clab setup` then connects MCP only
+and names the server's version.
+
 One configuration (`~/.config/clab`) holds several hosts. The one you signed
 in to last is the default; `--host` picks another for one command:
 
