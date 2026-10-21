@@ -1678,6 +1678,113 @@ groups:
           summary: "Agents lose their leases: they crash or send heartbeats less often than SDLC_LEASE_TTL"
 ```
 
+### Tracing
+
+Since v0.12.0 the API can send one span per request to your OpenTelemetry
+collector, Tempo, Jaeger or APM over OTLP/HTTP (protobuf). Metrics answer
+"how many and how often", a trace answers "what happened to this request":
+which route is slow, where the 5xx come from, how long an MCP call of an
+agent takes. Tracing is off by default: with no `OTEL_*` set the API creates
+no exporter and opens no connection to any collector, `localhost:4318`
+included.
+
+Turn it on in `.env` and apply with `docker compose up -d` (only `api` is
+recreated):
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+```
+
+The API then logs one line `трассировки включены` ("tracing is on") with the
+address it posts to (`<endpoint>/v1/traces`), without credentials and without
+headers. The variables are the standard ones of the OpenTelemetry
+specification; the package passes these to the API:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty: off | base URL of the collector, `http://` or `https://`; spans go to `<endpoint>/v1/traces` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | empty | headers for the collector, `key1=value1,key2=value2` — an APM key, for instance; never logged and not shown in `/v1/instance` |
+| `OTEL_TRACES_EXPORTER` | empty | `otlp` turns tracing on without an endpoint (the SDK default `https://localhost:4318`), `none` turns it off whatever the endpoint |
+| `OTEL_SERVICE_NAME` | `cadence-api` | `service.name` of the spans |
+| `OTEL_RESOURCE_ATTRIBUTES` | empty | more resource attributes, `deployment.environment=prod,team=platform`; `service.version` is always the version of the installation and cannot be overridden |
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | which requests are traced; `parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1` keeps 10% |
+| `OTEL_TRACES_SAMPLER_ARG` | empty | the argument of the sampler |
+
+Other `OTEL_EXPORTER_OTLP_*` settings of the specification (the per-signal
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, TLS certificates, timeout,
+compression) and `OTEL_SDK_DISABLED=true` (off whatever else is set) work
+too when added to the `environment` of `api` in `compose.override.yml`.
+
+Only OTLP over HTTP with protobuf is supported. `OTEL_EXPORTER_OTLP_PROTOCOL`
+other than `http/protobuf` (`grpc`, `http/json`), `OTEL_TRACES_EXPORTER`
+other than `otlp` or `none`, or an endpoint that is not an `http://` or
+`https://` URL stop the API on start with an error naming the variable; the
+healthcheck of `api` turns red and no data is touched. Fix `.env` and run
+`docker compose up -d` again. A collector that speaks only gRPC (port 4317)
+needs its HTTP receiver (port 4318) enabled.
+
+**What a span carries.** The name is the method and the route template —
+`GET /v1/tasks/:taskKey`, `POST /mcp/projects/:projectKey` — or just the
+method for a path that matches no route. Attributes: `http.request.method`,
+`http.route`, `http.response.status_code`, `network.protocol.version`; a 5xx
+response marks the span as an error. No path with values, no query string,
+no headers (`Authorization`, cookies), no body, no client address, no
+handle or token, no sign-in code of the CLI — the same rule as for metric
+labels. A `traceparent` header of the caller is honoured: the span of the
+API joins the caller's trace. `baggage` is ignored.
+
+**What is not traced.** `/healthz` and `/readyz` (the healthcheck hits them
+every five seconds), the worker, `clab`, and anything inside a request:
+database queries, calls to GitHub, to the embeddings provider or to S3 get
+no child spans, and the API passes no `traceparent` on. Metrics and logs
+over OTLP are not provided either; logs stay with `docker compose logs`.
+
+**An unreachable collector** does not slow requests down: spans are sent in
+batches in the background and dropped when the collector does not take
+them. Export errors go to the log as a warning at most once a minute, with
+the number of the ones skipped. On stop (`docker compose stop api`,
+`upgrade.sh`) the API finishes the requests in flight and then sends what
+it has, within the same shutdown limit as without tracing; a collector that
+does not answer does not make the stop longer, the tail of spans is lost.
+
+A collector in the same compose network, printing what it receives, to try
+it out ([local compose changes](#local-compose-changes)):
+
+```yaml
+# compose.override.yml
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector:0.139.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+```
+
+```yaml
+# otel-collector.yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+exporters:
+  debug:
+    verbosity: detailed
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+```
+
+with `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` in `.env`;
+`docker compose logs otel-collector` shows the spans. Replace `debug` with
+the exporter of your backend. A collector on the host itself is
+`http://host.docker.internal:4318`; on Linux that name needs
+`extra_hosts: ["host.docker.internal:host-gateway"]` for `api` in
+`compose.override.yml`, as for [embeddings on the host](#embeddings).
+
 ## Security
 
 The security policy is [`SECURITY.md`](../SECURITY.md) in the root of the
@@ -1882,6 +1989,40 @@ trivy image --vex oci --show-suppressed ghcr.io/cadence-lab-tech/sdlc-pipeline-b
 curl -fsSLO https://raw.githubusercontent.com/cadence-lab-tech/sdlc-pipeline-backend/v0.9.0/.github/release/openvex.json
 trivy image --vex openvex.json ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0
 grype ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 --vex openvex.json
+```
+
+The operating system layer of the backend image has no known findings: from
+the release after v0.11.0 the image is built on
+`gcr.io/distroless/static-debian13:nonroot`. Up to v0.11.0 it was built on
+`static-debian12`, which gets no Debian LTS updates, and a scanner reports
+tzdata `DLA-4792-1` and ca-certificates `DLA-4845-1` in it; the services
+trust the CA bundle of the image for TLS (GitHub, OIDC, embeddings, S3), so
+upgrade rather than suppress them. The user and group of the image stay
+`nonroot` (65532): the `blobs` volume of an existing installation needs no
+change.
+
+How base images are kept up to date:
+
+- every `FROM` of the backend and frontend `Dockerfile` is pinned by digest
+  (`golang:1.26-alpine`, `distroless/static-debian13:nonroot`,
+  `node:24-alpine`, `caddy:2-alpine`); Dependabot proposes a new digest of
+  the same tag once a week, and the image is built on the pull request
+  before it is merged;
+- a new base reaches your installation with the next release; a finding in a
+  base image that affects Cadence Lab is a reason for a patch release on its
+  own;
+- a new line of a base image (Go, Node, Caddy, Debian) is a separate change,
+  never an automatic one;
+- the third-party images of the stack, `pgvector/pgvector:pg17` and
+  `caddy:2-alpine` in `docker-compose.yml`, are used by tag, as their
+  maintainers publish them: their findings are upstream ones, and
+  `docker compose pull` brings their fixes. The frontend image is built on
+  `caddy:2-alpine` too and shows the same findings in `/usr/bin/caddy` until
+  Caddy is rebuilt upstream.
+
+```bash
+# the operating system of the backend image and its findings
+trivy image --scanners vuln --vex oci ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:"$(cat VERSION)"
 ```
 
 ## Managing the installation with clab server
