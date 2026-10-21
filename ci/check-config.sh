@@ -550,6 +550,37 @@ retention() { env -u SDLC_AUDIT_RETENTION_DAYS "$@" POSTGRES_PASSWORD=x CADENCE_
 check "the worker gets SDLC_AUDIT_RETENTION_DAYS=180 without the line in .env" [ "$(retention)" = "180" ]
 check "SDLC_AUDIT_RETENTION_DAYS of .env reaches the worker" [ "$(retention SDLC_AUDIT_RETENTION_DAYS=30)" = "30" ]
 
+# Traces of the API over OTLP/HTTP (since v0.12.0): the standard OTEL_* go to
+# the API only - the worker is not traced - and are empty by default, so an
+# installation exports nothing until .env sets an endpoint. .env.example
+# has each of them only commented out, docs/admin.md describes each.
+info "traces (OTEL_*)"
+otel_vars="OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_HEADERS OTEL_RESOURCE_ATTRIBUTES OTEL_SERVICE_NAME OTEL_TRACES_EXPORTER OTEL_TRACES_SAMPLER OTEL_TRACES_SAMPLER_ARG"
+otel_config() {
+  local unset=()
+  for v in $otel_vars; do unset+=(-u "$v"); done
+  env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST "${unset[@]}" "$@" \
+    POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --format json
+}
+for mode in tls proxy; do
+  otel="$(otel_config COMPOSE_FILE="docker-compose.yml:compose.$mode.yml")"
+  check "[$mode] api gets exactly: $otel_vars" \
+    [ "$(jq -r '[.services.api.environment | keys[] | select(startswith("OTEL_"))] | sort | join(" ")' <<<"$otel")" = "$otel_vars" ]
+  check "[$mode] every OTEL_* of api is empty without .env" \
+    [ "$(jq -r '[.services.api.environment | to_entries[] | select((.key | startswith("OTEL_")) and .value != "")] | length' <<<"$otel")" = 0 ]
+  check "[$mode] worker gets no OTEL_*" \
+    [ "$(jq -r '[.services | to_entries[] | select(.key != "api") | (.value.environment // {}) | keys[] | select(startswith("OTEL_"))] | length' <<<"$otel")" = 0 ]
+done
+otel_set="$(otel_config OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 OTEL_SERVICE_NAME=acme-cadence |
+  jq -r '.services.api.environment | "\(.OTEL_EXPORTER_OTLP_ENDPOINT) \(.OTEL_SERVICE_NAME)"')"
+check "OTEL_* of .env reach the api" [ "$otel_set" = "http://otel-collector:4318 acme-cadence" ]
+for v in $otel_vars; do
+  check ".env.example documents $v, commented out" grep -qE "^# $v=" .env.example
+  check ".env.example does not set $v" lacks "$(grep -v '^#' <<<"$env_example")" "$v="
+  check "docs/admin.md describes $v" grep -qF "\`$v\`" docs/admin.md
+done
+check "docs/admin.md says OTLP over gRPC is not supported" contains "$admin" "Only OTLP over HTTP with protobuf is supported"
+
 # The example alert rules of docs/admin.md ("Monitoring") are what an
 # administrator copies into Prometheus: they must load.
 info "alert rules (docs)"

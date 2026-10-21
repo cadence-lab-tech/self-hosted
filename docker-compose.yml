@@ -138,6 +138,17 @@ services:
       SDLC_OIDC_ISSUER: ${SDLC_OIDC_ISSUER:-}
       SDLC_OIDC_CLIENT_ID: ${SDLC_OIDC_CLIENT_ID:-}
       SDLC_OIDC_GROUPS_CLAIM: ${SDLC_OIDC_GROUPS_CLAIM:-groups}
+      # Traces of the API requests over OTLP/HTTP to your collector (since
+      # v0.12.0): the standard OpenTelemetry variables, all empty by default,
+      # and the API exports nothing until an endpoint is set. The worker is
+      # not traced. docs/admin.md, "Monitoring", "Tracing".
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-}
+      OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-}
     volumes:
       - blobs:/blobs
       - ./secrets:/secrets:ro
