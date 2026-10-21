@@ -915,6 +915,11 @@ else
   secret_set BACKUP_S3_ACCESS_KEY_ID "$S3_ACCESS_KEY"
   secret_set BACKUP_S3_SECRET_ACCESS_KEY "$S3_SECRET"
   env_set BACKUP_S3_KEEP 2
+  if [ "$secrets_mode" = files ]; then
+    check ".env holds no value of the bucket keys, only their files" \
+      [ "$(grep -E '^BACKUP_S3_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)(_FILE)?=' .env | LC_ALL=C sort | tr '\n' ' ')" = \
+        "BACKUP_S3_ACCESS_KEY_ID= BACKUP_S3_ACCESS_KEY_ID_FILE=/secrets/backup-s3-access-key-id BACKUP_S3_SECRET_ACCESS_KEY= BACKUP_S3_SECRET_ACCESS_KEY_FILE=/secrets/backup-s3-secret-access-key " ]
+  fi
   printf 'not a backup\n' >"$work/other.txt"
   s3_put "$work/other.txt" nightly/other.txt
   s3_put "$work/other.txt" "elsewhere/cadence-$version-20000101-000000.sql.gz"
