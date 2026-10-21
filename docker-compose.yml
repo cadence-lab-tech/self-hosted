@@ -42,10 +42,20 @@ x-image-backend: &image-backend
   image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_BACKEND_DIGEST-@sha256:3bec7e7c5f55ad40a4a544eb728a0f598e9f2958d68af06826f8f49c05c0ecd8}
 
 # Settings the API and the worker must agree on.
+#
+# Every secret X also takes X_FILE: the path of a file inside the container
+# whose content is the value (docs/admin.md, "Secrets in files"). Both set is
+# an error on start; the X_FILE lines below stay empty unless .env sets them,
+# and compose.secrets.yml sets the ones of the bundled database and the
+# administrator token.
 x-shared-env: &shared-env
   # The bundled database; compose.external-db.yml replaces it with
-  # SDLC_DATABASE_URL of .env.
+  # SDLC_DATABASE_URL of .env. With the password in a file POSTGRES_PASSWORD
+  # is empty, and SDLC_DATABASE_PASSWORD_FILE puts the password of the file
+  # into this URL.
   SDLC_DATABASE_URL: postgres://${POSTGRES_USER:-sdlc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sdlc}?sslmode=disable
+  SDLC_DATABASE_URL_FILE: ${SDLC_DATABASE_URL_FILE:-}
+  SDLC_DATABASE_PASSWORD_FILE: ${SDLC_DATABASE_PASSWORD_FILE:-}
   # Connections of each process (the API and the worker hold a pool each)
   # and how long a process waits for the database on start.
   SDLC_DB_MAX_CONNS: ${SDLC_DB_MAX_CONNS:-10}
@@ -64,12 +74,15 @@ x-shared-env: &shared-env
   SDLC_BLOB_S3_REGION: ${SDLC_BLOB_S3_REGION:-}
   SDLC_BLOB_S3_PREFIX: ${SDLC_BLOB_S3_PREFIX:-}
   SDLC_BLOB_S3_ACCESS_KEY_ID: ${SDLC_BLOB_S3_ACCESS_KEY_ID:-}
+  SDLC_BLOB_S3_ACCESS_KEY_ID_FILE: ${SDLC_BLOB_S3_ACCESS_KEY_ID_FILE:-}
   SDLC_BLOB_S3_SECRET_ACCESS_KEY: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-}
+  SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE:-}
   # Repository access: a GitHub App (private key in ./secrets) or a token.
   SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
   SDLC_GITHUB_APP_ID: ${SDLC_GITHUB_APP_ID:-}
   SDLC_GITHUB_APP_KEY_FILE: ${SDLC_GITHUB_APP_KEY_FILE:-}
   SDLC_GITHUB_TOKEN: ${SDLC_GITHUB_TOKEN:-}
+  SDLC_GITHUB_TOKEN_FILE: ${SDLC_GITHUB_TOKEN_FILE:-}
   # Embeddings: `none` keeps search full-text and makes no external calls.
   # The model must be the same for the API (queries) and the worker
   # (indexing), so both read the same variables.
@@ -77,9 +90,11 @@ x-shared-env: &shared-env
   SDLC_EMBEDDINGS_MODEL: ${SDLC_EMBEDDINGS_MODEL:-}
   SDLC_EMBEDDINGS_URL: ${SDLC_EMBEDDINGS_URL:-}
   SDLC_EMBEDDINGS_API_KEY: ${SDLC_EMBEDDINGS_API_KEY:-}
+  SDLC_EMBEDDINGS_API_KEY_FILE: ${SDLC_EMBEDDINGS_API_KEY_FILE:-}
   SDLC_EMBEDDINGS_BATCH: ${SDLC_EMBEDDINGS_BATCH:-96}
   SDLC_EMBEDDINGS_SEND_DIMENSIONS: ${SDLC_EMBEDDINGS_SEND_DIMENSIONS:-true}
   SDLC_VOYAGE_API_KEY: ${SDLC_VOYAGE_API_KEY:-}
+  SDLC_VOYAGE_API_KEY_FILE: ${SDLC_VOYAGE_API_KEY_FILE:-}
   # Prometheus metrics of the API and the worker (since v0.10.0), each on its
   # own port 9090 inside the compose network. No port is published and Caddy
   # does not route /metrics: they are served without a token. How to let
@@ -126,6 +141,7 @@ services:
       SDLC_AUTH_MODE: ${SDLC_AUTH_MODE:-token}
       SDLC_ADMIN_HANDLE: ${SDLC_ADMIN_HANDLE:-admin}
       SDLC_ADMIN_TOKEN: ${SDLC_ADMIN_TOKEN:-}
+      SDLC_ADMIN_TOKEN_FILE: ${SDLC_ADMIN_TOKEN_FILE:-}
       SDLC_BOOTSTRAP_TEAM: ${SDLC_BOOTSTRAP_TEAM:-}
       SDLC_BOOTSTRAP_TEAM_NAME: ${SDLC_BOOTSTRAP_TEAM_NAME:-}
       SDLC_SESSION_TTL: ${SDLC_SESSION_TTL:-12h}
@@ -133,8 +149,10 @@ services:
       SDLC_GITHUB_URL: ${SDLC_GITHUB_URL:-https://github.com}
       SDLC_GITHUB_APP_CLIENT_ID: ${SDLC_GITHUB_APP_CLIENT_ID:-}
       SDLC_GITHUB_APP_CLIENT_SECRET: ${SDLC_GITHUB_APP_CLIENT_SECRET:-}
+      SDLC_GITHUB_APP_CLIENT_SECRET_FILE: ${SDLC_GITHUB_APP_CLIENT_SECRET_FILE:-}
       SDLC_GITHUB_APP_SLUG: ${SDLC_GITHUB_APP_SLUG:-}
       SDLC_GITHUB_WEBHOOK_SECRET: ${SDLC_GITHUB_WEBHOOK_SECRET:-}
+      SDLC_GITHUB_WEBHOOK_SECRET_FILE: ${SDLC_GITHUB_WEBHOOK_SECRET_FILE:-}
       SDLC_OIDC_ISSUER: ${SDLC_OIDC_ISSUER:-}
       SDLC_OIDC_CLIENT_ID: ${SDLC_OIDC_CLIENT_ID:-}
       SDLC_OIDC_GROUPS_CLAIM: ${SDLC_OIDC_GROUPS_CLAIM:-groups}

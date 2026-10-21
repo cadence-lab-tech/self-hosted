@@ -302,8 +302,10 @@ dump="$stem.sql.gz"
 # itself; external: the backup client, whose pg_dump is of the newest
 # supported server version.
 if external_db; then
-  db_url_parts "$SDLC_DATABASE_URL"
-  info "dumping the external database $(db_target "$SDLC_DATABASE_URL") to $dump"
+  # The URL and the password first, also from their files: a file that
+  # cannot be read stops here, before an empty dump.
+  db_conn
+  info "dumping the external database $(db_label) to $dump"
   if ! db_client pg_dump -d "$DB_URL_SAFE" "${DUMP_OPTIONS[@]}" | gzip >"$dump"; then
     rm -f "$dump"
     die "pg_dump of the external database failed (see above)"

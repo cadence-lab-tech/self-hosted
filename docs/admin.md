@@ -19,6 +19,7 @@ public address of your proxy in the `proxy` mode.
 - [Several installations on one machine](#several-installations-on-one-machine)
 - [Behind your reverse proxy](#behind-your-reverse-proxy)
 - [External PostgreSQL](#external-postgresql)
+- [Secrets in files](#secrets-in-files)
 - [First sign-in with the administrator token](#first-sign-in-with-the-administrator-token)
 - [Teams, projects and invites](#teams-projects-and-invites)
 - [First cycle and roles](#first-cycle-and-roles)
@@ -282,6 +283,10 @@ like the rest of `.env`; never printed by the scripts) and
 `compose.external-db.yml` in `COMPOSE_FILE` after the file of the mode;
 `POSTGRES_PASSWORD` stays empty. The external mode needs Docker Compose 2.20
 or newer; the bundled mode keeps working on older ones.
+The URL can live in a file of `secrets/` instead of `.env`
+(`SDLC_DATABASE_URL_FILE`), or only its password
+(`SDLC_DATABASE_PASSWORD_FILE`): [Secrets in files](#secrets-in-files),
+"External database".
 
 ### Server, extensions and the role
 
@@ -426,6 +431,198 @@ downtime of both:
 A dump of a PostgreSQL 17 server names `transaction_timeout`, which servers
 15 and 16 do not know; the restore drops that line, so moving to an older
 external server works too.
+
+## Secrets in files
+
+`install.sh` writes the secrets of the installation into `.env` (mode 600),
+and that stays the default. Where `.env` must hold no secrets — it is read
+by whoever has the directory, it lands in backups of the machine, and its
+values show up in `docker inspect` — every secret also comes from a file:
+
+- **`X_FILE` for every secret `X`.** The value is the path of a file inside
+  the containers; its content is the value of `X`. A trailing newline (`\n`
+  or `\r\n`) is cut, the lines inside a value (a PEM key) are kept. An empty
+  `X_FILE` counts as unset, like an empty `X`.
+- **One form at a time.** `X` and `X_FILE` both set stop the service on
+  start with an error that names both — no silent choice. A value left in
+  `.env` after the move to a file shows up at once instead of hiding behind
+  the file.
+- **A file that cannot be read stops the start:** missing, a directory,
+  unreadable for the user of the container, or empty. The error names
+  `X_FILE`, the path and the reason, never the content, and the process
+  stops before it reaches the database or the network. The API then never
+  becomes healthy; `docker compose logs api` shows the reason.
+- **Values are never printed:** not in the logs of the API, the worker,
+  `/api dbcheck`, `/api backup-s3`, the scripts and `clab server`, not in
+  `GET /v1/instance`.
+- **Where the files live.** `secrets/` of the installation is mounted as
+  `/secrets` into `api` and `worker` (and `db-client` with an external
+  database): `X_FILE=/secrets/<file>`. Docker secrets of
+  `compose.secrets.yml` and of `compose.override.yml` are mounted as
+  `/run/secrets/<name>`; name the file `secrets/<name>` after the secret.
+  The scripts and `clab server` read a file themselves only for an external
+  database (below) and only from `secrets/`: `/secrets/<file>` and
+  `/run/secrets/<name>` are `secrets/<file>` and `secrets/<name>` to them; a
+  path elsewhere is refused before anything runs, naming the variable.
+
+The secrets — this table matches the list in the code of the service, and a
+new secret comes with a row here:
+
+| Variable | File form | Read by | Owner and mode of the file |
+|---|---|---|---|
+| `SDLC_DATABASE_URL` | `SDLC_DATABASE_URL_FILE` | api, worker, `/api dbcheck`; external database: also `backup.sh`, `restore.sh`, `upgrade.sh`, `clab server` | your user, group 65532, `440` |
+| `SDLC_DATABASE_PASSWORD_FILE` | the only form: the password put into the URL | api, worker, `/api dbcheck` (and the scripts with an external database) | bundled: 65532, group 999, `440`; external: your user, group 65532, `440` |
+| `SDLC_ADMIN_TOKEN` | `SDLC_ADMIN_TOKEN_FILE` | api | 65532, `400` |
+| `SDLC_GITHUB_TOKEN` | `SDLC_GITHUB_TOKEN_FILE` | api, worker | 65532, `400` |
+| `SDLC_GITHUB_TOKEN_<NAME>` | `SDLC_GITHUB_TOKEN_<NAME>_FILE` | api, worker (tokens of repositories by their secret name) | 65532, `400` |
+| `SDLC_GITHUB_APP_KEY_FILE` | a path already, no value form | api, worker | 65532, `400` ([GitHub App](#github-app)) |
+| `SDLC_GITHUB_APP_CLIENT_SECRET` | `SDLC_GITHUB_APP_CLIENT_SECRET_FILE` | api | 65532, `400` |
+| `SDLC_GITHUB_WEBHOOK_SECRET` | `SDLC_GITHUB_WEBHOOK_SECRET_FILE` | api | 65532, `400` |
+| `SDLC_EMBEDDINGS_API_KEY` | `SDLC_EMBEDDINGS_API_KEY_FILE` | api, worker | 65532, `400` |
+| `SDLC_VOYAGE_API_KEY` | `SDLC_VOYAGE_API_KEY_FILE` | api, worker | 65532, `400` |
+| `SDLC_BLOB_S3_ACCESS_KEY_ID` | `SDLC_BLOB_S3_ACCESS_KEY_ID_FILE` | api, worker | 65532, `400` |
+| `SDLC_BLOB_S3_SECRET_ACCESS_KEY` | `SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE` | api, worker | 65532, `400` |
+| `SDLC_BLOB_S3_SESSION_TOKEN` | `SDLC_BLOB_S3_SESSION_TOKEN_FILE` | api, worker (not passed by `docker-compose.yml`: add it in `compose.override.yml`) | 65532, `400` |
+| `BACKUP_S3_ACCESS_KEY_ID` | `BACKUP_S3_ACCESS_KEY_ID_FILE` | `/api backup-s3`, run by `backup.sh` and `clab server` as your user | your user, `400` |
+| `BACKUP_S3_SECRET_ACCESS_KEY` | `BACKUP_S3_SECRET_ACCESS_KEY_FILE` | `/api backup-s3` as your user | your user, `400` |
+| `POSTGRES_PASSWORD` | `POSTGRES_PASSWORD_FILE` | the `postgres` container (its image reads the file) | 65532, group 999, `440` — the same file as `SDLC_DATABASE_PASSWORD_FILE` |
+
+The `AWS_*` variables the blob storage falls back to have no file form: the
+names are not ours. Neither has the bare secret name of a repository token
+kept for configurations made before the GitHub App.
+
+**Owners and modes.** Without swarm a Docker secret is the file itself,
+mounted read-only: the owner and the mode on the host are what the container
+sees (`uid`, `gid` and `mode` of a compose secret do nothing there). The
+service runs as uid 65532, the `postgres` image as uid 999, the scripts and
+`/api backup-s3` as you. The directory `secrets/` keeps mode `711`: it can be
+passed through but not listed. Hand a file over to the service with a
+throwaway container, as for the key of the GitHub App:
+
+```bash
+docker run --rm -v "$PWD/secrets:/s" alpine:3 \
+  sh -c 'chown 65532:65532 /s/admin_token && chmod 400 /s/admin_token && chmod 711 /s'
+```
+
+### compose.secrets.yml
+
+The overlay `compose.secrets.yml` moves the two secrets every installation
+has to Docker secrets: the password of the bundled database
+(`secrets/postgres_password`: `POSTGRES_PASSWORD_FILE` of `postgres`,
+`SDLC_DATABASE_PASSWORD_FILE` of api and worker) and the administrator token
+(`secrets/admin_token`: `SDLC_ADMIN_TOKEN_FILE` of api). It goes into
+`COMPOSE_FILE` right after the file of the mode — with an external database
+before `compose.external-db.yml`, which turns the password of the bundled
+database off again (the scripts refuse the other order):
+
+```bash
+COMPOSE_FILE=docker-compose.yml:compose.tls.yml:compose.secrets.yml:compose.override.yml
+COMPOSE_FILE=docker-compose.yml:compose.proxy.yml:compose.secrets.yml:compose.external-db.yml:compose.override.yml
+```
+
+**Moving an installation from `.env`** (the stack keeps its data; the
+password must be the very one in `.env`: `postgres` sets a password only
+when it creates the volume, and a new one would lock the service out):
+
+1. Write the two values of `.env` into files and hand them over:
+
+   ```bash
+   (umask 077 && set -a && . ./.env &&
+     printf '%s\n' "$POSTGRES_PASSWORD" >secrets/postgres_password &&
+     printf '%s\n' "$SDLC_ADMIN_TOKEN" >secrets/admin_token)
+   docker run --rm -v "$PWD/secrets:/s" alpine:3 sh -c \
+     'chown 65532:999 /s/postgres_password && chmod 440 /s/postgres_password &&
+      chown 65532:65532 /s/admin_token && chmod 400 /s/admin_token && chmod 711 /s'
+   ```
+
+   With an external database there is no bundled password: write only
+   `admin_token` and move the URL as described below.
+2. In `.env` empty `POSTGRES_PASSWORD=` and `SDLC_ADMIN_TOKEN=`, and add
+   `compose.secrets.yml` to `COMPOSE_FILE` as above.
+3. Apply: `export CADENCE_VERSION=$(cat VERSION) && docker compose up -d`
+   (or `./upgrade.sh` to the same or a newer version). Sign in with the same
+   token: the data and the token are those of before.
+
+A value forgotten in `.env` stops the API (`both SDLC_ADMIN_TOKEN and
+SDLC_ADMIN_TOKEN_FILE are set: keep one of them`) or `postgres` (`both
+POSTGRES_PASSWORD and POSTGRES_PASSWORD_FILE are set (but are exclusive)`):
+empty it and run `docker compose up -d` again. The database is not touched.
+
+**Back to `.env`:** put the values back into `POSTGRES_PASSWORD` and
+`SDLC_ADMIN_TOKEN`, drop `compose.secrets.yml` from `COMPOSE_FILE`, run
+`docker compose up -d` and delete the two files.
+
+### Other secrets
+
+Any other secret of the table goes as `X_FILE=/secrets/<file>` in `.env`
+with the file in `secrets/`, owner and mode from the table, and an empty `X`:
+
+```bash
+# .env
+SDLC_GITHUB_WEBHOOK_SECRET=
+SDLC_GITHUB_WEBHOOK_SECRET_FILE=/secrets/github_webhook_secret
+```
+
+or as a Docker secret of `compose.override.yml`:
+
+```yaml
+# compose.override.yml
+secrets:
+  github_webhook_secret:
+    file: ./secrets/github_webhook_secret
+services:
+  api:
+    secrets: [github_webhook_secret]
+    environment:
+      SDLC_GITHUB_WEBHOOK_SECRET_FILE: /run/secrets/github_webhook_secret
+```
+
+Apply with `docker compose up -d`. The keys of the
+[off-machine copy](#off-machine-copy) are read by `/api backup-s3`, which
+`backup.sh` runs as you: `BACKUP_S3_ACCESS_KEY_ID_FILE=/secrets/backup-s3-key-id`
+and `BACKUP_S3_SECRET_ACCESS_KEY_FILE=/secrets/backup-s3-secret-key`, both
+files yours with mode `400` (`chmod 400 secrets/backup-s3-*`). Cron must run
+the backup as the same user.
+
+### External database
+
+The URL with its password in a file — `SDLC_DATABASE_URL_FILE` — or the URL
+without a password in `.env` and only the password in a file —
+`SDLC_DATABASE_PASSWORD_FILE` (a URL with a password and the file together
+are refused):
+
+```bash
+# .env, the URL in a file
+SDLC_DATABASE_URL=
+SDLC_DATABASE_URL_FILE=/secrets/db-url
+# .env, only the password in a file
+SDLC_DATABASE_URL='postgres://cadence@db.internal:5432/cadence?sslmode=verify-full&sslrootcert=/secrets/db-ca.pem'
+SDLC_DATABASE_PASSWORD_FILE=/secrets/db-password
+```
+
+Both the service and the backup client need the file: `backup.sh`,
+`restore.sh`, `upgrade.sh` and `clab server` read it on this machine as you
+and give the password to `db-client` as `PGPASSWORD`, never on a command
+line. So the file is yours and readable by the group 65532:
+
+```bash
+docker run --rm -v "$PWD/secrets:/s" alpine:3 sh -c "chown $(id -u):65532 /s/db-url && chmod 440 /s/db-url"
+```
+
+A file outside `secrets/` (`SDLC_DATABASE_URL_FILE=/etc/…` mounted by an
+override) works for the service, but the backup refuses it before the dump,
+naming the variable: keep the file in `secrets/`.
+`docker compose run --rm --no-deps -T api dbcheck` reads the file as the
+service does.
+
+### Kubernetes
+
+The same `X_FILE` variables carry secrets of Kubernetes into the pods: mount
+the secret as a volume and point `X_FILE` at its keys (for the database
+`SDLC_DATABASE_URL_FILE` or `SDLC_DATABASE_PASSWORD_FILE`). A key written
+with `echo` ends with a newline; it is cut. A missing key stops the pod on
+start, naming the variable. The Helm chart of Cadence Lab, coming in a later
+release, is built on this.
 
 ## First sign-in with the administrator token
 
@@ -636,6 +833,10 @@ After creating it:
   ```
 
 - Apply: `docker compose up -d`.
+
+The client secret and the webhook secret can live in files of `secrets/`
+instead of `.env`: `SDLC_GITHUB_APP_CLIENT_SECRET_FILE`,
+`SDLC_GITHUB_WEBHOOK_SECRET_FILE` ([Secrets in files](#secrets-in-files)).
 
 The sign-in page now has "Sign in with GitHub", and team pages and project
 settings have "Connect GitHub": install the app on the organization, come
@@ -1028,7 +1229,10 @@ provider than the machine. Versioning or object lock on the bucket protects
 the copies against a leaked key: with them the retention deletes only the
 current versions. The copy is not encrypted by Cadence Lab: use the
 encryption of the storage (SSE) and keep the keys out of reach of the
-machine's other users (`.env` is mode 600).
+machine's other users (`.env` is mode 600), or keep them out of `.env`
+altogether: `BACKUP_S3_ACCESS_KEY_ID_FILE` and
+`BACKUP_S3_SECRET_ACCESS_KEY_FILE` take files of `secrets/`
+([Secrets in files](#secrets-in-files)).
 
 ### Checking that a backup restores
 

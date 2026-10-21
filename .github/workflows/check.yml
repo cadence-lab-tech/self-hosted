@@ -151,6 +151,41 @@ jobs:
           CHECK_DB: external
         run: ci/check-stack.sh
 
+  # Secrets in files (CLAB-200): the installation moved to compose.secrets.yml
+  # and *_FILE, with the bundled and the external database. Images before
+  # v0.12.0 do not read *_FILE: the job prints a notice and skips, so the
+  # pull request of the package stays green until the release of the images
+  # catches up (the release pull request of v0.12.0 runs it).
+  secrets-files:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - id: images
+        name: images of VERSION read *_FILE
+        run: |
+          . ./lib.sh
+          v="$(tr -d '[:space:]' <VERSION)"
+          if version_lt "$v" v0.12.0; then
+            echo "::notice::VERSION is $v: its backend image reads no *_FILE (v0.12.0+), the check of secrets in files is skipped"
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+      - name: stack on secrets in files
+        if: steps.images.outputs.skip != 'true'
+        env:
+          CHECK_SECRETS: files
+        run: ci/check-stack.sh
+      - name: stack on secrets in files, external database
+        if: steps.images.outputs.skip != 'true'
+        env:
+          CHECK_SECRETS: files
+          CHECK_DB: external
+          COMPOSE_PROJECT_NAME: cadence-check-ext
+        run: ci/check-stack.sh
+
   # The release pull request (release/vX.Y.Z, ci/release-pr.sh) moves VERSION:
   # the upgrade from the VERSION of main to it is checked there on its own.
   upgrade:
