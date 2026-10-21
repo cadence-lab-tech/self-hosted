@@ -51,8 +51,8 @@ without @<digest> when the digest is empty.
 The secrets of the service (docs/admin.md, "Secrets in files"; the list
 internal/secrets of the backend): the key of secrets.keys, the variable that
 carries the path of its file, and who reads it. The api reads every one; the
-worker all but the sign-in and webhook secrets; the precheck of the
-database only the database.
+worker all but the sign-in and webhook secrets and the headers of the
+exporter of traces; the precheck of the database only the database.
 */}}
 {{- define "cadence.secretVars" -}}
 SDLC_DATABASE_URL: {env: SDLC_DATABASE_URL_FILE, readers: [api, worker, dbcheck]}
@@ -67,6 +67,8 @@ SDLC_VOYAGE_API_KEY: {env: SDLC_VOYAGE_API_KEY_FILE, readers: [api, worker]}
 SDLC_BLOB_S3_ACCESS_KEY_ID: {env: SDLC_BLOB_S3_ACCESS_KEY_ID_FILE, readers: [api, worker]}
 SDLC_BLOB_S3_SECRET_ACCESS_KEY: {env: SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE, readers: [api, worker]}
 SDLC_BLOB_S3_SESSION_TOKEN: {env: SDLC_BLOB_S3_SESSION_TOKEN_FILE, readers: [api, worker]}
+OTEL_EXPORTER_OTLP_HEADERS: {env: OTEL_EXPORTER_OTLP_HEADERS_FILE, readers: [api]}
+OTEL_EXPORTER_OTLP_TRACES_HEADERS: {env: OTEL_EXPORTER_OTLP_TRACES_HEADERS_FILE, readers: [api]}
 {{- end -}}
 
 {{/*

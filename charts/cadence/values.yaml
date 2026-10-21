@@ -90,6 +90,10 @@ secrets:
     SDLC_GITHUB_WEBHOOK_SECRET: ""
     SDLC_EMBEDDINGS_API_KEY: ""
     SDLC_VOYAGE_API_KEY: ""
+    # Headers of the exporter of traces, an APM key (the API only:
+    # OTEL_EXPORTER_OTLP_HEADERS_FILE); the per-signal ones replace them.
+    OTEL_EXPORTER_OTLP_HEADERS: ""
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS: ""
   # Tokens of repositories by their secret name: NAME: key gives
   # SDLC_GITHUB_TOKEN_<NAME>_FILE.
   githubTokens: {}
@@ -133,9 +137,9 @@ config:
     SDLC_OIDC_CLIENT_ID: ""
     SDLC_OIDC_GROUPS_CLAIM: groups
     # Traces of the API over OTLP/HTTP (docs/admin.md, "Tracing"); empty -
-    # nothing is exported. The worker is not traced.
+    # nothing is exported. The worker is not traced. The headers are a
+    # secret: secrets.keys.OTEL_EXPORTER_OTLP_HEADERS.
     OTEL_EXPORTER_OTLP_ENDPOINT: ""
-    OTEL_EXPORTER_OTLP_HEADERS: ""
     OTEL_TRACES_EXPORTER: ""
     OTEL_SERVICE_NAME: ""
     OTEL_RESOURCE_ATTRIBUTES: ""

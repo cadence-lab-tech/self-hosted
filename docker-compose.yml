@@ -162,6 +162,9 @@ services:
       # not traced. docs/admin.md, "Monitoring", "Tracing".
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      # The headers are a secret (an APM key): a file works too (since
+      # v0.13.0, "Secrets in files").
+      OTEL_EXPORTER_OTLP_HEADERS_FILE: ${OTEL_EXPORTER_OTLP_HEADERS_FILE:-}
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-}

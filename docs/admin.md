@@ -506,6 +506,8 @@ new secret comes with a row here:
 | `SDLC_BLOB_S3_ACCESS_KEY_ID` | `SDLC_BLOB_S3_ACCESS_KEY_ID_FILE` | api, worker | 65532, `400` |
 | `SDLC_BLOB_S3_SECRET_ACCESS_KEY` | `SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE` | api, worker | 65532, `400` |
 | `SDLC_BLOB_S3_SESSION_TOKEN` | `SDLC_BLOB_S3_SESSION_TOKEN_FILE` | api, worker (not passed by `docker-compose.yml`: add it in `compose.override.yml`) | 65532, `400` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `OTEL_EXPORTER_OTLP_HEADERS_FILE` | api ([Tracing](#tracing)) | 65532, `400` |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `OTEL_EXPORTER_OTLP_TRACES_HEADERS_FILE` | api (not passed by `docker-compose.yml`: add it in `compose.override.yml`) | 65532, `400` |
 | `BACKUP_S3_ACCESS_KEY_ID` | `BACKUP_S3_ACCESS_KEY_ID_FILE` | `/api backup-s3`, run by `backup.sh` and `clab server` as your user | your user, `400` |
 | `BACKUP_S3_SECRET_ACCESS_KEY` | `BACKUP_S3_SECRET_ACCESS_KEY_FILE` | `/api backup-s3` as your user | your user, `400` |
 | `POSTGRES_PASSWORD` | `POSTGRES_PASSWORD_FILE` | the `postgres` container (its image reads the file) | 65532, group 999, `440` — the same file as `SDLC_DATABASE_PASSWORD_FILE` |
@@ -725,12 +727,15 @@ nothing.
 | `SDLC_GITHUB_WEBHOOK_SECRET` | `SDLC_GITHUB_WEBHOOK_SECRET_FILE` | no |
 | `SDLC_EMBEDDINGS_API_KEY` | `SDLC_EMBEDDINGS_API_KEY_FILE` | no |
 | `SDLC_VOYAGE_API_KEY` | `SDLC_VOYAGE_API_KEY_FILE` | no |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `OTEL_EXPORTER_OTLP_HEADERS_FILE`, the API only: the headers of the exporter of [traces](#tracing) | no |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `OTEL_EXPORTER_OTLP_TRACES_HEADERS_FILE`, the API only: the per-signal headers, replacing the ones above | no |
 
 `secrets.githubTokens` maps the secret name of a repository token to its
 key (`ACME: github-token-acme` gives `SDLC_GITHUB_TOKEN_ACME_FILE`), and
 `secrets.files` mounts keys without a variable — the CA of the database for
 `sslrootcert=/secrets/<secret>/<key>` of the URL. The worker gets no
-sign-in or webhook secret; the precheck only the database.
+sign-in or webhook secret and no headers of traces; the precheck only the
+database.
 
 A key missing in its Secret keeps the pod from starting: its events name
 the Secret and the key (`kubectl -n cadence describe pod`). A key written
@@ -882,7 +887,8 @@ ServiceMonitor at them, or set `metrics.podAnnotations: true` for a
 Prometheus that discovers pods by `prometheus.io/*` annotations;
 `metrics.enabled: false` turns the listeners off. The
 [metrics](#metrics) and the [alert rules](#alert-rules) are the same as in
-compose; traces go by `OTEL_*` in `config.api` ([Tracing](#tracing)).
+compose; traces go by `OTEL_*` in `config.api` ([Tracing](#tracing)), and
+their headers, a secret, by `secrets.keys.OTEL_EXPORTER_OTLP_HEADERS`.
 
 ### Limits
 
@@ -2027,7 +2033,7 @@ specification; the package passes these to the API:
 | Variable | Default | Meaning |
 |---|---|---|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty: off | base URL of the collector, `http://` or `https://`; spans go to `<endpoint>/v1/traces` |
-| `OTEL_EXPORTER_OTLP_HEADERS` | empty | headers for the collector, `key1=value1,key2=value2` — an APM key, for instance; never logged and not shown in `/v1/instance` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | empty | headers for the collector, `key1=value1,key2=value2`, values %-encoded (`Authorization=Bearer%20xyz`) — an APM key, for instance; a secret: since v0.13.0 also `OTEL_EXPORTER_OTLP_HEADERS_FILE` ([Secrets in files](#secrets-in-files)); never logged and not shown in `/v1/instance` |
 | `OTEL_TRACES_EXPORTER` | empty | `otlp` turns tracing on without an endpoint (the SDK default `https://localhost:4318`), `none` turns it off whatever the endpoint |
 | `OTEL_SERVICE_NAME` | `cadence-api` | `service.name` of the spans |
 | `OTEL_RESOURCE_ATTRIBUTES` | empty | more resource attributes, `deployment.environment=prod,team=platform`; `service.version` is always the version of the installation and cannot be overridden |
@@ -2037,7 +2043,20 @@ specification; the package passes these to the API:
 Other `OTEL_EXPORTER_OTLP_*` settings of the specification (the per-signal
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, TLS certificates, timeout,
 compression) and `OTEL_SDK_DISABLED=true` (off whatever else is set) work
-too when added to the `environment` of `api` in `compose.override.yml`.
+too when added to the `environment` of `api` in `compose.override.yml`. So
+do the per-signal headers `OTEL_EXPORTER_OTLP_TRACES_HEADERS` (or
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS_FILE`): when set, they replace
+`OTEL_EXPORTER_OTLP_HEADERS` as a whole, as the specification says.
+
+**The headers are checked on start** (since v0.13.0), even with tracing
+off. A pair without `=`, a key that is not a valid header name or a value
+with a broken `%`-escape (a literal `%` is `%25`) stops the API with an
+error naming the variable (or its `_FILE`), the number of the pair and the
+reason — never the key or the value. Before v0.13.0 such a pair was dropped
+silently, and the collector got the spans without the key; the part of the
+string that did not parse went to the log. Empty pairs (`a=b,`) are
+skipped. Setting both `OTEL_EXPORTER_OTLP_HEADERS` and its `_FILE` stops the
+API as for any other secret.
 
 Only OTLP over HTTP with protobuf is supported. `OTEL_EXPORTER_OTLP_PROTOCOL`
 other than `http/protobuf` (`grpc`, `http/json`), `OTEL_TRACES_EXPORTER`
