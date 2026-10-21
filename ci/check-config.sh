@@ -2,9 +2,10 @@
 #
 # Static checks of the package that need no published images: the compose
 # configuration in both modes, the Caddyfile in both modes, the defaults of
-# .env.example, the file layout and the release package that ci/package.sh
-# builds. CI runs it on every pull request next to the shell linter; it needs
-# Docker and jq.
+# .env.example, the file layout, the release package that ci/package.sh
+# builds and the Helm chart (rendered, in parity with compose). CI runs it
+# on every pull request next to the shell linter; it needs Docker and jq
+# (helm of PATH, or its image).
 #
 #   ci/check-config.sh
 #
@@ -796,6 +797,264 @@ for cfg in "$tls" "$proxy"; do
   check "everything else goes to the UI" contains "$cfg" '"dial":"ui:80"'
   check "nothing is routed to the metrics port" lacks "$cfg" ':9090'
 done
+
+# The Helm chart (charts/cadence, docs/admin.md "Kubernetes (Helm)"): the
+# second way to install, kept in parity with docker-compose.yml. helm of PATH
+# (the lint job installs a pinned one), else the image alpine/helm; YAML is
+# read with the image mikefarah/yq. In the cluster: ci/check-helm.sh.
+info "Helm chart (charts/cadence)"
+helm_run() {
+  if command -v helm >/dev/null; then
+    helm "$@"
+  else
+    docker run --rm -v "$PWD:$PWD" -v "$dist:$dist" -w "$PWD" alpine/helm:3.19.0 "$@"
+  fi
+}
+yaml_json() { docker run --rm -i mikefarah/yq:4.47.1 -o=json -I=0 '.'; }
+chart=charts/cadence
+for f in Chart.yaml values.yaml templates/_helpers.tpl templates/api.yaml templates/worker.yaml templates/ui.yaml \
+  templates/ingress.yaml templates/dbcheck-job.yaml templates/NOTES.txt; do
+  check "$chart/$f exists" [ -f "$chart/$f" ]
+done
+check "Chart.yaml: version ${version#v}, appVersion $version (VERSION)" [ "$(chart_version_of)" = "${version#v} $version" ]
+values_json="$(yaml_json <"$CHART_VALUES")"
+# The example of docs/admin.md is what an administrator starts from.
+example="$(awk '/^# cadence-values.yaml$/ { on = 1 } on && /^```$/ { exit } on' docs/admin.md)"
+check "docs/admin.md has the example values (# cadence-values.yaml)" [ -n "$example" ]
+printf '%s\n' "$example" >"$dist/example-values.yaml"
+if lint_out="$(helm_run lint "$chart" -f "$dist/example-values.yaml" 2>&1)"; then
+  pass "helm lint with the example of docs/admin.md"
+else
+  fail "helm lint with the example of docs/admin.md"
+  printf '%s\n' "$lint_out" >&2
+fi
+render_json() { helm_run template cadence "$chart" "$@" | yaml_json | jq -s -c '[.[] | select(. != null)]'; }
+example_json="$(render_json -f "$dist/example-values.yaml" 2>/dev/null || true)"
+check "helm template with the example of docs/admin.md" [ -n "$example_json" -a "$example_json" != "[]" ]
+
+# The smallest values the chart takes: the URL of the database in a Secret,
+# the bucket and its keys, the administrator token, the host.
+cat >"$dist/min-values.yaml" <<'EOF'
+ingress: {host: cadence.example.com}
+blobs: {s3: {bucket: check-bucket}}
+secrets:
+  name: cadence
+  keys:
+    SDLC_DATABASE_URL: db-url
+    SDLC_ADMIN_TOKEN: admin-token
+    SDLC_BLOB_S3_ACCESS_KEY_ID: s3-key-id
+    SDLC_BLOB_S3_SECRET_ACCESS_KEY: s3-secret-key
+EOF
+min_json="$(render_json -f "$dist/min-values.yaml")"
+
+# Required values: the rendering stops and names the key.
+refused() {
+  local want="$1" out
+  shift
+  if out="$(helm_run template cadence "$chart" -f "$dist/min-values.yaml" "$@" 2>&1)"; then return 1; fi
+  grep -qF -- "$want" <<<"$out"
+}
+check "no host: refused, naming ingress.host" refused "ingress.host is required" --set ingress.host=
+check "no database: refused, naming secrets.keys.SDLC_DATABASE_URL and database.url" refused \
+  "secrets.keys.SDLC_DATABASE_URL (the key of the Secret with the URL), or database.url" --set secrets.keys.SDLC_DATABASE_URL=
+check "database.url without the password key: refused, naming secrets.keys.SDLC_DATABASE_PASSWORD" refused \
+  "database.url needs secrets.keys.SDLC_DATABASE_PASSWORD" --set secrets.keys.SDLC_DATABASE_URL= --set database.url=postgres://cadence@db/cadence
+check "database.url with a password: refused" refused "database.url has a password" \
+  --set secrets.keys.SDLC_DATABASE_URL= --set secrets.keys.SDLC_DATABASE_PASSWORD=p --set 'database.url=postgres://cadence:pw@db/cadence'
+check "no bucket: refused, naming blobs.s3.bucket" refused "blobs.s3.bucket is required" --set blobs.s3.bucket=
+for k in SDLC_BLOB_S3_ACCESS_KEY_ID SDLC_BLOB_S3_SECRET_ACCESS_KEY SDLC_ADMIN_TOKEN; do
+  check "no secrets.keys.$k: refused, naming it" refused "secrets.keys.$k is required" --set "secrets.keys.$k="
+done
+check "an unknown key of secrets.keys: refused" refused "secrets.keys.SDLC_NO_SUCH: no such secret" --set secrets.keys.SDLC_NO_SUCH=x
+check "a secret as a value of config: refused" refused "SDLC_GITHUB_TOKEN is a secret" --set config.shared.SDLC_GITHUB_TOKEN=x
+check "a value fixed by the chart in config: refused" refused "SDLC_TENANCY is set by the chart" --set config.api.SDLC_TENANCY=shared
+
+# What the chart installs: three Deployments, their Services, one Ingress,
+# the hook of the precheck; no database, no Caddy, no volume claims.
+kinds="$(jq -r '[.[] | "\(.kind)/\(.metadata.name)"] | sort | join(" ")' <<<"$min_json")"
+check "the chart renders: $kinds" [ "$kinds" = "Deployment/cadence-api Deployment/cadence-ui Deployment/cadence-worker Ingress/cadence Job/cadence-dbcheck Service/cadence-api Service/cadence-ui Service/cadence-worker-metrics ServiceAccount/cadence" ]
+images_of() { jq -r '[.[] | .spec.template.spec // empty | (.containers + (.initContainers // []))[] | .image] | unique | join(" ")' <<<"$1"; }
+check "no image of postgres, pgvector or caddy" lacks "$(images_of "$min_json")" "postgres"
+check "...nor of caddy" lacks "$(images_of "$min_json")" "caddy:"
+routes="$(jq -r '.[] | select(.kind == "Ingress") | .spec.rules[0].http.paths[] | "\(.path) \(.pathType) \(.backend.service.name):\(.backend.service.port.name)"' <<<"$min_json" | tr '\n' ',')"
+check "the Ingress routes as the Caddyfile: $routes" \
+  [ "$routes" = "/v1 Prefix cadence-api:http,/mcp Prefix cadence-api:http,/webhooks Prefix cadence-api:http,/healthz Exact cadence-api:http,/readyz Exact cadence-api:http,/ Prefix cadence-ui:http," ]
+check "the Ingress routes no metrics port" lacks "$(jq -c '.[] | select(.kind == "Ingress")' <<<"$min_json")" "metrics"
+check "the Services are ClusterIP" [ "$(jq -r '[.[] | select(.kind == "Service") | .spec.type] | unique | join(" ")' <<<"$min_json")" = ClusterIP ]
+
+# The images: the tag of VERSION and the pins of docker-compose.yml.
+for image in $PIN_IMAGES; do
+  check "values.yaml pins $image to the pin of docker-compose.yml" [ "$(chart_pin_of "$image" || true)" = "$(pin_of "$image" || true)" ]
+done
+check "api, worker, init container and hook: the backend image of VERSION by digest; ui: the frontend one" \
+  [ "$(images_of "$min_json")" = "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version@$backend_pin ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$frontend_pin" ]
+check "image.registry changes only the prefix" \
+  [ "$(images_of "$(render_json -f "$dist/min-values.yaml" --set image.registry=mirror.example.com/cadence)")" = "mirror.example.com/cadence/sdlc-pipeline-backend:$version@$backend_pin mirror.example.com/cadence/sdlc-pipeline-frontend:$version@$frontend_pin" ]
+check "empty digests drop the pin" \
+  [ "$(images_of "$(render_json -f "$dist/min-values.yaml" --set image.backend.digest= --set image.frontend.digest=)")" = "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version" ]
+chart_pin_roundtrip() {
+  local f d rc=0
+  f="$(mktemp)"
+  d="sha256:$(printf '1%.0s' $(seq 64))"
+  cp "$CHART_VALUES" "$f"
+  { set_chart_pin backend "$d" "$f" && [ "$(chart_pin_of backend "$f")" = "$d" ] && [ "$(chart_pin_of frontend "$f")" = "$frontend_pin" ]; } || rc=1
+  rm -f "$f"
+  return "$rc"
+}
+check "set_chart_pin rewrites the backend pin and keeps the frontend one" chart_pin_roundtrip
+chart_version_roundtrip() {
+  local f rc=0
+  f="$(mktemp)"
+  cp "$CHART_FILE" "$f"
+  { set_chart_version v9.8.7 "$f" && [ "$(chart_version_of "$f")" = "9.8.7 v9.8.7" ]; } || rc=1
+  rm -f "$f"
+  return "$rc"
+}
+check "set_chart_version writes version and appVersion" chart_version_roundtrip
+
+# Parity with docker-compose.yml: every variable compose gives api and worker
+# is in the container of the chart with the same default, or an exception
+# with its reason. A variable added to compose without the chart turns this
+# red.
+compose_env() {
+  local unset=() v
+  for v in $(env | grep -oE '^(SDLC|OTEL|POSTGRES)_[A-Z0-9_]*' || true); do unset+=(-u "$v"); done
+  env ${unset[@]+"${unset[@]}"} -u CADENCE_REGISTRY POSTGRES_PASSWORD=x CADENCE_VERSION="$version" \
+    COMPOSE_FILE=docker-compose.yml:compose.proxy.yml docker compose config --format json |
+    jq -c --arg s "$1" '.services[$s].environment'
+}
+chart_env() { jq -c --arg d "cadence-$2" '.[] | select(.kind == "Deployment" and .metadata.name == $d) | .spec.template.spec.containers[0].env | map({(.name): .value}) | add' <<<"$1"; }
+# shellcheck disable=SC2016 # the backticks of the markdown table
+secret_values_of_table="$(sed -E 's/^\| `([A-Z0-9_<>]+)`.*/\1/' <<<"$secret_rows" | grep -vE '_FILE$|<' || true)"
+for svc in api worker; do
+  c_env="$(compose_env "$svc")"
+  h_env="$(chart_env "$min_json" "$svc")"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    c_val="$(jq -r --arg k "$name" '.[$k]' <<<"$c_env")"
+    h_has="$(jq -r --arg k "$name" 'has($k)' <<<"$h_env")"
+    h_val="$(jq -r --arg k "$name" '.[$k] // ""' <<<"$h_env")"
+    if [ "$name" = SDLC_DATABASE_URL ]; then
+      # The URL without a password (database.url), as compose passes the URL
+      # beside SDLC_DATABASE_PASSWORD_FILE; the URL with one comes as a file.
+      if [ "$h_has" = true ]; then pass "[$svc] SDLC_DATABASE_URL: in the chart from database.url, the URL without a password"; else fail "[$svc] SDLC_DATABASE_URL is not in the chart"; fi
+    elif grep -qxF -- "$name" <<<"$secret_values_of_table"; then
+      if [ "$h_has" = false ]; then pass "[$svc] $name: a secret, only ${name}_FILE in the chart"; else fail "[$svc] $name: a secret has a value in the chart"; fi
+    elif [[ "$name" == *_FILE ]]; then
+      continue
+    elif [ "$name" = SDLC_BLOB_DIR ]; then
+      if [ "$h_has" = false ]; then pass "[$svc] SDLC_BLOB_DIR: not in the chart (the pods share no volume, S3 is required)"; else fail "[$svc] SDLC_BLOB_DIR is in the chart"; fi
+    elif [ "$name" = SDLC_BLOB_S3_BUCKET ]; then
+      # Empty in compose (the volume), required in the chart.
+      if [ "$h_has" = true ]; then pass "[$svc] SDLC_BLOB_S3_BUCKET: in the chart from blobs.s3.bucket"; else fail "[$svc] SDLC_BLOB_S3_BUCKET is not in the chart"; fi
+    elif [ "$h_has" = false ]; then
+      fail "[$svc] $name of docker-compose.yml is not in the chart (charts/cadence/values.yaml config, or an exception of ci/check-config.sh)"
+    elif [ "$h_val" = "$c_val" ]; then
+      pass "[$svc] $name=$c_val as in docker-compose.yml"
+    else
+      fail "[$svc] $name is '$h_val' in the chart, '$c_val' in docker-compose.yml"
+    fi
+  done < <(jq -r 'keys[]' <<<"$c_env")
+  # And nothing in the chart that compose does not know, but the path style
+  # of the bucket (the default of the service in compose) and the files of
+  # secrets.
+  extra="$(jq -r --argjson c "$c_env" 'keys[] | select(. as $k | $c | has($k) | not) | select(endswith("_FILE") | not) | select(. != "SDLC_BLOB_S3_PATH_STYLE")' <<<"$h_env" | tr '\n' ' ')"
+  check "[$svc] the chart has no variable docker-compose.yml lacks${extra:+: $extra}" [ -z "$extra" ]
+done
+# The values docker-compose.yml fixes, fixed in the chart too (one line per
+# container and variable).
+fixed_of() {
+  jq -r --arg d "cadence-$1" --arg n "$2" '.[] | select(.kind == "Deployment" and .metadata.name == $d) |
+    .spec.template.spec.containers[0].env[] | select(.name == $n) | .value' <<<"$min_json"
+}
+while read -r svc name want; do
+  check "[$svc] $name is $want, as docker-compose.yml fixes it" [ "$(fixed_of "$svc" "$name")" = "$want" ]
+done <<'EOF'
+api SDLC_ENV production
+api SDLC_STRICT_GATES true
+api SDLC_MCP_ENABLED true
+api SDLC_AUTO_MIGRATE true
+api SDLC_TENANCY single
+api SDLC_PROJECT_CREATION teams
+api SDLC_METRICS_ADDR :9090
+worker SDLC_ENV production
+worker SDLC_AUTO_MIGRATE false
+worker SDLC_METRICS_ADDR :9090
+EOF
+
+# Secrets: every X_FILE compose passes is the path of a key in the chart once
+# its key is set, and no secret has a value anywhere in a manifest.
+all_keys=(--set secrets.keys.SDLC_GITHUB_TOKEN=gh --set secrets.keys.SDLC_GITHUB_APP_KEY_FILE=app-key
+  --set secrets.keys.SDLC_GITHUB_APP_CLIENT_SECRET=app-secret --set secrets.keys.SDLC_GITHUB_WEBHOOK_SECRET=other/hook
+  --set secrets.keys.SDLC_EMBEDDINGS_API_KEY=emb --set secrets.keys.SDLC_VOYAGE_API_KEY=voyage
+  --set secrets.keys.SDLC_BLOB_S3_SESSION_TOKEN=s3-session)
+all_json="$(render_json -f "$dist/min-values.yaml" "${all_keys[@]}")"
+pw_json="$(render_json -f "$dist/min-values.yaml" --set secrets.keys.SDLC_DATABASE_URL= \
+  --set database.url=postgres://cadence@db/cadence --set secrets.keys.SDLC_DATABASE_PASSWORD=db-password)"
+for svc in api worker; do
+  c_files="$(compose_env "$svc" | jq -r 'keys[] | select(endswith("_FILE"))' | grep -vx SDLC_DATABASE_PASSWORD_FILE | sort | tr '\n' ' ')"
+  h_files="$(chart_env "$all_json" "$svc" | jq -r 'keys[] | select(endswith("_FILE"))' | grep -vx SDLC_BLOB_S3_SESSION_TOKEN_FILE | sort | tr '\n' ' ')"
+  check "[$svc] with every key set the chart passes the X_FILE of docker-compose.yml: $h_files" [ "$c_files" = "$h_files" ]
+  check "[$svc] ...plus SDLC_BLOB_S3_SESSION_TOKEN_FILE (compose.override.yml in compose)" \
+    [ "$(chart_env "$all_json" "$svc" | jq -r .SDLC_BLOB_S3_SESSION_TOKEN_FILE)" = /secrets/cadence/s3-session ]
+  check "[$svc] the URL without a password: SDLC_DATABASE_PASSWORD_FILE, no SDLC_DATABASE_URL_FILE" \
+    [ "$(chart_env "$pw_json" "$svc" | jq -r '"\(.SDLC_DATABASE_PASSWORD_FILE) \(.SDLC_DATABASE_URL_FILE)"')" = "/secrets/cadence/db-password null" ]
+done
+check "every X_FILE is a path under /secrets/<secret>/<key>, a key of another Secret too" \
+  [ "$(chart_env "$all_json" api | jq -r '[to_entries[] | select(.key | endswith("_FILE")) | .value | test("^/secrets/[a-z0-9.-]+/[-._a-zA-Z0-9]+$")] | all')" = true ]
+check "...other/hook is the key hook of the Secret other" [ "$(chart_env "$all_json" api | jq -r .SDLC_GITHUB_WEBHOOK_SECRET_FILE)" = /secrets/other/hook ]
+check "the worker gets no sign-in or webhook secret" \
+  [ "$(chart_env "$all_json" worker | jq -r '[keys[] | select(test("ADMIN_TOKEN|APP_CLIENT_SECRET|WEBHOOK_SECRET"))] | length')" = 0 ]
+check "SDLC_DATABASE_URL of database.url carries no password" \
+  [ "$(jq -r '[.[] | .. | objects | select(.name? == "SDLC_DATABASE_URL") | .value] | unique | join(" ")' <<<"$pw_json")" = "postgres://cadence@db/cadence" ]
+for name in $secret_values_of_table; do
+  case "$name" in POSTGRES_PASSWORD | SDLC_DATABASE_URL) continue ;; esac
+  check "no manifest has a value of $name" [ "$(jq -r --arg k "$name" '[.. | objects | select(.name? == $k and has("value"))] | length' <<<"$all_json")" = 0 ]
+done
+check "the keys are mounted read-only from the Secrets (projected, 0440, fsGroup 65532)" \
+  [ "$(jq -r '.[] | select(.metadata.name == "cadence-api" and .kind == "Deployment") | .spec.template.spec | "\(.volumes[0].projected.defaultMode) \(.securityContext.fsGroup) \(.containers[0].volumeMounts[0].readOnly)"' <<<"$all_json")" = "288 65532 true" ]
+check "the precheck gets only the database" \
+  [ "$(jq -r '.[] | select(.kind == "Job") | [.spec.template.spec.containers[0].env[].name] | sort | join(" ")' <<<"$all_json")" = "SDLC_DATABASE_URL SDLC_DATABASE_URL_FILE" ]
+# values.yaml and the example hold references, never values: every entry of
+# secrets.keys is empty or a key name, and no other field is a secret.
+check "values.yaml: every entry of secrets.keys is empty" [ "$(jq -r '[.secrets.keys[]] | unique | join(",")' <<<"$values_json")" = "" ]
+example_values_json="$(yaml_json <"$dist/example-values.yaml")"
+check "the example: secrets.keys are key names" \
+  [ "$(jq -r '[.secrets.keys // {} | .[] | test("^([a-z0-9.-]+/)?[-._a-zA-Z0-9]+$")] | all' <<<"$example_values_json")" = true ]
+check "the example has no other field of a password, token or secret key" \
+  [ -z "$(jq -r 'paths(scalars) | map(tostring) | join(".") | select(test("password|token|secret"; "i")) | select(startswith("secrets.") or . == "ingress.tls.secretName" | not)' <<<"$example_values_json")" ]
+
+# Pod Security: api, worker, their init container and the hook - restricted.
+sc="$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | select(.metadata.name != "cadence-ui") | .spec.template.spec as $p |
+  ($p.containers + ($p.initContainers // []))[] | "\($p.securityContext.runAsNonRoot) \($p.securityContext.runAsUser) \(.securityContext.runAsNonRoot) \(.securityContext.runAsUser) \(.securityContext.readOnlyRootFilesystem) \(.securityContext.allowPrivilegeEscalation) \(.securityContext.capabilities.drop | join(",")) \(.securityContext.seccompProfile.type)"] | unique | join("|")' <<<"$min_json")"
+check "api, worker, wait-for-api and dbcheck: non-root 65532, read-only root, no escalation, drop ALL, RuntimeDefault" \
+  [ "$sc" = "true 65532 true 65532 true false ALL RuntimeDefault" ]
+check "every pod mounts no service account token" \
+  [ "$(jq -r '[.[] | .spec.template.spec // empty | .automountServiceAccountToken] | unique | join(",")' <<<"$min_json")" = false ]
+check "api and worker are Recreate" \
+  [ "$(jq -r '[.[] | select(.kind == "Deployment" and (.metadata.name | test("api|worker"))) | .spec.strategy.type] | unique | join(",")' <<<"$min_json")" = Recreate ]
+probes="$(jq -r '.[] | select(.metadata.name == "cadence-api" and .kind == "Deployment") | .spec.template.spec.containers[0] | "\(.startupProbe.httpGet.path) \(.readinessProbe.httpGet.path) \(.livenessProbe.httpGet.path)"' <<<"$min_json")"
+check "api probes: startup and readiness /readyz, liveness /healthz" [ "$probes" = "/readyz /readyz /healthz" ]
+check "the worker waits for the API: /api healthcheck on the Service" \
+  [ "$(jq -r '.[] | select(.metadata.name == "cadence-worker" and .kind == "Deployment") | .spec.template.spec.initContainers[0] | "\(.command | join(" ")) \(.env[0].value)"' <<<"$min_json")" = "/api healthcheck cadence-api:8080" ]
+check "the precheck is a pre-install,pre-upgrade hook with /api dbcheck --install" \
+  [ "$(jq -r '.[] | select(.kind == "Job") | "\(.metadata.annotations["helm.sh/hook"]) \(.spec.template.spec.containers[0].args | join(" "))"' <<<"$min_json")" = "pre-install,pre-upgrade dbcheck --install --timeout 15s" ]
+check "metrics.enabled=false: no listener, no metrics port" \
+  [ "$(render_json -f "$dist/min-values.yaml" --set metrics.enabled=false | jq -r '[.. | objects | select(.name? == "SDLC_METRICS_ADDR") | .value] + [.. | objects | select(.name? == "metrics") | .name] | unique | join(",")')" = "" ]
+
+# Every key of the values docs/admin.md names is a key of values.yaml.
+k8s_doc="$(awk '/^## Kubernetes \(Helm\)$/ { on = 1; next } on && /^## / { exit } on' docs/admin.md)"
+check "docs/admin.md has the section ## Kubernetes (Helm)" [ -n "$k8s_doc" ]
+value_paths="$(jq -r 'paths | map(tostring) | join(".")' <<<"$values_json")"
+documented=0
+# shellcheck disable=SC2016 # the backticks of markdown
+while read -r key; do
+  documented=$((documented + 1))
+  check "docs/admin.md names $key: a key of values.yaml" grep -qxF -- "$key" <<<"$value_paths"
+done < <(grep -oE '`(image|imagePullSecrets|ingress|database|blobs|secrets|config|extraEnv|metrics|api|worker|ui|dbcheck|serviceAccount)(\.[A-Za-z0-9_]+)+`' <<<"$k8s_doc" | tr -d '`' | sort -u)
+check "docs/admin.md names keys of values.yaml" [ "$documented" -gt 0 ]
+check "docs/admin.md no longer says the chart is coming" lacks "$(cat docs/admin.md)" "coming in a later"
+check "README.md names the Helm chart" grep -qF "charts/cadence" README.md
 
 [ "$failures" -eq 0 ] || die "$failures check(s) failed"
 ok "configuration checks passed"

@@ -1,0 +1,19 @@
+{{- $scheme := ternary "https" "http" (ne .Values.ingress.tls.secretName "") -}}
+{{- $ref := include "cadence.secretRef" (list . .Values.secrets.keys.SDLC_ADMIN_TOKEN "secrets.keys.SDLC_ADMIN_TOKEN") | fromYaml -}}
+Cadence Lab {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}" in the namespace {{ .Release.Namespace }}.
+
+Address: {{ $scheme }}://{{ .Values.ingress.host }}
+
+The API applies the migrations on start; the worker waits for it:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "cadence.fullname" . }}-api
+
+First sign-in: the administrator token is the key {{ $ref.key }} of the Secret
+{{ $ref.secret }}. Paste it on the sign-in page of the address above, or give
+it to the CLI:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ $ref.secret }} -o go-template='{{ "{{" }}index .data "{{ $ref.key }}" | base64decode{{ "}}" }}' >admin-token
+  clab auth login --host {{ $scheme }}://{{ .Values.ingress.host }} --with-token <admin-token && rm admin-token
+
+Then teams, projects and the first cycle: docs/admin.md of the package,
+"Teams, projects and invites" and "First cycle and roles".

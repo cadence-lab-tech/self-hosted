@@ -12,6 +12,10 @@
 #   Linux           the address of docker0 (172.17.0.1), the container in
 #                   the host network listening on that address and on
 #                   127.0.0.1 of the machine
+#   EXT_DB_NETWORK  set: the container in that Docker network under the name
+#                   EXT_DB_ALIAS (default extdb), nothing published - for
+#                   the pods of a kind cluster (ci/check-helm.sh, the network
+#                   "kind")
 #
 # The superuser works on it with docker exec psql -h 127.0.0.1: TCP, so the
 # wait sees the real server, not the one initdb runs on the socket, and
@@ -33,9 +37,13 @@
 EXT_DB_IMAGE="${EXT_DB_IMAGE:-pgvector/pgvector:pg18}"
 
 # ext_db_host prints the host name containers reach the stand-in by and sets
-# EXT_DB_BIND (where it listens) and EXT_DB_MODE (desktop or linux).
+# EXT_DB_BIND (where it listens) and EXT_DB_MODE (desktop, linux or network).
 ext_db_where() {
-  if docker info --format '{{.OperatingSystem}}' 2>/dev/null | grep -q 'Docker Desktop'; then
+  if [ -n "${EXT_DB_NETWORK:-}" ]; then
+    EXT_DB_MODE=network
+    EXT_DB_HOST="${EXT_DB_ALIAS:-extdb}"
+    EXT_DB_BIND=
+  elif docker info --format '{{.OperatingSystem}}' 2>/dev/null | grep -q 'Docker Desktop'; then
     EXT_DB_MODE=desktop
     EXT_DB_HOST=host.docker.internal
     EXT_DB_BIND=127.0.0.1
@@ -79,13 +87,20 @@ ext_db_up() {
   EXT_DB_SUPER_PASSWORD="$(openssl rand -hex 16)"
   EXT_DB_PASSWORD="Cad@nce/$(openssl rand -hex 8)%x"
   EXT_DB_PASSWORD_URL="$(printf '%s' "$EXT_DB_PASSWORD" | sed 's/%/%25/g; s/@/%40/g; s:/:%2F:g')"
-  if [ "$EXT_DB_MODE" = linux ]; then
+  case "$EXT_DB_MODE" in
+  linux)
     net=(--network host)
     listen="$EXT_DB_BIND,127.0.0.1"
-  else
+    ;;
+  network)
+    net=(--network "$EXT_DB_NETWORK" --network-alias "$EXT_DB_HOST")
+    listen='*'
+    ;;
+  *)
     publish=(-p "$EXT_DB_BIND:$port:$port")
     listen='*'
-  fi
+    ;;
+  esac
   docker run -d --name "$name" ${net[@]+"${net[@]}"} ${publish[@]+"${publish[@]}"} \
     -e POSTGRES_PASSWORD="$EXT_DB_SUPER_PASSWORD" -v "$dir:/certs-src:ro" \
     --entrypoint sh "$EXT_DB_IMAGE" -c "

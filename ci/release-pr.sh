@@ -9,7 +9,8 @@
 #   - otherwise                                   branch release/vX.Y.Z, PR
 #
 # The pull request moves VERSION and pins both images to the digests of
-# their indexes (docker-compose.yml, ci/pins.sh) - but only once both
+# their indexes (docker-compose.yml and the values of the Helm chart,
+# ci/pins.sh), with the version of the chart - but only once both
 # images of the version are signed by release.yml of their repository on the
 # tag (cosign keyless, the identity is the workflow on refs/tags/vX.Y.Z).
 # An image without such a signature, or whose tag points at another digest
@@ -84,13 +85,16 @@ git switch --quiet -C "$branch"
 printf '%s\n' "$version" >VERSION
 for image in $PIN_IMAGES; do
   set_pin "$image" "$(digest_of "$image")" || die "could not pin $image to $(digest_of "$image") in docker-compose.yml"
+  set_chart_pin "$image" "$(digest_of "$image")" || die "could not pin $image to $(digest_of "$image") in $CHART_VALUES"
 done
-git commit --quiet -m "VERSION → $version" -- VERSION docker-compose.yml
+set_chart_version "$version" || die "could not set the version $version in $CHART_FILE"
+git commit --quiet -m "VERSION → $version" -- VERSION docker-compose.yml "$CHART_VALUES" "$CHART_FILE"
 # The branch belongs to this workflow: a leftover from a closed pull request
 # is replaced.
 git push --quiet --force origin "$branch"
 
-body="Released images, signatures verified, pinned in \`docker-compose.yml\`:
+body="Released images, signatures verified, pinned in \`docker-compose.yml\` and
+\`$CHART_VALUES\` (chart $version):
 
 - \`$PIN_REGISTRY/$(pin_repo backend):$version@$(digest_of backend)\`
 - \`$PIN_REGISTRY/$(pin_repo frontend):$version@$(digest_of frontend)\`
