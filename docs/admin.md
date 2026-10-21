@@ -1713,6 +1713,40 @@ trivy image --vex openvex.json ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0
 grype ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 --vex openvex.json
 ```
 
+The operating system layer of the backend image has no known findings: from
+the release after v0.11.0 the image is built on
+`gcr.io/distroless/static-debian13:nonroot`. Up to v0.11.0 it was built on
+`static-debian12`, which gets no Debian LTS updates, and a scanner reports
+tzdata `DLA-4792-1` and ca-certificates `DLA-4845-1` in it; the services
+trust the CA bundle of the image for TLS (GitHub, OIDC, embeddings, S3), so
+upgrade rather than suppress them. The user and group of the image stay
+`nonroot` (65532): the `blobs` volume of an existing installation needs no
+change.
+
+How base images are kept up to date:
+
+- every `FROM` of the backend and frontend `Dockerfile` is pinned by digest
+  (`golang:1.26-alpine`, `distroless/static-debian13:nonroot`,
+  `node:24-alpine`, `caddy:2-alpine`); Dependabot proposes a new digest of
+  the same tag once a week, and the image is built on the pull request
+  before it is merged;
+- a new base reaches your installation with the next release; a finding in a
+  base image that affects Cadence Lab is a reason for a patch release on its
+  own;
+- a new line of a base image (Go, Node, Caddy, Debian) is a separate change,
+  never an automatic one;
+- the third-party images of the stack, `pgvector/pgvector:pg17` and
+  `caddy:2-alpine` in `docker-compose.yml`, are used by tag, as their
+  maintainers publish them: their findings are upstream ones, and
+  `docker compose pull` brings their fixes. The frontend image is built on
+  `caddy:2-alpine` too and shows the same findings in `/usr/bin/caddy` until
+  Caddy is rebuilt upstream.
+
+```bash
+# the operating system of the backend image and its findings
+trivy image --scanners vuln --vex oci ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:"$(cat VERSION)"
+```
+
 ## Managing the installation with clab server
 
 `clab` v0.7.0 and later manages the installation on its machine with the
