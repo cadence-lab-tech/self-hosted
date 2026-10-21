@@ -961,9 +961,26 @@ for svc in api worker; do
   extra="$(jq -r --argjson c "$c_env" 'keys[] | select(. as $k | $c | has($k) | not) | select(endswith("_FILE") | not) | select(. != "SDLC_BLOB_S3_PATH_STYLE")' <<<"$h_env" | tr '\n' ' ')"
   check "[$svc] the chart has no variable docker-compose.yml lacks${extra:+: $extra}" [ -z "$extra" ]
 done
-fixed="$(jq -r '[.[] | select(.kind == "Deployment" and (.metadata.name | test("api|worker"))) | .metadata.name as $d | .spec.template.spec.containers[0].env[] |
-  select(.name | IN("SDLC_ENV","SDLC_STRICT_GATES","SDLC_MCP_ENABLED","SDLC_AUTO_MIGRATE","SDLC_TENANCY","SDLC_PROJECT_CREATION","SDLC_METRICS_ADDR")) | "\($d):\(.name)=\(.value)"] | sort | join(" ")' <<<"$min_json")"
-check "fixed values as in docker-compose.yml: $fixed" [ "$fixed" = "cadence-api:SDLC_AUTO_MIGRATE=true cadence-api:SDLC_ENV=production cadence-api:SDLC_MCP_ENABLED=true cadence-api:SDLC_METRICS_ADDR=:9090 cadence-api:SDLC_PROJECT_CREATION=teams cadence-api:SDLC_STRICT_GATES=true cadence-api:SDLC_TENANCY=single cadence-worker:SDLC_AUTO_MIGRATE=false cadence-worker:SDLC_ENV=production cadence-worker:SDLC_METRICS_ADDR=:9090" ]
+# The values docker-compose.yml fixes, fixed in the chart too (one line per
+# container and variable).
+fixed_of() {
+  jq -r --arg d "cadence-$1" --arg n "$2" '.[] | select(.kind == "Deployment" and .metadata.name == $d) |
+    .spec.template.spec.containers[0].env[] | select(.name == $n) | .value' <<<"$min_json"
+}
+while read -r svc name want; do
+  check "[$svc] $name is $want, as docker-compose.yml fixes it" [ "$(fixed_of "$svc" "$name")" = "$want" ]
+done <<'EOF'
+api SDLC_ENV production
+api SDLC_STRICT_GATES true
+api SDLC_MCP_ENABLED true
+api SDLC_AUTO_MIGRATE true
+api SDLC_TENANCY single
+api SDLC_PROJECT_CREATION teams
+api SDLC_METRICS_ADDR :9090
+worker SDLC_ENV production
+worker SDLC_AUTO_MIGRATE false
+worker SDLC_METRICS_ADDR :9090
+EOF
 
 # Secrets: every X_FILE compose passes is the path of a key in the chart once
 # its key is set, and no secret has a value anywhere in a manifest.
