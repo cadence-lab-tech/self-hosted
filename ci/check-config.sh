@@ -44,7 +44,7 @@ info "layout"
 for f in docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml .env.example Caddyfile README.md docs/admin.md LICENSE SECURITY.md VERSION; do
   check "$f exists" [ -f "$f" ]
 done
-for f in install.sh upgrade.sh backup.sh restore.sh get-cadence.sh ci/package.sh; do
+for f in install.sh upgrade.sh backup.sh restore.sh get-cadence.sh ci/package.sh ci/check-verify.sh; do
   check "$f is executable" [ -x "$f" ]
 done
 check "VERSION is vX.Y.Z" valid_version "$version"
@@ -371,6 +371,31 @@ check "docs/admin.md has the known scanner findings with GO-2026-5932" contains 
 for f in README.md docs/admin.md; do
   check "$f no longer says signatures are planned" lacks "$(cat "$f")" "are planned"
 done
+
+info "verifying a release (CADENCE_VERIFY)"
+# The scripts verify by themselves (lib.sh, "signatures"); get-cadence.sh
+# repeats the rules in POSIX sh, with the same constants.
+for mode in auto require off; do
+  check "docs/admin.md describes CADENCE_VERIFY=$mode" contains "$admin" "\`$mode\`"
+done
+check "docs/admin.md has the automatic verification with its table" contains "$admin" "### Automatic verification"
+check "docs/admin.md no longer says the installer does not check the signatures" lacks "$admin" "does not check the"
+check ".env.example documents CADENCE_VERIFY, commented out" grep -qxF "# CADENCE_VERIFY=auto" .env.example
+check ".env.example does not set CADENCE_VERIFY" lacks "$(grep -v '^#' .env.example)" "CADENCE_VERIFY="
+for f in get-cadence.sh install.sh upgrade.sh README.md; do
+  check "$f names CADENCE_VERIFY" grep -qF CADENCE_VERIFY "$f"
+done
+# same_constant NAME_IN_GET NAME_IN_LIB: get-cadence.sh and lib.sh agree.
+same_constant() {
+  [ "$(sed -n "s/^$1=//p" get-cadence.sh)" = "$(bash -c ". ./lib.sh && printf '%s' \"\$$2\"")" ]
+}
+check "get-cadence.sh and lib.sh: the same first signed version" same_constant FIRST_SIGNED VERIFY_FIRST_SIGNED
+check "...the same issuer" same_constant ISSUER VERIFY_ISSUER
+check "...the same identity of the package" same_constant PACKAGE_IDENTITY VERIFY_PACKAGE_IDENTITY
+check "...the same bundle" same_constant BUNDLE VERIFY_BUNDLE
+check "lib.sh: the identity of the package is the one docs/admin.md names" contains "$admin" "$VERIFY_PACKAGE_IDENTITY"
+check "lib.sh: the identity of an image is the one ci/pins.sh pins with" \
+  [ "$(verify_identity sdlc-pipeline-backend v1.2.3)" = "$(pin_identity backend v1.2.3)" ]
 
 info "bundles/starter.json"
 bundle=bundles/starter.json

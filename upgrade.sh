@@ -9,7 +9,11 @@
 #   ./upgrade.sh --force v0.6.0   # also replace package files edited here
 #
 # The package of the release is downloaded with its checksums.txt and
-# verified before anything changes. Package files edited here stop the
+# verified before anything changes: the checksum, and - with cosign 3.x in
+# PATH - the signature of checksums.txt and of both images of the new
+# version (CADENCE_VERIFY in .env or the environment: auto, the default,
+# warns without cosign, require refuses, off skips; docs/admin.md,
+# "Verifying a release"). Package files edited here stop the
 # upgrade with their list: keep settings in .env and compose changes in
 # compose.override.yml. With --force they are replaced; the edited copies stay
 # in backups/package-<old version>-<date>.tar.gz. .env, compose.override.yml,
@@ -30,6 +34,7 @@
 #
 #   CADENCE_READY_TIMEOUT  seconds to wait for readiness, default 300
 #   CADENCE_RELEASES_URL   a mirror of the releases (see lib.sh, "releases")
+#   CADENCE_VERIFY         auto, require or off (see lib.sh, "signatures")
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -85,7 +90,7 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
     --force) force=true; shift ;;
-    -h | --help) sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'; return 0 ;;
+    -h | --help) sed -n '3,37p' "$0" | sed 's/^# \{0,1\}//'; return 0 ;;
     -*) die "unknown option: $1" ;;
     *) [ -z "$target_version" ] || die "one version at a time"; target_version="$1"; shift ;;
     esac
@@ -100,6 +105,7 @@ main() {
   require_docker
   command -v curl >/dev/null 2>&1 || die "curl is required to download the package of the release"
   check_mode
+  verify_init "Nothing has changed."
   local old_version="$CADENCE_VERSION" backups="${BACKUP_DIR:-backups}"
 
   # A local override that compose does not read is a change that silently
@@ -144,6 +150,7 @@ main() {
     ;;
   *) die "the checksum of $name does not match checksums.txt of $target_version: the download is broken or altered; nothing has changed" ;;
   esac
+  verify_package "$target_version" "$work" "Nothing has changed."
   mkdir "$work/new"
   tar -xpzf "$work/$name" -C "$work/new"
   [ -f "$work/new/$PACKAGE_MANIFEST" ] || die "$name has no $PACKAGE_MANIFEST: not a package of this repository"
@@ -156,6 +163,22 @@ main() {
     manifest_paths "$work/new/$PACKAGE_MANIFEST"
     printf '%s\n' "$PACKAGE_MANIFEST"
   } >"$work/new.list"
+  # The images of the new version as compose will run them: the compose
+  # files of COMPOSE_FILE from the new package, the local ones (the
+  # override) from here, with .env - verified before the external database
+  # is checked by them, before the backup and before any file is replaced.
+  local verify_compose=(--project-directory .) cf
+  local IFS_was="$IFS"
+  IFS=:
+  for cf in ${COMPOSE_FILE:-docker-compose.yml}; do
+    if [ -f "$work/new/$cf" ]; then
+      verify_compose+=(-f "$work/new/$cf")
+    elif [ -f "$cf" ]; then
+      verify_compose+=(-f "$cf")
+    fi
+  done
+  IFS="$IFS_was"
+  verify_images "$target_version" "Nothing has changed." "${verify_compose[@]}"
 
   # --- 2. package files edited here --------------------------------------------
   # The reference is the manifest of the running version: the one unpacked

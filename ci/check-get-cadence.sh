@@ -8,12 +8,22 @@
 # at pulling the images. Another stub stands in for git and records any call:
 # the installer must not need it. CI runs it next to ci/check-config.sh.
 #
+# The signature of the package (CADENCE_VERIFY, lib.sh "signatures"): a stub
+# cosign (ci/verify-stubs.sh) is called with the bundle of the release before
+# anything is unpacked; a bad signature, require without cosign, an unsigned
+# version with require and a release without the bundle are refused before
+# the directory exists; auto without cosign warns once and installs; off
+# calls no cosign. The scenarios without these words run with no cosign in
+# PATH, even on a machine that has one.
+#
 #   ci/check-get-cadence.sh
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 # shellcheck source=lib.sh
 . ./lib.sh
+# shellcheck source=ci/verify-stubs.sh
+. ./ci/verify-stubs.sh
 
 failures=0
 pass() { printf '  ✓ %s\n' "$*"; }
@@ -22,6 +32,7 @@ fail() {
   failures=$((failures + 1))
 }
 contains() { grep -qF -- "$2" <<<"$1"; }
+lacks() { ! grep -qF -- "$2" <<<"$1"; }
 
 shell="sh"
 if command -v dash >/dev/null 2>&1; then shell=dash; fi
@@ -34,13 +45,17 @@ trap 'rm -rf "$work"' EXIT
 # Releases: an older one and the current one, which is the latest.
 releases="$work/releases"
 ci/package.sh --version "$older" "$releases/download/$older" >/dev/null
-ci/package.sh "$releases/download/$version" >/dev/null
+ci/package.sh --bundle "$releases/download/$version" >/dev/null
 mkdir -p "$releases/latest"
 cp -R "$releases/download/$version" "$releases/latest/download"
 # A release whose package does not match its checksums.txt.
 broken=v0.0.2
 ci/package.sh --version "$broken" "$releases/download/$broken" >/dev/null
 printf 'x' >>"$releases/download/$broken/$(package_name "$broken")"
+# A signed version whose release has lost its signature (a mirror without
+# the bundle).
+nobundle=v99.1.0
+ci/package.sh --version "$nobundle" "$releases/download/$nobundle" >/dev/null
 
 stubs="$work/bin"
 mkdir -p "$stubs"
@@ -54,9 +69,17 @@ case "$*" in
 "ps -a -q --filter label=com.docker.compose.project=${STUB_TAKEN:-}") echo c0ffee; exit 0 ;;
 "ps -a -q --filter "* | "volume ls -q --filter "*) exit 0 ;;
 "inspect -f "*" c0ffee") echo /srv/other; exit 0 ;;
+*" config --images") exec "$(dirname "$0")/compose-images" "$@" ;;
 *) echo "docker stub: $*" >&2; exit 1 ;;
 esac
 SH
+stub_compose_images "$stubs/compose-images"
+stub_curl "$stubs"
+cosign_dir="$work/cosign"
+stub_cosign "$cosign_dir" "$work/cosign.log"
+# No cosign of this machine: the scenarios choose.
+nocosign_path="$(path_without_cosign)"
+
 cat >"$stubs/git" <<SH
 #!/bin/sh
 echo "git \$*" >>"$work/git-calls"
@@ -70,12 +93,12 @@ get() {
   local dir="$1"
   shift
   mkdir -p "$dir"
-  (cd "$dir" && PATH="$stubs:$PATH" CADENCE_RELEASES_URL="file://$releases" \
+  (cd "$dir" && PATH="$stubs:${COSIGN_PATH:+$COSIGN_PATH:}$nocosign_path" CADENCE_RELEASES_URL="file://$releases" \
     "$shell" -s -- "$@" <"$OLDPWD/get-cadence.sh" 2>&1)
 }
 # The installation name comes from --name or COMPOSE_PROJECT_NAME; the
 # checks set the variable themselves, the caller's does not leak in.
-unset COMPOSE_PROJECT_NAME
+unset COMPOSE_PROJECT_NAME CADENCE_VERIFY CADENCE_VERIFY_NOTED COSIGN_PATH
 
 info "get-cadence.sh under $shell"
 
@@ -118,7 +141,7 @@ else
   fail "--version $older --dir there: $out"
 fi
 mkdir -p "$work/env"
-if ! out="$(cd "$work/env" && PATH="$stubs:$PATH" CADENCE_RELEASES_URL="file://$releases" \
+if ! out="$(cd "$work/env" && PATH="$stubs:$nocosign_path" CADENCE_RELEASES_URL="file://$releases" \
   CADENCE_INSTALL_VERSION="$older" CADENCE_INSTALL_DIR=viaenv "$shell" -s -- --mode proxy --http-addr 127.0.0.1:1 --yes \
   <"$OLDPWD/get-cadence.sh" 2>&1)"; then
   : # install.sh stops at the image pull; what matters is what was unpacked
@@ -237,6 +260,103 @@ if [ "$status" != 0 ] && contains "$out" "is not empty" && [ ! -e "$work/busy/ca
 else
   fail "a non-empty directory: status $status, $out"
 fi
+
+info "the signature of the package"
+pkg_identity="$VERIFY_PACKAGE_IDENTITY"
+# signed DIR ARGS...: get with the stub cosign in PATH; $out, $status and
+# $cosign_log.
+signed() {
+  local d="$1"
+  shift
+  : >"$work/cosign.log"
+  out="$(COSIGN_PATH="$cosign_dir" FAKE_WATCH="$d/cadence" get "$d" "$@")" && status=0 || status=$?
+  cosign_log="$(cat "$work/cosign.log")"
+}
+nodir() { [ ! -e "$1/cadence" ]; }
+proxy_args=(--mode proxy --http-addr 127.0.0.1:1 --yes)
+
+signed "$work/sig-ok" "${proxy_args[@]}"
+if contains "$cosign_log" "[verify-blob] [--bundle] [" && contains "$cosign_log" "/$VERIFY_BUNDLE] [--certificate-identity] [$pkg_identity] [--certificate-oidc-issuer] [$VERIFY_ISSUER] [" &&
+  contains "$cosign_log" "/checksums.txt] [absent]"; then
+  pass "cosign verify-blob --bundle $VERIFY_BUNDLE --certificate-identity $pkg_identity --certificate-oidc-issuer $VERIFY_ISSUER checksums.txt, before ./cadence exists"
+else
+  fail "cosign verify-blob with the bundle and the identity of self-hosted on main was not called before unpacking: $cosign_log"
+fi
+if contains "$out" "✓ the signature of checksums.txt of $version verified: signed by $pkg_identity" &&
+  contains "$out" "could not pull the images of $version"; then
+  pass "a verified package installs: install.sh reached the pull"
+else
+  fail "a verified package did not install: $out"
+fi
+if contains "$cosign_log" "[verify] [--certificate-identity] [$(verify_identity sdlc-pipeline-backend "$version")]"; then
+  pass "install.sh of the package verified the images"
+else
+  fail "install.sh of the package did not verify the images: $cosign_log"
+fi
+
+for mode in auto require; do
+  out="$(CADENCE_VERIFY="$mode" COSIGN_PATH="$cosign_dir" FAKE_COSIGN_BAD=package get "$work/sig-bad-$mode" --dir there "${proxy_args[@]}")" && status=0 || status=$?
+  if [ "$status" != 0 ] && contains "$out" "the signature of checksums.txt of $version did not verify for $pkg_identity" &&
+    contains "$out" "Nothing was installed." && [ ! -e "$work/sig-bad-$mode/there" ]; then
+    pass "$mode: checksums.txt signed by another identity is refused, naming checksums.txt, $version and the identity; --dir there not created"
+  else
+    fail "$mode: a bad signature of the package: status $status, $out"
+  fi
+done
+
+out="$(CADENCE_VERIFY=require get "$work/sig-none-require" "${proxy_args[@]}")" && status=0 || status=$?
+if [ "$status" != 0 ] && contains "$out" "CADENCE_VERIFY=require, but cosign 3.x is not installed" && nodir "$work/sig-none-require"; then
+  pass "require without cosign: refused before the directory"
+else
+  fail "require without cosign: status $status, $out"
+fi
+out="$(get "$work/sig-none-auto" "${proxy_args[@]}" || true)"
+if [ "$(grep -c '^! .*cosign' <<<"$out")" = 1 ] && contains "$out" "! cosign 3.x is not installed: the signatures of the release are not verified (CADENCE_VERIFY=auto)" &&
+  contains "$out" "could not pull the images of $version"; then
+  pass "auto without cosign: one warning, for the installer and install.sh together, and the installation goes on"
+else
+  fail "auto without cosign: $out"
+fi
+: >"$work/cosign.log"
+out="$(CADENCE_VERIFY=off COSIGN_PATH="$cosign_dir" get "$work/sig-off" "${proxy_args[@]}" || true)"
+if [ ! -s "$work/cosign.log" ] && [ "$(grep -c '^▸ signature verification is off (CADENCE_VERIFY=off)$' <<<"$out")" = 1 ] &&
+  lacks "$out" "! " && contains "$out" "could not pull the images of $version"; then
+  pass "off: no cosign call, one line '▸ signature verification is off', no warning, installed"
+else
+  fail "off: $(cat "$work/cosign.log") $out"
+fi
+out="$(CADENCE_VERIFY=yes get "$work/sig-yes" "${proxy_args[@]}")" && status=0 || status=$?
+if [ "$status" != 0 ] && contains "$out" "CADENCE_VERIFY is 'yes', expected auto, require or off" && nodir "$work/sig-yes"; then
+  pass "CADENCE_VERIFY=yes is refused with auto, require and off"
+else
+  fail "CADENCE_VERIFY=yes: status $status, $out"
+fi
+
+signed "$work/sig-old" --version "$older" "${proxy_args[@]}" || true
+if contains "$out" "! $older is not signed (signatures start with $VERIFY_FIRST_SIGNED)" && lacks "$cosign_log" "[verify" &&
+  [ "$(tr -d '[:space:]' <"$work/sig-old/cadence/VERSION" 2>/dev/null)" = "$older" ]; then
+  pass "auto, $older: '! $older is not signed', nothing verified, installed"
+else
+  fail "auto, $older: $out"
+fi
+out="$(CADENCE_VERIFY=require COSIGN_PATH="$cosign_dir" get "$work/sig-old-require" --version "$older" "${proxy_args[@]}")" && status=0 || status=$?
+if [ "$status" != 0 ] && contains "$out" "$older is not signed (signatures start with $VERIFY_FIRST_SIGNED), and CADENCE_VERIFY=require refuses it" &&
+  nodir "$work/sig-old-require"; then
+  pass "require, $older: refused before the directory"
+else
+  fail "require, $older: status $status, $out"
+fi
+
+for mode in auto require; do
+  out="$(CADENCE_VERIFY="$mode" COSIGN_PATH="$cosign_dir" get "$work/sig-nobundle-$mode" --version "$nobundle" "${proxy_args[@]}")" && status=0 || status=$?
+  if [ "$status" != 0 ] && contains "$out" "the release $nobundle has no $VERIFY_BUNDLE at file://$releases" &&
+    contains "$out" "Copy $VERIFY_BUNDLE of the release to the mirror, or set CADENCE_VERIFY=off. Nothing was installed." &&
+    nodir "$work/sig-nobundle-$mode"; then
+    pass "$mode with cosign: a release of $nobundle without $VERIFY_BUNDLE is refused before the directory"
+  else
+    fail "$mode, no bundle: status $status, $out"
+  fi
+done
 
 if [ -s "$work/git-calls" ]; then
   fail "git was called: $(tr '\n' ';' <"$work/git-calls")"

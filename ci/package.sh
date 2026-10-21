@@ -5,6 +5,8 @@
 #   ci/package.sh dist                      # the version in VERSION
 #   ci/package.sh --version v0.6.0 dist     # VERSION inside the package set
 #                                           # to v0.6.0 - for upgrade checks
+#   ci/package.sh --bundle dist             # also a stand-in
+#                                           # checksums.txt.sigstore.json
 #
 # writes into the output directory
 #
@@ -13,6 +15,11 @@
 #                                       it unpacks into the current one
 #   get-cadence.sh                      the one-line installer
 #   checksums.txt                       sha256 of the two, as sha256sum prints
+#   checksums.txt.sigstore.json         with --bundle: a stand-in for the
+#                                       signature that release.yml makes - not
+#                                       a signature, for checks whose cosign
+#                                       is a stub or accepts verify-blob of
+#                                       this package (ci/verify-stubs.sh)
 #
 # The package is a list, not "everything but": ci/, .github/, .git, .env,
 # backups/, secrets/ and the local compose.override.yml never get in.
@@ -36,10 +43,12 @@ PACKAGE_DIRS=(bundles docs)
 
 version=""
 out=""
+bundle=false
 while [ $# -gt 0 ]; do
   case "$1" in
   --version) version="${2:?--version needs vX.Y.Z}"; shift 2 ;;
-  -h | --help) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --bundle) bundle=true; shift ;;
+  -h | --help) sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   -*) die "unknown option: $1" ;;
   *) [ -z "$out" ] || die "one output directory"; out="$1"; shift ;;
   esac
@@ -102,5 +111,9 @@ chmod 755 "$out/get-cadence.sh"
   done
 ) >"$out/checksums.txt"
 chmod 644 "$out/$name" "$out/checksums.txt"
+if [ "$bundle" = true ]; then
+  printf '{"note": "a stand-in for checks, not a signature: ci/package.sh --bundle"}\n' >"$out/$VERIFY_BUNDLE"
+  chmod 644 "$out/$VERIFY_BUNDLE"
+fi
 
 ok "$out/$name ($(wc -c <"$out/$name" | tr -d ' ') bytes), get-cadence.sh, checksums.txt"

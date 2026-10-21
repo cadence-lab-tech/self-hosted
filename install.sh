@@ -28,6 +28,11 @@
 # copied to secrets/. The database is checked before anything is written
 # (docs/admin.md, "External PostgreSQL").
 #
+# Before anything is written it verifies the signatures of both images of
+# VERSION at ghcr.io by the digests docker-compose.yml pins - with cosign 3.x
+# in PATH; CADENCE_VERIFY=auto (the default) warns without it, require
+# refuses, off skips the check (docs/admin.md, "Verifying a release").
+#
 # It runs once. With an existing .env it stops and changes nothing:
 # regenerating the secrets would lock the database volume out with a new
 # password.
@@ -38,7 +43,7 @@ cd "$(dirname "$0")"
 . ./lib.sh
 
 usage() {
-  sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -109,6 +114,7 @@ name="${name:-${env_name:-$CADENCE_DEFAULT_NAME}}"
 valid_name "$name" || die "'$name' is not a valid installation name (--name): $(name_rule)"
 
 info "checking the environment"
+verify_init "Nothing was installed."
 require_docker
 load_version
 # Another installation under the same name would share its containers and
@@ -144,6 +150,14 @@ gen_hex() {
 }
 # Fail before any question, not after the answers.
 [ -n "$(gen_hex 4)" ] || die "could not generate a random secret (openssl or /dev/urandom)"
+
+# The images of VERSION, as compose will run them - pins, CADENCE_REGISTRY
+# and a compose.override.yml put here before the installation - are verified
+# before any question, before the precheck of an external database runs the
+# backend image and before .env is written.
+verify_compose=(-f docker-compose.yml)
+[ ! -f compose.override.yml ] || verify_compose+=(-f compose.override.yml)
+verify_images "$CADENCE_VERSION" "Nothing was installed." "${verify_compose[@]}"
 
 # port_busy PORT [ADDR]: something already listens on the port.
 port_busy() {

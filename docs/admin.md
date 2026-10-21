@@ -55,6 +55,7 @@ flags:
 | `--version vX.Y.Z` | `CADENCE_INSTALL_VERSION` | the release to install, default the latest |
 | `--dir DIR` | `CADENCE_INSTALL_DIR` | where to unpack, default `./cadence`; must not exist or be empty |
 | | `CADENCE_RELEASES_URL` | a mirror of the releases, see [Releases and mirrors](#releases-and-mirrors) |
+| | `CADENCE_VERIFY` | `auto` (default), `require` or `off`: what to do with the signatures, see [Verifying a release](#verifying-a-release) |
 
 It stops before unpacking anything if the checksum does not match, if there
 is no such release, or if the directory already has a `.env` (then
@@ -62,9 +63,23 @@ is no such release, or if the directory already has a `.env` (then
 broken or altered download, not against a release replaced at its source.
 For that, from v0.9.0 `checksums.txt` and both images are signed by the
 release workflows of our repositories, and `docker-compose.yml` of the
-package pins the images by digest; the installer does not check the
-signatures itself yet — check them by hand as in
-[Verifying a release](#verifying-a-release) before you run it, or after.
+package pins the images by digest. With [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+3.x in `PATH` the installer verifies both: `get-cadence.sh` the signature
+of `checksums.txt` before it creates the directory, `install.sh` the
+signatures of the images before it asks anything, checks an external
+database or writes `.env`:
+
+```
+✓ the signature of checksums.txt of v0.12.0 verified: signed by https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main
+▸ verifying the signatures of the images of v0.12.0
+✓ ghcr.io/cadence-lab-tech/sdlc-pipeline-backend@sha256:… is signed by https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/v0.12.0
+✓ ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend@sha256:… is signed by https://github.com/cadence-lab-tech/sdlc-pipeline-frontend/.github/workflows/release.yml@refs/tags/v0.12.0
+```
+
+Without `cosign` it warns once and installs, as before; a signature that
+does not verify stops it with nothing installed. `CADENCE_VERIFY=require`
+also refuses without `cosign`, `off` skips the check — the table of what
+happens when is in [Verifying a release](#verifying-a-release).
 
 **With clab.** `clab` v0.8.0 and later installs the same way with one command
 and needs neither `curl`, `tar`, `sha256sum` nor `bash` — only Docker
@@ -88,8 +103,13 @@ variables of `install.sh` from the table below, `--name` and `--yes`
 | `--dir DIR` | the installation directory, default `$CADENCE_DIR`, else `./cadence`. It must not exist, be empty, or hold an unpacked package without `.env` — then that package is installed in place, with no download, and `--version` must match its `VERSION` |
 
 Every refusal — a `.env` already there, a taken installation name, a busy
-port, a missing domain in the `tls` mode, a checksum that does not match —
-comes before `.env` is written, and nothing is changed. If the images cannot
+port, a missing domain in the `tls` mode, a checksum or a signature that
+does not match — comes before `.env` is written, and nothing is changed.
+From v0.12.0 it verifies the signatures as the scripts do, with the same
+`CADENCE_VERIFY` and the same messages: of the package before the directory
+is created, of the images before the answers; installed in place (`--dir`
+with an unpacked package) it verifies the images only — there is no
+downloaded `checksums.txt` to check. If the images cannot
 be pulled or the stack does not become ready, `.env` is kept and the command
 prints how to start the stack. The result is the same directory as with
 `get-cadence.sh`: `clab server` and the scripts of the package both manage
@@ -1174,7 +1194,14 @@ needed. The script:
 1. finds the target — the latest release, or the one given — and refuses to
    go to an older version: migrations only go forward;
 2. downloads the package of the release and verifies it against the
-   `checksums.txt` of the release;
+   `checksums.txt` of the release; with `cosign` 3.x it also verifies the
+   signature of that `checksums.txt` and, once the package is unpacked
+   aside, the signatures of both images of the new version — the digests
+   its `docker-compose.yml` pins, with your `compose.override.yml` — before
+   the external database is checked by them, before the backup and before
+   any file changes. A signature that does not verify stops the upgrade
+   with nothing changed; `CADENCE_VERIFY` in `.env` (or the environment)
+   decides about no `cosign`, see [Verifying a release](#verifying-a-release);
 3. compares the package files here with `package.sha256` of the running
    version and stops, listing them, if any was edited (keep your settings in
    `.env` and local compose changes in `compose.override.yml`, see below);
@@ -1198,6 +1225,13 @@ needed. The script:
    does not update the CLI; until it is updated, every `clab` command warns
    that the CLI is older than the server. The upgrade runs the script of the
    version it starts from, so the reminder shows on upgrades from v0.6.1 on.
+
+The upgrade runs the `upgrade.sh` of the version it starts from: the first
+upgrade to v0.12.0, the release that brings the verification, runs the old
+script and verifies no signature (check them by hand, as in
+[Verifying a release](#verifying-a-release), or upgrade with `clab server
+upgrade` v0.12.0+, which verifies from the first upgrade on). Every later
+`./upgrade.sh` verifies.
 
 Skipping versions is fine. On an arm64 machine (Apple Silicon, Graviton,
 Ampere) the upgrade to v0.5.3 or later recreates `api`, `worker` and `ui`
@@ -1247,6 +1281,16 @@ copy the whole index with all its platforms and attestations, for example
 or `skopeo copy --all docker://… docker://…`; a mirror that rebuilds or
 re-pushes single-platform images has other digests, and the pull fails.
 Signatures are checked against `ghcr.io` by the same digest.
+
+A mirror of the releases must keep `checksums.txt.sigstore.json` of every
+release from v0.9.0 on: with `cosign` on the machine, a release without it
+is refused even with `CADENCE_VERIFY=auto` (a dropped signature is no
+reason to skip the check) — copy the asset to the mirror, or set
+`CADENCE_VERIFY=off`. A registry mirror in a closed network, where the
+machine does not reach `ghcr.io`, cannot have its images verified: `auto`
+warns `images not verified: ghcr.io is unreachable from this host` and
+goes on, `require` refuses; verify such images by hand where `ghcr.io` is
+reachable, and set `CADENCE_VERIFY=off` on the machine to drop the warning.
 
 ### Moving a git installation to release packages
 
@@ -1569,9 +1613,11 @@ it. Nothing here needs a key or an account: the signatures are made by
 short-lived certificate for the identity of the GitHub Actions workflow that
 signed it, and is recorded in the public transparency log. You need
 [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x
-and Docker with `buildx`; `cosign` is recommended on the machine of the
-installation but not required by the scripts. Versions before v0.9.0 are
-not signed.
+and Docker with `buildx`. Versions before v0.9.0 are not signed. With
+`cosign` on the machine of the installation the scripts and `clab server`
+verify the package and the images themselves (see
+[Automatic verification](#automatic-verification) below); the commands
+after it do the same by hand, and more.
 
 | what | signed by (`--certificate-identity`) |
 |---|---|
@@ -1585,8 +1631,55 @@ A signature by any other identity — another workflow, another repository,
 another tag — is not ours: if a check fails, do not install that release and
 report it privately (see [Security](#security)).
 
-**The package**, before unpacking it (`get-cadence.sh` verifies only the
-checksum):
+### Automatic verification
+
+`get-cadence.sh`, `install.sh`, `./upgrade.sh` and `clab server install`
+and `upgrade` (v0.12.0+) verify the signatures with the `cosign` they find
+in `PATH` — it must be 3.x (the format of the signature bundle; an older
+one counts as none):
+
+- the signature of `checksums.txt` of the release by its
+  `checksums.txt.sigstore.json`, with the identity of `self-hosted` on
+  `main` — right after the download, before the package is unpacked, then
+  the checksum of the package as before (`get-cadence.sh`,
+  `clab server install`, both upgrades);
+- the signatures of `sdlc-pipeline-backend` and `sdlc-pipeline-frontend`,
+  each at `ghcr.io/cadence-lab-tech/<image>@<digest>` with the identity of
+  its `release.yml` on the tag of `VERSION`; the digest is the one the
+  compose configuration of that version runs — the pin of
+  `docker-compose.yml`, your `compose.override.yml` included — whatever
+  `CADENCE_REGISTRY` the images are pulled from (`install.sh`,
+  `clab server install`, also in place, and both upgrades, for the new
+  version). It comes before anything runs an image of the version: before
+  the check of an external database, before `.env` is written, and in an
+  upgrade before the backup, the files and the pull.
+
+`CADENCE_VERIFY` — in the environment, and for an installed system also in
+its `.env`, which wins over the environment like every variable of the
+package — decides the rest. The installers do not write it to `.env`;
+without it the mode is `auto`:
+
+| case | `auto` (default) | `require` | `off` |
+|---|---|---|---|
+| `cosign` 3.x is there, the signatures verify | a `✓` line for each | the same | no check, one line `▸ signature verification is off (CADENCE_VERIFY=off)` |
+| a signature does not verify, or is by another identity | refused, nothing changed | refused | — |
+| no `cosign`, or one older than 3.x | one `!` warning, goes on | refused before anything is done | — |
+| a version before v0.9.0 (not signed) | `!` warning, goes on | refused | — |
+| a release of v0.9.0+ without `checksums.txt.sigstore.json` (a mirror that dropped it) | refused | refused | — |
+| an image without a digest (an empty `CADENCE_BACKEND_DIGEST`, an image of `compose.override.yml`) | `!` warning: not pinned, not verified | refused | — |
+| `ghcr.io` does not answer (a registry mirror in a closed network) | `!` warning: images not verified, goes on | refused | — |
+
+A refusal names what failed — the package or the image with its digest —
+and the identity it expected, says what to do and that nothing was
+installed or changed. `cosign` needs to reach `ghcr.io` and Sigstore (the
+public good instance) for the check; without them use `off` and verify by
+hand where they are reachable (see [Releases and mirrors](#releases-and-mirrors)).
+The first upgrade to v0.12.0 runs the older `upgrade.sh`, which verifies
+nothing — see [Upgrades and rollback](#upgrades-and-rollback).
+
+### By hand
+
+**The package**, before unpacking it:
 
 ```bash
 v=v0.9.0
@@ -1705,7 +1798,9 @@ directory or the nearest one above it with `VERSION` and `package.sha256`;
 `clab server install` creates it in `--dir DIR`, else `CADENCE_DIR`, else
 `./cadence` (see [Install](#install)).
 It reads the same `.env` and the same variables as the scripts
-(`BACKUP_DIR`, `KEEP_DAYS`, `BACKUP_S3_*`, `CADENCE_READY_TIMEOUT`, `CADENCE_RELEASES_URL`),
+(`BACKUP_DIR`, `KEEP_DAYS`, `BACKUP_S3_*`, `CADENCE_READY_TIMEOUT`, `CADENCE_RELEASES_URL`,
+and from v0.12.0 `CADENCE_VERIFY`: `install` and `upgrade` verify the
+signatures as the scripts do, see [Automatic verification](#automatic-verification)),
 takes the installation name from `COMPOSE_PROJECT_NAME` in `.env` and refuses
 another one in the environment, like the scripts (see
 [Several installations on one machine](#several-installations-on-one-machine)),
