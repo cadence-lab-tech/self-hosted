@@ -1,3 +1,4 @@
+{{- include "cadence.sections" . -}}
 {{- if .Values.dbcheck.enabled }}
 # The precheck of the database (/api dbcheck of the backend image of the
 # version being installed): before an installation (--install) and before an

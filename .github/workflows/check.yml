@@ -6,7 +6,8 @@
 #          one-line installer under dash (ci/check-get-cadence.sh), the
 #          signature verification of install.sh and upgrade.sh on stubs
 #          (ci/check-verify.sh), the release pull request
-#          (ci/check-release-pr.sh), the digests
+#          (ci/check-release-pr.sh), the publication of the chart on a
+#          stand-in helm (ci/check-publish-chart.sh), the digests
 #          docker-compose.yml pins against the tag of VERSION in the registry
 #          (ci/check-pins.sh: a moved tag fails it), secret scan
 #   stack  the stack on the published images of VERSION, in proxy mode,
@@ -85,6 +86,8 @@ jobs:
         run: ci/check-verify.sh
       - name: release pull request
         run: ci/check-release-pr.sh
+      - name: publication of the chart
+        run: ci/check-publish-chart.sh
       - name: pinned digests are the images of VERSION
         run: ci/check-pins.sh
       - name: no secrets in the history

@@ -1,3 +1,4 @@
+{{- include "cadence.sections" . -}}
 # The routes of the Caddyfile of the package: what the service handles goes
 # to the API, everything else to the UI. Port 9090 is never routed.
 {{- $api := printf "%s-api" (include "cadence.fullname" .) }}

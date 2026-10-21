@@ -1,3 +1,4 @@
+{{- include "cadence.sections" . -}}
 # The UI: static files served by Caddy inside the frontend image. The image
 # runs as root and listens on :80, so the pod meets Pod Security "baseline",
 # not "restricted" (docs/admin.md, "Kubernetes (Helm)"); everything else is

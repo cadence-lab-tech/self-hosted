@@ -30,6 +30,27 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- end -}}
 
 {{/*
+The sections of the values a template reads below the top level. A null in
+the values of a release (`database:` with nothing under it, --set
+database=null) makes Helm drop the section together with its defaults; the
+chart puts an empty one back, so a value it cannot do without is the
+refusal that names its key (cadence.validate, cadence.image), not a nil
+pointer. Every template that reads them includes this first; it changes
+nothing in a section that is there.
+*/}}
+{{- define "cadence.sections" -}}
+{{- $v := .Values -}}
+{{- range $name := list "database" "ingress" "blobs" "secrets" "image" -}}
+{{- $_ := set $v $name (default dict (index $v $name)) -}}
+{{- end -}}
+{{- $_ := set $v.ingress "tls" (default dict $v.ingress.tls) -}}
+{{- $_ := set $v.blobs "s3" (default dict $v.blobs.s3) -}}
+{{- $_ := set $v.secrets "keys" (default dict $v.secrets.keys) -}}
+{{- $_ := set $v.image "backend" (default dict $v.image.backend) -}}
+{{- $_ := set $v.image "frontend" (default dict $v.image.frontend) -}}
+{{- end -}}
+
+{{/*
 The image of "backend" or "frontend": <registry>/<repository>:<tag>@<digest>,
 without @<digest> when the digest is empty.
   include "cadence.image" (list . "backend")
@@ -37,6 +58,12 @@ without @<digest> when the digest is empty.
 {{- define "cadence.image" -}}
 {{- $root := index . 0 -}}
 {{- $img := index $root.Values.image (index . 1) -}}
+{{- if not $root.Values.image.registry -}}
+{{- fail "image.registry is required: the registry of the images, ghcr.io/cadence-lab-tech or your mirror" -}}
+{{- end -}}
+{{- if not $img.repository -}}
+{{- fail (printf "image.%s.repository is required: sdlc-pipeline-%s, or its name in your mirror" (index . 1) (index . 1)) -}}
+{{- end -}}
 {{- $ref := printf "%s/%s:%s" (trimSuffix "/" $root.Values.image.registry) $img.repository (default $root.Chart.AppVersion $root.Values.image.tag) -}}
 {{- if $img.digest -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $img.digest) -}}
@@ -184,6 +211,7 @@ The values the chart cannot do without (docs/admin.md, "Kubernetes
 (Helm)"): the rendering stops with the key to set.
 */}}
 {{- define "cadence.validate" -}}
+{{- include "cadence.sections" . -}}
 {{- $v := .Values -}}
 {{- if not $v.ingress.host -}}
 {{- fail "ingress.host is required: the address people open, e.g. cadence.example.com" -}}
