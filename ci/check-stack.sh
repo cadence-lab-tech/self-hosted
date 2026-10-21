@@ -42,6 +42,20 @@
 #   CHECK_DB_PORT         port of the stand-in, default CHECK_HTTP_PORT + 2;
 #                         the PostgreSQL 14 of the version refusal takes the
 #                         next one
+#   CHECK_SECRETS         env (default) - the secrets stay in .env, as the
+#                         installer writes them; files - right after the
+#                         install the installation moves to secrets in files
+#                         the way docs/admin.md ("Secrets in files") says:
+#                         compose.secrets.yml with the password of the bundled
+#                         database and the administrator token, the URL of an
+#                         external database in SDLC_DATABASE_URL_FILE, the
+#                         keys of the bucket in BACKUP_S3_*_FILE, and empty
+#                         values in .env. A missing file and a value left in
+#                         .env stop the API, naming the variables; the rest of
+#                         the check runs on the files, and at the end no value
+#                         of a secret is in the logs of the stack. Needs
+#                         images of v0.13.0 or newer, or images of a branch (a
+#                         pin variable set).
 #
 # The installation name (CLAB-164): install.sh keeps it in .env, so after the
 # install every command runs without COMPOSE_PROJECT_NAME, as from cron or a
@@ -104,6 +118,11 @@ bundled | external) ;;
 *) die "CHECK_DB is '$db', expected bundled or external" ;;
 esac
 db_port="${CHECK_DB_PORT:-$((port + 2))}"
+secrets_mode="${CHECK_SECRETS:-env}"
+case "$secrets_mode" in
+env | files) ;;
+*) die "CHECK_SECRETS is '$secrets_mode', expected env or files" ;;
+esac
 base="http://127.0.0.1:$port"
 version="$(tr -d '[:space:]' <VERSION)"
 failures=0
@@ -362,6 +381,15 @@ else
   check ".env: the bundled database (CADENCE_DB=bundled)" grep -qxF "CADENCE_DB=bundled" .env
 fi
 
+# env_set KEY VALUE: KEY=VALUE in .env of the installation.
+env_set() {
+  if grep -q "^$1=" .env; then
+    sed -i.bak "s|^$1=.*|$1=$2|" .env && rm -f .env.bak
+  else
+    printf '%s=%s\n' "$1" "$2" >>.env
+  fi
+}
+
 # --- refusals of the external database ------------------------------------------------
 # Each before .env: the directory of an unpacked package stays fit for the
 # next attempt. The scripts run ./install.sh there, clab installs in place.
@@ -415,6 +443,118 @@ if [ "$db" = external ]; then
     --external-db "$(ext_db_url cadence)" --external-db-ca ca.pem
   check "the refusals left no containers of $name-r" [ -z "$(docker ps -a -q --filter "label=com.docker.compose.project=$name-r")" ]
   check "...and no network" [ -z "$(docker network ls -q --filter "label=com.docker.compose.project=$name-r")" ]
+fi
+
+# --- secrets in files (CHECK_SECRETS=files) -------------------------------------------
+# The move of docs/admin.md ("Secrets in files"), step by step, on the
+# installed stack - after the refusals of the external database: their
+# installers run from this shell, and the *_FILE it exports from .env would
+# reach them. ext_label: how the scripts name the external database -
+# the file of the URL is not read for a message.
+ext_label="${EXT_DB_HOST:-}:$db_port/cadence"
+ext_status="external $ext_label (sslmode=verify-full)"
+# secret_set KEY VALUE: the secret KEY of the installation - in .env, or with
+# CHECK_SECRETS=files in secrets/<key> (yours, mode 400: the bucket keys are
+# read by /api backup-s3 as you) with KEY_FILE in .env and KEY empty.
+secret_set() {
+  if [ "$secrets_mode" = files ]; then
+    local f
+    f="$(tr '[:upper:]_' '[:lower:]-' <<<"$1")"
+    rm -f "secrets/$f"
+    if [ -n "$2" ]; then
+      (umask 077 && printf '%s\n' "$2" >"secrets/$f")
+      chmod 400 "secrets/$f"
+      env_set "${1}_FILE" "/secrets/$f"
+    else
+      env_set "${1}_FILE" ""
+    fi
+    env_set "$1" ""
+  else
+    env_set "$1" "$2"
+  fi
+}
+# api_log_has TEXT: the logs of api show TEXT within a minute.
+api_log_has() {
+  local _
+  for _ in $(seq 1 30); do
+    docker compose logs api 2>&1 | grep -qF -- "$1" && return 0
+    sleep 2
+  done
+  return 1
+}
+if [ "$secrets_mode" = files ]; then
+  if version_lt "$version" v0.13.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+    die "CHECK_SECRETS=files needs images that read *_FILE (v0.13.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+  fi
+  info "secrets in files"
+  # A missing file stops the API on start, naming the variable and the path,
+  # never a value (before the overlay: the path comes from .env).
+  env_set SDLC_ADMIN_TOKEN ""
+  env_set SDLC_ADMIN_TOKEN_FILE /secrets/missing
+  load_env
+  docker compose up -d --no-deps api >/dev/null 2>&1 || true
+  check "a missing SDLC_ADMIN_TOKEN_FILE stops the API, naming the variable and the path" \
+    api_log_has "SDLC_ADMIN_TOKEN_FILE: stat /secrets/missing: no such file or directory"
+  check "...and the API is not healthy" \
+    [ "$(docker inspect -f '{{.State.Health.Status}}' "$(container_of api)" 2>/dev/null)" != healthy ]
+  env_set SDLC_ADMIN_TOKEN_FILE ""
+  env_set SDLC_ADMIN_TOKEN "$admin_token"
+
+  # Step 1: the values of .env into files of secrets/, handed over.
+  # shellcheck source=/dev/null
+  (umask 077 && set -a && . ./.env &&
+    if [ "$CADENCE_DB" = bundled ]; then printf '%s\n' "$POSTGRES_PASSWORD" >secrets/postgres_password; fi &&
+    printf '%s\n' "$SDLC_ADMIN_TOKEN" >secrets/admin_token)
+  if [ "$db" = bundled ]; then
+    # shellcheck source=/dev/null
+    pg_password="$(set -a && . ./.env && printf '%s' "$POSTGRES_PASSWORD")"
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$pg_password"; fi
+    docker run --rm -v "$PWD/secrets:/s" alpine:3 sh -c \
+      'chown 65532:999 /s/postgres_password && chmod 440 /s/postgres_password &&
+       chown 65532:65532 /s/admin_token && chmod 400 /s/admin_token && chmod 711 /s'
+    env_set POSTGRES_PASSWORD ""
+  else
+    pg_password=""
+    (umask 077 && printf '%s\n' "$SDLC_DATABASE_URL" >secrets/db-url)
+    docker run --rm -v "$PWD/secrets:/s" alpine:3 sh -c \
+      "chown 65532:65532 /s/admin_token && chmod 400 /s/admin_token && chown $(id -u):65532 /s/db-url && chmod 440 /s/db-url && chmod 711 /s"
+    env_set SDLC_DATABASE_URL ""
+    env_set SDLC_DATABASE_URL_FILE /secrets/db-url
+    ext_label="(URL in /secrets/db-url)"
+    ext_status="external $ext_label"
+  fi
+  # Step 2: the overlay right after the file of the mode.
+  env_set COMPOSE_FILE "${COMPOSE_FILE/compose.proxy.yml/compose.proxy.yml:compose.secrets.yml}"
+  # A value forgotten in .env stops the API, naming both forms.
+  load_env
+  docker compose up -d --no-deps api >/dev/null 2>&1 || true
+  check "SDLC_ADMIN_TOKEN left in .env next to compose.secrets.yml stops the API, naming both" \
+    api_log_has "both SDLC_ADMIN_TOKEN and SDLC_ADMIN_TOKEN_FILE are set: keep one of them"
+  # Step 3: the value out of .env, and the stack on the files.
+  env_set SDLC_ADMIN_TOKEN ""
+  load_env
+  docker compose up -d >/dev/null 2>&1 || true
+  check "the stack is ready on the secrets in files" wait_ready 180
+  check ".env holds no value of POSTGRES_PASSWORD, SDLC_ADMIN_TOKEN, SDLC_DATABASE_URL" \
+    [ "$(grep -E '^(POSTGRES_PASSWORD|SDLC_ADMIN_TOKEN|SDLC_DATABASE_URL)=' .env | sort | tr '\n' ' ')" = \
+      "POSTGRES_PASSWORD= SDLC_ADMIN_TOKEN= SDLC_DATABASE_URL= " ]
+  check "COMPOSE_FILE lists compose.secrets.yml after the file of the mode" \
+    contains "$(grep '^COMPOSE_FILE=' .env)" "compose.proxy.yml:compose.secrets.yml"
+  check "api reads the administrator token from /run/secrets/admin_token" \
+    [ "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(container_of api)" | grep -E '^SDLC_ADMIN_TOKEN(_FILE)?=' | sort | tr '\n' ' ')" = \
+      "SDLC_ADMIN_TOKEN= SDLC_ADMIN_TOKEN_FILE=/run/secrets/admin_token " ]
+  check "no container of the stack has a secret in its environment" \
+    lacks "$(docker compose ps -q | xargs docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}')" "$admin_token"
+  if [ "$db" = bundled ]; then
+    check "postgres reads POSTGRES_PASSWORD_FILE" \
+      contains "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(container_of postgres)")" "POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password"
+    check "...and its password is not in the environment of a container" \
+      lacks "$(docker compose ps -q | xargs docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}')" "$pg_password"
+  else
+    check "the external database: api reads SDLC_DATABASE_URL_FILE" docker compose exec -T api /api dbcheck
+  fi
+  me="$(curl -sf "${auth[@]}" "$base/v1/auth/me" || true)"
+  check "the administrator token of the file signs in (is_admin)" contains "$me" '"is_admin":true'
 fi
 
 # --- installation name -------------------------------------------------------------
@@ -676,9 +816,9 @@ if [ "$driver" = clab ]; then
     info "clab $("$clab" version 2>/dev/null | head -n 1) does not report the database (v0.10.0+): not checked"
   elif [ "$db" = external ]; then
     check "status names the external database with its sslmode" \
-      grep -qE "^Database: +external $EXT_DB_HOST:$db_port/cadence \(sslmode=verify-full\)\$" <<<"$status"
+      [ "$(sed -nE 's/^Database: +//p' <<<"$status")" = "$ext_status" ]
     check "status --json .database" \
-      [ "$("$clab" server status --json | jq -r .database)" = "external $EXT_DB_HOST:$db_port/cadence (sslmode=verify-full)" ]
+      [ "$("$clab" server status --json | jq -r .database)" = "$ext_status" ]
     check "status shows no password of the database" lacks "$status$("$clab" server status --json)" "$EXT_DB_PASSWORD_URL"
   else
     check "status names the bundled database" grep -qE "^Database: +bundled\$" <<<"$status"
@@ -730,7 +870,7 @@ if [ "$db" = external ]; then
   kill "$sampler" 2>/dev/null || true
   wait "$sampler" 2>/dev/null || true
   printf '%s\n' "$backup_out"
-  check "backup names the external database" contains "$backup_out" "dumping the external database $EXT_DB_HOST:$db_port/cadence"
+  check "backup names the external database" contains "$backup_out" "dumping the external database $ext_label"
   check "backup prints no password" lacks "$backup_out" "$EXT_DB_PASSWORD"
   check "no command line during the backup carried the password ($(grep -c . "$work/ps.log") lines sampled)" \
     lacks "$(cat "$work/ps.log")" "$EXT_DB_PASSWORD"
@@ -811,14 +951,6 @@ fetch_cmd() {
 upgrade_cmd() {
   if [ "$driver" = clab ]; then "$clab" server upgrade "$@"; else ./upgrade.sh "$@"; fi
 }
-# env_set KEY VALUE: KEY=VALUE in .env of the installation.
-env_set() {
-  if grep -q "^$1=" .env; then
-    sed -i.bak "s|^$1=.*|$1=$2|" .env && rm -f .env.bak
-  else
-    printf '%s=%s\n' "$1" "$2" >>.env
-  fi
-}
 counts_sql="SELECT (SELECT count(*) FROM projects) || ' ' || (SELECT count(*) FROM tasks) || ' ' || (SELECT count(*) FROM artifacts)"
 live_counts() {
   if [ "$db" = external ]; then
@@ -863,9 +995,14 @@ else
   env_set BACKUP_S3_BUCKET "$S3_BUCKET"
   env_set BACKUP_S3_ENDPOINT "$S3_ENDPOINT"
   env_set BACKUP_S3_PREFIX nightly/
-  env_set BACKUP_S3_ACCESS_KEY_ID "$S3_ACCESS_KEY"
-  env_set BACKUP_S3_SECRET_ACCESS_KEY "$S3_SECRET"
+  secret_set BACKUP_S3_ACCESS_KEY_ID "$S3_ACCESS_KEY"
+  secret_set BACKUP_S3_SECRET_ACCESS_KEY "$S3_SECRET"
   env_set BACKUP_S3_KEEP 2
+  if [ "$secrets_mode" = files ]; then
+    check ".env holds no value of the bucket keys, only their files" \
+      [ "$(grep -E '^BACKUP_S3_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)(_FILE)?=' .env | LC_ALL=C sort | tr '\n' ' ')" = \
+        "BACKUP_S3_ACCESS_KEY_ID= BACKUP_S3_ACCESS_KEY_ID_FILE=/secrets/backup-s3-access-key-id BACKUP_S3_SECRET_ACCESS_KEY= BACKUP_S3_SECRET_ACCESS_KEY_FILE=/secrets/backup-s3-secret-access-key " ]
+  fi
   printf 'not a backup\n' >"$work/other.txt"
   s3_put "$work/other.txt" nightly/other.txt
   s3_put "$work/other.txt" "elsewhere/cadence-$version-20000101-000000.sql.gz"
@@ -918,7 +1055,7 @@ else
   # Refusals: the local backup stays, the bucket is untouched, status 1.
   for broken in "BACKUP_S3_SECRET_ACCESS_KEY:wrong$(openssl rand -hex 8)" "BACKUP_S3_ENDPOINT:http://s3stand-nowhere:7070"; do
     key="${broken%%:*}"
-    env_set "$key" "${broken#*:}"
+    if [ "$key" = BACKUP_S3_SECRET_ACCESS_KEY ]; then secret_set "$key" "${broken#*:}"; else env_set "$key" "${broken#*:}"; fi
     sleep 1
     dumps_before="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')"
     if out="$(with_ps backup_cmd 2>&1)"; then
@@ -931,7 +1068,7 @@ else
     check "...and the copies in the bucket" [ "$(s3_keys nightly/ | grep -E '^nightly/[^/]+$')" = "$keys" ]
     if [ "$key" = BACKUP_S3_SECRET_ACCESS_KEY ]; then
       check "...with the answer of S3: 403" contains "$out" "403"
-      env_set "$key" "$S3_SECRET"
+      secret_set "$key" "$S3_SECRET"
     else
       check "...naming the endpoint it could not reach" contains "$out" "s3stand-nowhere"
       env_set "$key" "$S3_ENDPOINT"
@@ -1041,7 +1178,9 @@ else
     env_set BACKUP_S3_ENDPOINT "$S3_ENDPOINT"
   fi
 
-  for k in BUCKET ENDPOINT PREFIX ACCESS_KEY_ID SECRET_ACCESS_KEY KEEP; do env_set "BACKUP_S3_$k" ""; done
+  for k in BUCKET ENDPOINT PREFIX KEEP; do env_set "BACKUP_S3_$k" ""; done
+  secret_set BACKUP_S3_ACCESS_KEY_ID ""
+  secret_set BACKUP_S3_SECRET_ACCESS_KEY ""
   s3_down
 fi
 
@@ -1120,7 +1259,7 @@ if [ "$db" = external ]; then
   else
     printf '%s\n' "$out" | tail -n 8
     check "it checked the external database with the images of $next before the backup" \
-      [ "$(grep -nF "checking the external database $EXT_DB_HOST:$db_port/cadence with the images of $next" <<<"$out" | cut -d: -f1)" -lt \
+      [ "$(grep -nF "checking the external database $ext_label with the images of $next" <<<"$out" | cut -d: -f1)" -lt \
         "$(grep -nF "backup of $version" <<<"$out" | cut -d: -f1)" ]
     rollback="$(grep -E '^  (tar -xpzf |\./restore\.sh --yes |clab server restore --yes )' <<<"$out" || true)"
     if [ "$(grep -c . <<<"$rollback")" = 2 ]; then
@@ -1137,6 +1276,17 @@ if [ "$db" = external ]; then
       fail "the rollback is not two commands: $out"
     fi
   fi
+fi
+
+# --- no secret in the logs (CHECK_SECRETS=files) ------------------------------------
+if [ "$secrets_mode" = files ]; then
+  info "no secret in the logs"
+  logs="$(docker compose logs api worker 2>&1)"
+  out="$(backup_cmd 2>&1)"
+  for secret in "$admin_token" ${pg_password:+"$pg_password"} ${EXT_DB_PASSWORD:+"$EXT_DB_PASSWORD"} ${S3_SECRET:+"$S3_SECRET"}; do
+    check "the logs of api and worker hold no value of a secret (${#secret} characters)" lacks "$logs" "$secret"
+    check "...nor the output of a backup" lacks "$out" "$secret"
+  done
 fi
 
 # --- two installations on one machine ------------------------------------------------
@@ -1169,4 +1319,4 @@ if [ "$failures" -gt 0 ]; then
   docker compose logs --tail 30 api caddy || true
   die "$failures check(s) failed"
 fi
-ok "all checks passed on $version ($driver, installed with $install_with)"
+ok "all checks passed on $version ($driver, installed with $install_with, secrets in $secrets_mode)"

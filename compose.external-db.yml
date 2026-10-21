@@ -1,6 +1,7 @@
 # CADENCE_DB=external: the database is your own PostgreSQL (Amazon RDS, Cloud
-# SQL, Azure, your cluster) at SDLC_DATABASE_URL in .env, not the postgres
-# container. COMPOSE_FILE in .env adds this file after the file of the mode;
+# SQL, Azure, your cluster) at SDLC_DATABASE_URL in .env (or in the file of
+# SDLC_DATABASE_URL_FILE), not the postgres container. COMPOSE_FILE in .env
+# adds this file after the file of the mode and after compose.secrets.yml;
 # install.sh --external-db writes both (docs/admin.md, "External
 # PostgreSQL").
 #
@@ -17,12 +18,18 @@ services:
       postgres:
         condition: service_healthy
         required: false
-    environment:
-      SDLC_DATABASE_URL: ${SDLC_DATABASE_URL:?SDLC_DATABASE_URL is not set in .env (CADENCE_DB=external)}
+    environment: &external-db-env
+      # The URL of .env, or of the file in SDLC_DATABASE_URL_FILE (a path
+      # inside the container, e.g. /secrets/db-url): docker-compose.yml passes
+      # that one on, and the service refuses to start with neither. The
+      # scripts check the same before they run (check_db_mode).
+      SDLC_DATABASE_URL: ${SDLC_DATABASE_URL:-}
+      # Back to the value of .env: compose.secrets.yml, listed before this
+      # file, points it at the password of the bundled database.
+      SDLC_DATABASE_PASSWORD_FILE: ${SDLC_DATABASE_PASSWORD_FILE:-}
 
   worker:
-    environment:
-      SDLC_DATABASE_URL: ${SDLC_DATABASE_URL:?SDLC_DATABASE_URL is not set in .env (CADENCE_DB=external)}
+    environment: *external-db-env
 
   # The client of backup.sh and restore.sh: pg_dump and psql of the newest
   # supported server version, in the network of the installation, with the

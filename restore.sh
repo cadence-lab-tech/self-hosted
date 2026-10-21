@@ -87,7 +87,7 @@ user="${POSTGRES_USER:-sdlc}"
 
 if external_db; then
   # Before anything stops: an unreachable database leaves the stack running.
-  info "checking the external database $(db_target "$SDLC_DATABASE_URL")"
+  info "checking the external database $(db_label)"
   db_client_check || die "the backup client cannot connect to the external database (see above); nothing was changed"
 fi
 
@@ -95,8 +95,8 @@ info "stopping api and worker"
 docker compose stop api worker >/dev/null
 
 if external_db; then
-  db_url_parts "$SDLC_DATABASE_URL"
-  info "loading $name into $(db_target "$SDLC_DATABASE_URL") (one transaction)"
+  db_conn
+  info "loading $name into $(db_label) (one transaction)"
   # transaction_timeout exists since PostgreSQL 17; a dump of a 17 server
   # names it, a 15 or 16 server would refuse it.
   if ! { db_reset_sql; gunzip -c "$file" | sed '/^SET transaction_timeout = 0;$/d'; } |

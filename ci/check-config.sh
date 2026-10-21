@@ -41,7 +41,7 @@ lacks() { ! grep -qF -- "$2" <<<"$1"; }
 version="$(tr -d '[:space:]' <VERSION)"
 
 info "layout"
-for f in docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml .env.example Caddyfile README.md docs/admin.md LICENSE SECURITY.md VERSION; do
+for f in docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml compose.secrets.yml .env.example Caddyfile README.md docs/admin.md LICENSE SECURITY.md VERSION; do
   check "$f exists" [ -f "$f" ]
 done
 for f in install.sh upgrade.sh backup.sh restore.sh get-cadence.sh ci/package.sh ci/check-verify.sh; do
@@ -59,7 +59,7 @@ info "release package"
 # and nothing of the repository around them. The required list is kept here,
 # apart from the list in ci/package.sh, so that a file dropped from the
 # package turns this check red.
-required_files="VERSION docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml Caddyfile .env.example
+required_files="VERSION docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml compose.secrets.yml Caddyfile .env.example
   install.sh upgrade.sh backup.sh restore.sh lib.sh bundles/starter.json docs/admin.md README.md LICENSE SECURITY.md
   package.sha256"
 dist="$(mktemp -d)"
@@ -432,11 +432,14 @@ for v in BACKUP_S3_BUCKET BACKUP_S3_ENDPOINT BACKUP_S3_REGION BACKUP_S3_PREFIX B
   BACKUP_S3_SECRET_ACCESS_KEY BACKUP_S3_PATH_STYLE BACKUP_S3_KEEP; do
   check ".env.example sets $v=" grep -qxF "$v=" .env.example
 done
+# The keys in files (CLAB-200) are commented examples: an empty value is no
+# value, and the file form is a choice.
+backup_s3_of_example() { grep -oE '^(# )?BACKUP_S3_[A-Z_]+=' .env.example | sed 's/^# //; s/=$//' | sort -u; }
 while read -r v; do
   check "docs/admin.md describes $v" grep -qF "$v" docs/admin.md
-done < <(grep -oE '^BACKUP_S3_[A-Z_]+' .env.example | sort -u)
+done < <(backup_s3_of_example)
 check "lib.sh passes every BACKUP_S3_* of .env.example to /api backup-s3" \
-  [ "$(bash -c '. ./lib.sh && printf "%s\n" "${BACKUP_S3_VARS[@]}"' | sort)" = "$(grep -oE '^BACKUP_S3_[A-Z_]+' .env.example | sort -u)" ]
+  [ "$(bash -c '. ./lib.sh && printf "%s\n" "${BACKUP_S3_VARS[@]}"' | sort)" = "$(backup_s3_of_example)" ]
 check "backup_s3_location trims the prefix" \
   [ "$(BACKUP_S3_BUCKET=bk BACKUP_S3_PREFIX=' /a/b/ ' bash -c '. ./lib.sh && backup_s3_location')" = "s3://bk/a/b/" ]
 check "backup_s3_location without a prefix" \
@@ -644,8 +647,12 @@ check "[external] only caddy publishes ports" \
 tools="$(ext_config SDLC_DATABASE_URL="$ext_url" COMPOSE_PROFILES=tools)"
 check "[external] the backup client is pgvector/pgvector:pg18 with /secrets" \
   [ "$(jq -r '.services["db-client"] | "\(.image) \(.volumes[0].target)"' <<<"$tools")" = "pgvector/pgvector:pg18 /secrets" ]
-missing="$(ext_config SDLC_DATABASE_URL= 2>&1 || true)"
-check "[external] without SDLC_DATABASE_URL compose refuses, naming it" contains "$missing" "SDLC_DATABASE_URL is not set in .env"
+# The URL may come as a file (CLAB-200): compose then passes an empty URL and
+# the path, the service reads the file; with neither it refuses to start,
+# and the scripts before it (check_db_mode below).
+from_file="$(ext_config SDLC_DATABASE_URL= SDLC_DATABASE_URL_FILE=/secrets/db-url)"
+check "[external] without SDLC_DATABASE_URL compose passes SDLC_DATABASE_URL_FILE to api and worker" \
+  [ "$(jq -r '[.services.api.environment, .services.worker.environment] | map("\(.SDLC_DATABASE_URL)|\(.SDLC_DATABASE_URL_FILE)") | unique | join(" ")' <<<"$from_file")" = "|/secrets/db-url" ]
 bundled="$(POSTGRES_PASSWORD=x CADENCE_VERSION="$version" COMPOSE_FILE=docker-compose.yml:compose.proxy.yml docker compose config --format json)"
 check "[bundled] the postgres service stays" [ "$(jq -r '.services | has("postgres")' <<<"$bundled")" = true ]
 check "[bundled] SDLC_DATABASE_URL is the postgres container" \
@@ -671,6 +678,14 @@ check "check_db_mode: external without the URL is refused" \
   contains "$(db_mode_of CADENCE_DB=external COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" "needs SDLC_DATABASE_URL"
 check "check_db_mode: the overlay with bundled is refused" \
   contains "$(db_mode_of COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" "but CADENCE_DB is bundled"
+check "check_db_mode: external with SDLC_DATABASE_URL_FILE" \
+  [ "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL_FILE=/secrets/db-url COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$SECRETS_FILE:$EXTERNAL_DB_FILE")" = ok ]
+check "check_db_mode: SDLC_DATABASE_URL and SDLC_DATABASE_URL_FILE together are refused" \
+  contains "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL="$ext_url" SDLC_DATABASE_URL_FILE=/secrets/db-url COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" \
+  "both SDLC_DATABASE_URL and SDLC_DATABASE_URL_FILE"
+check "check_db_mode: $SECRETS_FILE after $EXTERNAL_DB_FILE is refused" \
+  contains "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL="$ext_url" COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE:$SECRETS_FILE")" \
+  "lists $SECRETS_FILE after $EXTERNAL_DB_FILE"
 # db_url_parts: the password leaves the URL and is decoded for PGPASSWORD.
 parts="$(bash -c '. ./lib.sh && db_url_parts "$1" && printf "%s|%s|%s" "$DB_URL_SAFE" "$DB_PASSWORD" "$(db_target "$1")"' _ \
   'postgres://cadence:Cad%40nce%2Fx%25y@db.example.com:5432/cadence?sslmode=require')"
@@ -678,6 +693,88 @@ check "db_url_parts and db_target split and decode the URL" \
   [ "$parts" = 'postgres://cadence@db.example.com:5432/cadence?sslmode=require|Cad@nce/x%y|db.example.com:5432/cadence' ]
 check "pg_dump options leave owners, privileges and extensions out" \
   [ "$(bash -c '. ./lib.sh && echo "${DUMP_OPTIONS[*]}"')" = "--clean --if-exists --no-owner --no-privileges --exclude-extension=vector --exclude-extension=pgcrypto" ]
+
+info "secrets in files (compose.secrets.yml)"
+# CLAB-200: every secret X of the table in docs/admin.md ("Secrets in
+# files") that compose passes to a service also passes X_FILE there, empty
+# by default; compose.secrets.yml turns the password of the bundled database
+# and the administrator token into Docker secrets, in both database modes.
+secret_rows="$(awk '/^## Secrets in files$/ { on = 1; next } on && /^## / { exit } on && /^\| `/' docs/admin.md)"
+check "docs/admin.md has the table of secrets (## Secrets in files)" [ -n "$secret_rows" ]
+secrets_config="$(POSTGRES_PASSWORD=x CADENCE_VERSION="$version" COMPOSE_FILE=docker-compose.yml:compose.proxy.yml docker compose config --format json)"
+services_with() { jq -r --arg k "$1" '[.services | to_entries[] | select(.value.environment // {} | has($k)) | .key] | sort | join(" ")' <<<"$secrets_config"; }
+# shellcheck disable=SC2016 # the backticks of the markdown table
+while read -r name; do
+  case "$name" in *_FILE | *"<"* | POSTGRES_PASSWORD) continue ;; esac
+  [ -n "$(services_with "$name")" ] || continue
+  check "$name: docker-compose.yml passes ${name}_FILE: \${${name}_FILE:-}" grep -qF "${name}_FILE: \${${name}_FILE:-}" docker-compose.yml
+  check "$name: ${name}_FILE reaches the same services ($(services_with "$name"))" [ "$(services_with "${name}_FILE")" = "$(services_with "$name")" ]
+done < <(sed -E 's/^\| `([A-Z0-9_<>]+)`.*/\1/' <<<"$secret_rows")
+while read -r v; do
+  check ".env.example has the commented example # $v=" grep -qE "^# $v=" .env.example
+  check "docs/admin.md lists $v" grep -qF "$v" <<<"$secret_rows"
+done < <(grep -oE '^ +[A-Z0-9_]+_FILE: \$\{' docker-compose.yml | sed -E 's/^ +//; s/: .*//' | grep -vx SDLC_GITHUB_APP_KEY_FILE | sort -u)
+check "the X_FILE lines are empty by default" \
+  [ "$(jq -r '[.services[].environment // {} | to_entries[] | select(.key | endswith("_FILE")) | select(.key != "SDLC_GITHUB_APP_KEY_FILE") | .value] | unique | join(",")' <<<"$secrets_config")" = "" ]
+secrets_cfg() {
+  env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST POSTGRES_PASSWORD= SDLC_ADMIN_TOKEN= CADENCE_VERSION="$version" "$@" docker compose config --format json
+}
+sec="$(secrets_cfg COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$SECRETS_FILE")"
+check "[secrets] compose takes compose.secrets.yml" [ -n "$sec" ]
+check "[secrets] postgres reads POSTGRES_PASSWORD_FILE of a Docker secret" \
+  [ "$(jq -r '"\(.services.postgres.environment.POSTGRES_PASSWORD_FILE) \(.services.postgres.secrets[0].source) \(.secrets.postgres_password.file | sub(".*/"; ""))"' <<<"$sec")" = "/run/secrets/postgres_password postgres_password postgres_password" ]
+check "[secrets] POSTGRES_PASSWORD stays empty for postgres" [ "$(jq -r '.services.postgres.environment.POSTGRES_PASSWORD' <<<"$sec")" = "" ]
+check "[secrets] api and worker read the same password file (SDLC_DATABASE_PASSWORD_FILE)" \
+  [ "$(jq -r '[.services.api.environment.SDLC_DATABASE_PASSWORD_FILE, .services.worker.environment.SDLC_DATABASE_PASSWORD_FILE] | unique | join(" ")' <<<"$sec")" = /secrets/postgres_password ]
+check "[secrets] the URL of the bundled database has no password" \
+  [ "$(jq -r .services.api.environment.SDLC_DATABASE_URL <<<"$sec")" = "postgres://sdlc:@postgres:5432/sdlc?sslmode=disable" ]
+check "[secrets] api reads SDLC_ADMIN_TOKEN_FILE of a Docker secret" \
+  [ "$(jq -r '"\(.services.api.environment.SDLC_ADMIN_TOKEN_FILE) \(.services.api.secrets[0].source) \(.services.api.environment.SDLC_ADMIN_TOKEN)"' <<<"$sec")" = "/run/secrets/admin_token admin_token " ]
+check "[secrets] the worker has no secret of the administrator token" [ "$(jq -r '.services.worker.secrets // [] | length' <<<"$sec")" = 0 ]
+check "[secrets] a value left in .env still reaches api (and stops it, naming both)" \
+  [ "$(secrets_cfg SDLC_ADMIN_TOKEN=sdlc_left COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$SECRETS_FILE" | jq -r .services.api.environment.SDLC_ADMIN_TOKEN)" = sdlc_left ]
+for mode in tls proxy; do
+  check "[secrets] $mode: compose config is valid" \
+    secrets_cfg SDLC_DOMAIN=x.example.com ACME_EMAIL=a@x.example.com COMPOSE_FILE="docker-compose.yml:compose.$mode.yml:$SECRETS_FILE"
+done
+sec_ext="$(secrets_cfg SDLC_DATABASE_URL= SDLC_DATABASE_URL_FILE=/secrets/db-url COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$SECRETS_FILE:$EXTERNAL_DB_FILE")"
+check "[secrets+external] compose config is valid" [ -n "$sec_ext" ]
+check "[secrets+external] no postgres service" [ "$(jq -r '.services | has("postgres")' <<<"$sec_ext")" = false ]
+check "[secrets+external] api and worker read the URL file, not the password of the bundled database" \
+  [ "$(jq -r '[.services.api.environment, .services.worker.environment] | map("\(.SDLC_DATABASE_URL)|\(.SDLC_DATABASE_URL_FILE)|\(.SDLC_DATABASE_PASSWORD_FILE)") | unique | join(" ")' <<<"$sec_ext")" = "|/secrets/db-url|" ]
+check "[secrets+external] the administrator token stays a Docker secret" \
+  [ "$(jq -r .services.api.environment.SDLC_ADMIN_TOKEN_FILE <<<"$sec_ext")" = /run/secrets/admin_token ]
+check "[secrets+external] a password file of .env reaches api" \
+  [ "$(secrets_cfg SDLC_DATABASE_URL="postgres://cadence@db/x" SDLC_DATABASE_PASSWORD_FILE=/secrets/db-password COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$SECRETS_FILE:$EXTERNAL_DB_FILE" |
+    jq -r .services.api.environment.SDLC_DATABASE_PASSWORD_FILE)" = /secrets/db-password ]
+
+# db_conn of the scripts: the URL and the password of an external database
+# from the files of ./secrets, as the service reads them.
+conn_dir="$dist/conn"
+mkdir -p "$conn_dir/secrets"
+printf '%s\r\n' 'postgres://cadence:Cad%40nce@db.example.com:5432/cadence?sslmode=require' >"$conn_dir/secrets/db-url"
+printf '%s\n' 'Cad@nce/x%y' >"$conn_dir/secrets/db_password"
+: >"$conn_dir/secrets/empty"
+lib_sh="$PWD/lib.sh"
+# shellcheck disable=SC2016 # expanded by the inner bash
+conn_of() {
+  (cd "$conn_dir" && env -u SDLC_DATABASE_URL -u SDLC_DATABASE_URL_FILE -u SDLC_DATABASE_PASSWORD_FILE "$@" \
+    bash -c '. "$0" && db_conn && printf "%s|%s|%s" "$DB_URL_SAFE" "$DB_PASSWORD" "$(db_label)"' "$lib_sh" 2>&1)
+}
+check "db_conn: the URL of SDLC_DATABASE_URL_FILE, CRLF cut" \
+  [ "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/db-url)" = 'postgres://cadence@db.example.com:5432/cadence?sslmode=require|Cad@nce|(URL in /secrets/db-url)' ]
+check "db_conn: the password of SDLC_DATABASE_PASSWORD_FILE (/run/secrets/<name> is secrets/<name>)" \
+  [ "$(conn_of SDLC_DATABASE_URL='postgres://cadence@db.example.com:5432/cadence' SDLC_DATABASE_PASSWORD_FILE=/run/secrets/db_password)" = 'postgres://cadence@db.example.com:5432/cadence|Cad@nce/x%y|db.example.com:5432/cadence' ]
+check "db_conn: a file outside ./secrets is refused, naming the variable" \
+  contains "$(conn_of SDLC_DATABASE_URL_FILE=/etc/x)" "SDLC_DATABASE_URL_FILE is '/etc/x'"
+check "db_conn: .. is refused" contains "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/../etc/x)" "Move the file into secrets/"
+check "db_conn: a missing file names the variable and the path" \
+  contains "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/nope)" "SDLC_DATABASE_URL_FILE: stat $conn_dir/secrets/nope: no such file or directory"
+check "db_conn: an empty file is refused" contains "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/empty)" "is empty"
+check "db_conn: a password in the URL and SDLC_DATABASE_PASSWORD_FILE are refused" \
+  contains "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/db-url SDLC_DATABASE_PASSWORD_FILE=/secrets/db_password)" "both SDLC_DATABASE_PASSWORD_FILE and a password"
+check "db_conn: no value of a file in its errors" \
+  lacks "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/db-url SDLC_DATABASE_PASSWORD_FILE=/secrets/db_password)" "Cad@nce"
 
 info "Caddyfile"
 adapt() {
