@@ -21,10 +21,10 @@ image:
   pullPolicy: IfNotPresent
   backend:
     repository: sdlc-pipeline-backend
-    digest: "sha256:3bec7e7c5f55ad40a4a544eb728a0f598e9f2958d68af06826f8f49c05c0ecd8" # CADENCE_BACKEND_DIGEST
+    digest: "sha256:c7563e6f292c9a2833ac7fa3684670c579ae567f311d02ffadc17106c29d8cb8" # CADENCE_BACKEND_DIGEST
   frontend:
     repository: sdlc-pipeline-frontend
-    digest: "sha256:95e140812a738c6ff6d1d99055a4224a9b2ac897f7119187b7086e3fcad5ba31" # CADENCE_FRONTEND_DIGEST
+    digest: "sha256:aef5cb3bbcf5114e7d1a771d29c1d85f7073484c89bf6677c808071f3b69697d" # CADENCE_FRONTEND_DIGEST
 imagePullSecrets: []
 
 # The single entry point, in place of the Caddy of the package: /v1, /mcp,
