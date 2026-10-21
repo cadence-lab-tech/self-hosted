@@ -1317,7 +1317,12 @@ fi
 # --- two installations on one machine ------------------------------------------------
 if [ "$driver" = scripts ] && [ "$db" = bundled ]; then
   info "a second installation: --name $second_name on port $second_port"
-  (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
+  # The *_FILE that load_env exported from the .env of the first one are
+  # paths in its secrets/, not the second one's (CHECK_SECRETS=files):
+  # compose would take them over the .env of the second installation.
+  first_files=()
+  for v in $(compgen -e | grep '_FILE$' || true); do first_files+=(-u "$v"); done
+  (cd "$work" && env ${first_files[@]+"${first_files[@]}"} PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
     sh -s -- --dir second --name "$second_name" --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" >/dev/null)
   second_up=1
   check "the second installation keeps its name: COMPOSE_PROJECT_NAME=$second_name" \
