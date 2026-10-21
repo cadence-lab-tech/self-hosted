@@ -72,6 +72,26 @@
 #   CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
 #     COMPOSE_PROJECT_NAME=check-<name> CHECK_HTTP_PORT=<port> ci/check-stack.sh
 #
+# Images of a branch are no images of a release: their signatures are not
+# ours to check, and they have no pin. Run such a check with
+# CADENCE_VERIFY=off (with the default auto it warns "not pinned, not
+# verified"; require refuses):
+#
+#   CADENCE_VERIFY=off CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
+#     COMPOSE_PROJECT_NAME=check-<name> CHECK_HTTP_PORT=<port> ci/check-stack.sh
+#
+# Signatures (CADENCE_VERIFY, lib.sh "signatures"): the package of this
+# checkout is not signed, so with a real cosign 3.x in PATH (CI installs
+# one) a wrapper (ci/verify-stubs.sh) accepts verify-blob of it and hands
+# the images to the real cosign: the installer verifies the pinned images of
+# VERSION at ghcr.io for real, and the check wants both "is signed by" lines.
+# A stub cosign with a bad signature of the frontend image makes another
+# installation refuse before its .env (both drivers; clab when it has the
+# verification). Without cosign the installers warn and go on. The upgrades
+# of this check to made-up versions (v98.0.0, v99.0.0) run with
+# CADENCE_VERIFY=off: their images are those of VERSION, signed for another
+# tag.
+#
 # The metrics of api and worker, and the off-machine copy of backups with
 # backup verify (a stand-in bucket, ci/s3.sh), are checked on images of
 # VERSION v0.10.0 or later, and on images of a branch (a pin variable set)
@@ -193,7 +213,7 @@ fi
 # The releases as the installer sees them: download/<version>/ and
 # latest/download/ (lib.sh, "releases").
 info "release package of this checkout"
-ci/package.sh "$work/releases/download/$version"
+ci/package.sh --bundle "$work/releases/download/$version"
 mkdir -p "$work/releases/latest"
 cp -R "$work/releases/download/$version" "$work/releases/latest/download"
 # git must not be needed: a git that fails and leaves a trace stands first
@@ -201,6 +221,14 @@ cp -R "$work/releases/download/$version" "$work/releases/latest/download"
 mkdir -p "$work/nogit"
 printf '#!/bin/sh\necho "git $*" >>"%s/git-calls"\nexit 1\n' "$work" >"$work/nogit/git"
 chmod 755 "$work/nogit/git"
+# shellcheck source=ci/verify-stubs.sh
+. ./ci/verify-stubs.sh
+real_cosign=false
+if stub_cosign_local "$work/cosign-local" "$work/cosign.log"; then
+  real_cosign=true
+  export PATH="$work/cosign-local:$PATH"
+  info "cosign $(cosign version 2>&1 | sed -n 's/^GitVersion:[[:space:]]*//p' | head -n 1): the images are verified at ghcr.io"
+fi
 
 # The CLI comes first: with the clab driver it is the installer.
 clab="${CLAB_BIN:-}"
@@ -249,6 +277,44 @@ else
   printf '%s\n' "$install_out"
 fi
 check "the stack is installed from the package into $work/cadence" [ -f "$work/cadence/.env" ]
+
+# --- signatures ----------------------------------------------------------------------
+# The installer verifies what it can: a clab without CADENCE_VERIFY in its
+# help (before the release with the verification) verifies nothing.
+verifies=true
+if [ "$install_with" = clab ] && ! "$clab" server install --help 2>/dev/null | grep -q CADENCE_VERIFY; then verifies=false; fi
+pinned=true
+[ -z "${CADENCE_BACKEND_DIGEST+set}${CADENCE_FRONTEND_DIGEST+set}" ] || pinned=false
+if [ "$verifies" = true ] && [ "$real_cosign" = true ] && [ "$pinned" = true ] && [ "${CADENCE_VERIFY:-auto}" != off ]; then
+  info "signatures ($install_with)"
+  check "the installer verified the signature of checksums.txt (the stand-in of this checkout)" \
+    contains "$install_out" "✓ the signature of checksums.txt of $version verified"
+  for image in backend frontend; do
+    check "the installer verified sdlc-pipeline-$image of $version at ghcr.io: signed by its release.yml on $version" \
+      contains "$install_out" "is signed by https://github.com/cadence-lab-tech/sdlc-pipeline-$image/.github/workflows/release.yml@refs/tags/$version"
+  done
+else
+  info "the signatures of the images are not checked for real: verification of the installer $verifies, real cosign $real_cosign, pinned $pinned, CADENCE_VERIFY=${CADENCE_VERIFY:-auto}"
+fi
+if [ "$verifies" = true ] && [ "$pinned" = true ]; then
+  # Another installation with a stub cosign that rejects the frontend image:
+  # refused before its .env. The port is the one of the first installation,
+  # so even a verification that did not stop it would stop at the port.
+  stub_cosign "$work/cosign-bad" "$work/cosign-bad.log"
+  bad_env=(CADENCE_VERIFY=auto FAKE_COSIGN_BAD=sdlc-pipeline-frontend COMPOSE_PROJECT_NAME="$name-bad" PATH="$work/cosign-bad:$work/nogit:$PATH")
+  if [ "$install_with" = clab ]; then
+    out="$(cd "$work" && env "${bad_env[@]}" CADENCE_RELEASES_URL="file://$work/releases" \
+      "$clab" server install --dir "$work/badsig" --mode proxy --http-addr "127.0.0.1:$port" --yes </dev/null 2>&1)" && bad_ok=1 || bad_ok=0
+  else
+    out="$(cd "$work" && env "${bad_env[@]}" CADENCE_RELEASES_URL="file://$work/releases" \
+      sh -s -- --dir badsig --mode proxy --http-addr "127.0.0.1:$port" --yes <"$repo/get-cadence.sh" 2>&1)" && bad_ok=1 || bad_ok=0
+  fi
+  if [ "$bad_ok" = 0 ] && contains "$out" "sdlc-pipeline-frontend $version) did not verify for" && [ ! -e "$work/badsig/.env" ]; then
+    pass "a bad signature of the frontend image: the installation is refused before .env"
+  else
+    fail "a bad signature of the frontend image: $out"
+  fi
+fi
 check "the installation is not a git clone" [ ! -e "$work/cadence/.git" ]
 check "git was never called" [ ! -s "$work/git-calls" ]
 check "VERSION of the installation is $version" [ "$(tr -d '[:space:]' <"$work/cadence/VERSION")" = "$version" ]
@@ -587,6 +653,23 @@ check "/ serves the UI" html
 webhook_code="$(http_code -X POST -H 'X-GitHub-Event: ping' -d '{}' "$base/webhooks/github")"
 check "/webhooks/github reaches the API and rejects an unsigned delivery ($webhook_code)" client_error "$webhook_code"
 check "caddy does not try ACME in proxy mode" lacks "$(docker compose logs caddy 2>&1 | tr '[:upper:]' '[:lower:]')" acme
+
+# --- agent kit and /docs --------------------------------------------------------------
+# clab setup takes the agent kit from the instance (since v0.12.0): an open
+# GET /v1/agent-kit with the version of the server, reaching the API through
+# the same /v1/* route of Caddy. The page /docs is a route of the UI. Images
+# of a branch (a pin variable set) are checked whatever VERSION says.
+info "agent kit"
+check "/docs serves the UI" bash -c "curl -sf '$base/docs' | grep -qi '<html'"
+if version_lt "$version" v0.12.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+  info "skipped: the images of $version have no agent kit (v0.12.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+else
+  check "/v1/agent-kit answers 200 without a token" [ "$(http_code "$base/v1/agent-kit")" = 200 ]
+  kit="$(curl -sf "$base/v1/agent-kit" || true)"
+  check "the agent kit has the version of the stack: $version" [ "$(jq -r '.version' <<<"$kit" 2>/dev/null)" = "$version" ]
+  check "the agent kit has clab-work, clab-guide and the agent clab-stage" \
+    [ "$(jq -r '[.skills[].name, .agents[].name] | map(select(. == "clab-work" or . == "clab-guide" or . == "clab-stage")) | length' <<<"$kit" 2>/dev/null)" = 3 ]
+fi
 
 # --- metrics -------------------------------------------------------------------------
 # Prometheus metrics (since v0.10.0): each process listens on :9090 inside the
@@ -1082,11 +1165,11 @@ else
     up=v98.0.0
     "$repo/ci/package.sh" --version "$up" "$work/releases/download/$up" >/dev/null
     sleep 1
-    out="$(CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST="" CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
+    out="$(CADENCE_VERIFY=off CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST="" CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
     check "the upgrade copies its backup to the bucket" contains "$out" "✓ uploaded cadence-$version-"
     env_set BACKUP_S3_ENDPOINT "http://s3stand-nowhere:7070"
     sleep 1
-    out="$(CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST="" CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
+    out="$(CADENCE_VERIFY=off CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST="" CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
     check "an unreachable bucket is a warning of the upgrade" contains "$out" "! the off-machine copy of cadence-$version-"
     check "...and the upgrade goes on" contains "$out" "the upgrade goes on: its rollback uses the local backup"
     check "...past the backup to the images of $up" contains "$out" "$up"
@@ -1148,7 +1231,7 @@ if [ "$db" = external ]; then
   upgrade_state() { printf '%s %s\n' "$(tr -d '[:space:]' <VERSION)" "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort | tr '\n' ' ')"; }
   before_upgrade="$(upgrade_state)"
   docker stop "$EXT_DB_NAME" >/dev/null
-  if out="$(CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$next" 2>&1)"; then
+  if out="$(CADENCE_VERIFY=off CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$next" 2>&1)"; then
     fail "an upgrade with the external database down must stop"
   else
     check "an upgrade with the external database down stops at the check of $next" \
@@ -1171,7 +1254,7 @@ if [ "$db" = external ]; then
   # so only a zero timeout makes "not ready" certain.
   mkdir -p "$work/clab-bin"
   ln -sf "$clab" "$work/clab-bin/clab"
-  if out="$(PATH="$work/clab-bin:$PATH" CADENCE_RELEASES_URL="file://$work/releases" CADENCE_READY_TIMEOUT=0 upgrade_cmd "$next" 2>&1)"; then
+  if out="$(PATH="$work/clab-bin:$PATH" CADENCE_VERIFY=off CADENCE_RELEASES_URL="file://$work/releases" CADENCE_READY_TIMEOUT=0 upgrade_cmd "$next" 2>&1)"; then
     fail "the upgrade to $next with a zero timeout must report it is not ready"
   else
     printf '%s\n' "$out" | tail -n 8
