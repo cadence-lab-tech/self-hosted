@@ -1458,9 +1458,9 @@ passes. A failed write to the log never fails the call: it is logged at
 
 **Retention.** `SDLC_AUDIT_RETENTION_DAYS` in `.env`, 180 by default; the
 worker deletes older entries hourly (the `audit_gc` job). `0` keeps the log
-forever. A negative or non-numeric value stops the `api` and the `worker`
-on start with an error naming the variable. Deleting a project deletes its
-log; the deletion itself stays in the instance log.
+forever. A negative or non-numeric value stops the `worker` on start with
+an error naming the variable (the `api` does not read it). Deleting a
+project deletes its log; the deletion itself stays in the instance log.
 
 **Reading it.** A maintainer of a project reads the log of a task and of the
 project, the system administrator also the entries without a project
