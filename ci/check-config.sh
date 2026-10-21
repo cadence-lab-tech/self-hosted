@@ -527,9 +527,24 @@ set_pin_roundtrip() {
   return "$rc"
 }
 check "set_pin rewrites the backend pin and keeps the frontend one" set_pin_roundtrip
+# ui and caddy run the frontend image from one anchor (x-image-frontend), so
+# one set_pin moves both and they never run different builds.
+set_pin_frontend_roundtrip() {
+  local f d rc=0
+  f="$(mktemp)"
+  d="sha256:$(printf '2%.0s' $(seq 64))"
+  cp docker-compose.yml "$f"
+  { set_pin frontend "$d" "$f" && [ "$(pin_of frontend "$f")" = "$d" ] && [ "$(pin_of backend "$f")" = "$backend_pin" ] &&
+    [ "$(env -u CADENCE_REGISTRY -u CADENCE_FRONTEND_DIGEST POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose -f "$f" config --format json |
+      jq -r '[.services.ui.image, .services.caddy.image] | unique | join(" ")')" = \
+      "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$d" ]; } || rc=1
+  rm -f "$f"
+  return "$rc"
+}
+check "set_pin rewrites the frontend pin of ui and caddy together and keeps the backend one" set_pin_frontend_roundtrip
 images() { env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST "$@" POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --images | sort -u | tr '\n' ' '; }
-check "no variable: api, worker and ui by tag and digest" \
-  [ "$(images)" = "$(printf '%s\n' caddy:2-alpine pgvector/pgvector:pg17 \
+check "no variable: api, worker, ui and caddy by tag and digest" \
+  [ "$(images)" = "$(printf '%s\n' pgvector/pgvector:pg17 \
     "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version@$backend_pin" \
     "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$frontend_pin" | sort -u | tr '\n' ' ')" ]
 check "a mirror (CADENCE_REGISTRY) keeps the digests" \
@@ -543,6 +558,10 @@ for mode in tls proxy; do
   check "[$mode] backend image is :$version@<pin>" contains "$config" "\"ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version@$backend_pin\""
   check "[$mode] frontend image is :$version@<pin>" contains "$config" "\"ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$frontend_pin\""
   check "[$mode] no build: sections" lacks "$config" '"build"'
+  # The entry point runs our Caddy (the frontend image), not caddy:2-alpine.
+  check "[$mode] caddy runs the frontend image of ui" \
+    [ "$(jq -r '.services.caddy.image' <<<"$config")" = "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$frontend_pin" ]
+  check "[$mode] no service runs caddy:2-alpine" lacks "$(jq -r '.services[].image' <<<"$config")" "caddy:2-alpine"
   # The images are multi-arch since v0.5.3: a platform pin would put arm64
   # machines back under emulation.
   check "[$mode] compose pins no platform" lacks "$config" '"platform"'

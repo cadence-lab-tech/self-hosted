@@ -127,7 +127,7 @@ or `/docs` in the UI). When done,
 | | |
 |---|---|
 | `VERSION` | the version of Cadence Lab this package runs; both images use it |
-| `docker-compose.yml` | Postgres with pgvector, the API, the worker, the UI and Caddy; only Caddy publishes ports, the API and the worker serve Prometheus metrics inside the network ([monitoring](docs/admin.md#monitoring)) |
+| `docker-compose.yml` | Postgres with pgvector, the API, the worker, the UI and Caddy; only Caddy publishes ports, and it runs the frontend image of the release (our Caddy, built from source), so the entry point is pinned and signed with the release; the API and the worker serve Prometheus metrics inside the network ([monitoring](docs/admin.md#monitoring)) |
 | `compose.tls.yml`, `compose.proxy.yml` | the published ports of each mode, picked by `COMPOSE_FILE` in `.env` |
 | `compose.external-db.yml` | your own PostgreSQL instead of the container (`CADENCE_DB=external`): no `postgres`, the backup client `db-client` |
 | `compose.override.yml` | not in the package: your local compose changes, created by `install.sh` and listed in `COMPOSE_FILE` |
