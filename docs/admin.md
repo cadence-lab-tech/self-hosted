@@ -1289,7 +1289,7 @@ counted twice.
 |---|---|---|---|
 | `cadence_build_info` | gauge | both | always 1; labels `component` (`api`, `worker`), `version`, `go_version` |
 | `cadence_http_request_duration_seconds` | histogram | api | request duration by `method`, `route` (template or `unmatched`) and `code` class (`2xx`, `4xx`, `5xx`) |
-| `cadence_audit_write_failures_total` | counter | api | [audit log](#audit-log) entries that could not be saved; the call itself went through |
+| `cadence_audit_write_failures_total` | counter | api | [audit log](#audit-log) entries that could not be saved; the call itself went through (from v0.11.0) |
 | `cadence_webhook_deliveries_total` | counter | api | webhook deliveries by `provider` and `outcome`: `queued` (accepted and applied), `ignored`, `duplicate`, `bad_signature`, `disabled` (no `SDLC_GITHUB_WEBHOOK_SECRET`), `error` |
 | `cadence_db_pool_connections` | gauge | both | pool connections by `state`: `acquired`, `idle`, `constructing` |
 | `cadence_db_pool_max_connections` | gauge | both | pool size, `SDLC_DB_MAX_CONNS` (10) |

@@ -483,14 +483,24 @@ else
   check "api has go_* and process_* metrics" contains "$api_metrics" "process_cpu_seconds_total "
   check "/metrics through caddy serves no metrics" lacks "$(curl -s "$base/metrics")" cadence_build_info
   # The table of docs/admin.md is the list: every cadence_* metric the
-  # processes expose is in it, and everything in it is exposed.
+  # processes expose is in it, and everything in it is exposed. A row marked
+  # "(from vX.Y.Z)" documents a metric ahead of its release: the images of an
+  # older VERSION do not expose it yet, and the release PR that brings it
+  # must not have to touch the table.
   exposed="$(printf '%s\n%s\n' "$api_metrics" "$worker_metrics" | sed -n 's/^# TYPE \(cadence_[a-z_]*\) .*/\1/p' | sort -u)"
+  metric_rows="$(sed -n '/^## Monitoring/,/^## /p' "$repo/docs/admin.md" | grep '^| `cadence_' || true)"
   # shellcheck disable=SC2016 # backticks of the markdown table, not a command
-  documented="$(sed -n '/^## Monitoring/,/^## /p' "$repo/docs/admin.md" | sed -n 's/^| `\(cadence_[a-z_]*\)`.*/\1/p' | sort -u)"
+  documented="$(sed -n 's/^| `\(cadence_[a-z_]*\)`.*/\1/p' <<<"$metric_rows" | sort -u)"
+  released="$(while IFS= read -r row; do
+    since="$(sed -n 's/.*(from \(v[0-9][0-9.]*\)).*/\1/p' <<<"$row")"
+    if [ -n "$since" ] && version_lt "$version" "$since"; then continue; fi
+    # shellcheck disable=SC2016 # backticks of the markdown table, not a command
+    sed -n 's/^| `\(cadence_[a-z_]*\)`.*/\1/p' <<<"$row"
+  done <<<"$metric_rows" | sort -u)"
   check "every exposed cadence_* metric is in the table of docs/admin.md" \
     [ -z "$(comm -23 <(printf '%s\n' "$exposed") <(printf '%s\n' "$documented"))" ]
-  check "every metric in the table of docs/admin.md is exposed" \
-    [ -z "$(comm -13 <(printf '%s\n' "$exposed") <(printf '%s\n' "$documented"))" ]
+  check "every metric in the table of docs/admin.md is exposed (rows from a later release aside)" \
+    [ -z "$(comm -13 <(printf '%s\n' "$exposed") <(printf '%s\n' "$released"))" ]
   [ -n "$exposed" ] || fail "no cadence_* metrics exposed"
 fi
 
