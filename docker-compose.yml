@@ -41,6 +41,13 @@ name: cadence
 x-image-backend: &image-backend
   image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_BACKEND_DIGEST-@sha256:c7563e6f292c9a2833ac7fa3684670c579ae567f311d02ffadc17106c29d8cb8}
 
+# The frontend image runs two services: ui (the static files) and caddy (the
+# entry point). Its Caddy is built from source on a current Go (docs/admin.md,
+# "Known scanner findings"), so what faces the internet is pinned, signed and
+# verified together with the release, like the API.
+x-image-frontend: &image-frontend
+  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_FRONTEND_DIGEST-@sha256:aef5cb3bbcf5114e7d1a771d29c1d85f7073484c89bf6677c808071f3b69697d}
+
 # Settings the API and the worker must agree on.
 #
 # Every secret X also takes X_FILE: the path of a file inside the container
@@ -214,14 +221,15 @@ services:
 
   # The UI: static files served by Caddy inside the image.
   ui:
-    image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_FRONTEND_DIGEST-@sha256:aef5cb3bbcf5114e7d1a771d29c1d85f7073484c89bf6677c808071f3b69697d}
+    <<: *image-frontend
     restart: unless-stopped
 
   # The single entry point: the UI, /v1, /mcp, /webhooks, /healthz, /readyz.
   # CADENCE_MODE picks the site block in the Caddyfile; the published ports
-  # come from compose.tls.yml or compose.proxy.yml.
+  # come from compose.tls.yml or compose.proxy.yml. The image is the one of
+  # ui; the Caddyfile of the package replaces the one inside it.
   caddy:
-    image: caddy:2-alpine
+    <<: *image-frontend
     restart: unless-stopped
     environment:
       CADENCE_MODE: ${CADENCE_MODE:-tls}

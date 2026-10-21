@@ -1770,7 +1770,10 @@ copy the whole index with all its platforms and attestations, for example
 `crane copy ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 mirror.example.com/cadence/sdlc-pipeline-backend:v0.9.0`
 or `skopeo copy --all docker://… docker://…`; a mirror that rebuilds or
 re-pushes single-platform images has other digests, and the pull fails.
-Signatures are checked against `ghcr.io` by the same digest.
+Signatures are checked against `ghcr.io` by the same digest. From the
+release after v0.12.0 the `caddy` service runs the frontend image too, so
+the mirror needs no `caddy:2-alpine`; `pgvector/pgvector` still comes from
+Docker Hub (or your Docker Hub mirror).
 
 A mirror of the releases must keep `checksums.txt.sigstore.json` of every
 release from v0.9.0 on: with `cosign` on the machine, a release without it
@@ -2376,31 +2379,40 @@ cosign verify-blob --bundle checksums.txt.sigstore.json \
 ### Known scanner findings
 
 A scanner that matches by module version may report vulnerabilities that do
-not affect Cadence Lab. Each such finding is stated in machine-readable
-[OpenVEX](https://openvex.dev/) — the file `.github/release/openvex.json` of
-the backend repository at the tag of the release, attached to the backend
-image as a signed attestation:
+not affect Cadence Lab. Each such finding in our images is stated in
+machine-readable [OpenVEX](https://openvex.dev/) — the file
+`.github/release/openvex.json` of the backend and of the frontend repository
+at the tag of the release, attached to the image as a signed attestation
+(the frontend image has one from the release after v0.12.0):
 
 | finding | component | status | why |
 |---|---|---|---|
 | [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) | `golang.org/x/crypto` in `/api` of the backend image | not affected, vulnerable code not present | the advisory is about the `golang.org/x/crypto/openpgp` packages; none of them is in the binaries, the module is there for other packages |
+| [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) | `golang.org/x/crypto` in `/usr/bin/caddy` of the frontend image | not affected, vulnerable code not present | the same advisory; we build Caddy from source, and the build fails if any `golang.org/x/crypto/openpgp` package gets into it |
+| [CVE-2026-85091](https://nvd.nist.gov/vuln/detail/CVE-2026-85091) | `zlib` 1.3.2-r0 of the Alpine base of the frontend image | not affected, vulnerable code not in execute path | the only process of the image is Caddy, a static Go binary without cgo that does not load libz; only `apk` and `curl` link it, and neither the image nor the package runs them. It goes away when `caddy:2-alpine` is republished with zlib 1.3.2-r1 |
 
 ```bash
-# the signed VEX attached to the image
-cosign verify-attestation --type openvex \
-  --certificate-identity "https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/v0.9.0" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 | jq -r .payload | base64 -d | jq .predicate.statements
+v=$(cat VERSION)
+# the signed VEX attached to each image
+for repo in sdlc-pipeline-backend sdlc-pipeline-frontend; do
+  cosign verify-attestation --type openvex \
+    --certificate-identity "https://github.com/cadence-lab-tech/$repo/.github/workflows/release.yml@refs/tags/$v" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "ghcr.io/cadence-lab-tech/$repo:$v" | jq -r .payload | base64 -d | jq .predicate.statements
+done
 
 # scanners with the VEX: from the registry or from the file of the tag
-trivy image --vex oci --show-suppressed ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0
-curl -fsSLO https://raw.githubusercontent.com/cadence-lab-tech/sdlc-pipeline-backend/v0.9.0/.github/release/openvex.json
-trivy image --vex openvex.json ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0
-grype ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.9.0 --vex openvex.json
+trivy image --vex oci --show-suppressed ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:"$v"
+curl -fsSL -o openvex-frontend.json "https://raw.githubusercontent.com/cadence-lab-tech/sdlc-pipeline-frontend/$v/.github/release/openvex.json"
+trivy image --vex openvex-frontend.json --show-suppressed ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:"$v"
+grype ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:"$v" --vex openvex-frontend.json
+curl -fsSL -o openvex-backend.json "https://raw.githubusercontent.com/cadence-lab-tech/sdlc-pipeline-backend/$v/.github/release/openvex.json"
+trivy image --vex openvex-backend.json ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:"$v"
+grype ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:"$v" --vex openvex-backend.json
 ```
 
-The operating system layer of the backend image has no known findings: from
-the release after v0.11.0 the image is built on
+**The backend image.** The operating system layer has no known findings:
+from the release after v0.11.0 the image is built on
 `gcr.io/distroless/static-debian13:nonroot`. Up to v0.11.0 it was built on
 `static-debian12`, which gets no Debian LTS updates, and a scanner reports
 tzdata `DLA-4792-1` and ca-certificates `DLA-4845-1` in it; the services
@@ -2409,6 +2421,89 @@ upgrade rather than suppress them. The user and group of the image stay
 `nonroot` (65532): the `blobs` volume of an existing installation needs no
 change.
 
+**The frontend image and the entry point.** From the release after v0.12.0
+the frontend image runs Caddy built from source by its `Dockerfile` — the
+same release of Caddy and the same standard modules as the official
+distribution, compiled on the current patch of Go 1.26 with the current
+`golang.org/x/net` and without cgo. The same image runs both `ui` (the
+static files) and `caddy`, the entry point of the stack: `caddy` is pinned
+by the digest of the frontend image, its signature is verified with the
+release, and the `Caddyfile` of the package is mounted over the one inside,
+as before; the `caddy_data` and `caddy_config` volumes do not change, and
+`caddy:2-alpine` is no longer pulled. Up to v0.12.0 both ran `/usr/bin/caddy`
+of `caddy:2-alpine`, built upstream on go1.26.8 with `golang.org/x/net`
+v0.59.0, and a scanner reports 20 findings in it (5 HIGH, on 2026-10-21) in
+`net/http`, `crypto/tls`, `crypto/x509` and `x/net/http2`. Some are
+reachable — a `Range` header served by `file_server` in `ui`, HTTP/2 on the
+public port of `caddy` — so upgrade rather than suppress them; until then,
+`CADENCE_MODE=proxy` behind your own proxy keeps TLS and HTTP/2 away from
+that Caddy.
+
+```bash
+# the Go and the modules our Caddy is built with
+docker run --rm ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:"$(cat VERSION)" caddy build-info |
+  grep -E '^go|caddy/v2|golang.org/x/net'
+```
+
+Grype (not Trivy) also reports findings of the Alpine base without a fix in
+Alpine — OpenSSL (`libssl3`, `libcrypto3`), `curl`, `nghttp2-libs`,
+`busybox` (its `wget`). They come from `caddy:2-alpine` itself and are the
+same in every image built on it. None of them is on the path of Caddy: Go
+has its own TLS and HTTP/2, and Caddy links no C library; `curl` and
+`ssl_client` are never run, and the package runs `busybox wget` in the
+`caddy` container only for plain HTTP inside the compose network
+(`http://ui/` on start, the metrics in its checks) with URLs of its own.
+They go away with the base image once Alpine ships the fixes.
+
+**Third-party images: `postgres` and `db-client`.** `pgvector/pgvector:pg17`
+(the `postgres` service) and `pgvector/pgvector:pg18` (the backup client
+`db-client` with an [external database](#external-postgresql)) are used by
+tag, as their maintainers publish them; both are Debian 12 (bookworm). On
+2026-10-21 Trivy reports in each 466 findings in Debian packages (15
+CRITICAL) and 61 in `/usr/local/bin/gosu`. By class:
+
+| class | findings on 2026-10-21 | what it means here |
+|---|---|---|
+| fixed in Debian (`fixed`): perl, tzdata, pcre2 | 54 | the image upstream was built before the fix; `docker compose pull` (and `./upgrade.sh`, which pulls) brings a rebuilt image without a release of ours |
+| no fix in Debian (`affected`, `fix_deferred`, `will_not_fix`): glibc, util-linux, perl, libxml2, sqlite, OpenSSL, GnuTLS, Kerberos, LDAP and others | 412 | not reachable in the stack: `postgres` publishes no port, only the API and the worker connect to it, with a password over the compose network; the schema has no `xml` columns and only the `pgcrypto`, `plpgsql` and `vector` extensions; the image has no PL/Perl or PL/Python; over the network clients sign in with `scram-sha-256` (`trust` is only for connections inside the container), no GSSAPI, LDAP or certificates; sqlite is there only for `gpg`, which the database does not run |
+| `gosu` (Go 1.24.6) | 61, all fixed in newer Go | `gosu` runs once, when the container starts: it drops root and executes `postgres`; no network, TLS or HTTP is on its path |
+
+With a policy that allows no image with an open CRITICAL, use your own
+managed PostgreSQL ([external PostgreSQL](#external-postgresql),
+`CADENCE_DB=external`): the stack then runs no `postgres`, and
+`pgvector/pgvector:pg18` remains only as `db-client`, a container that runs
+`pg_dump` and `psql` against your database for backups and exits.
+
+Why no VEX and why not Debian 13 now: an OpenVEX statement must be checkable
+against the image, and these images are not ours — they change with every
+rebuild upstream, hundreds of statements at a time. `pg17-trixie` (Debian
+13) reports fewer findings, but a database initialised on bookworm warns of
+a `collation version mismatch` (glibc 2.36 against 2.41) on every connection
+and needs a `REINDEX` — Cadence Lab moves to Debian 13 together with
+PostgreSQL 18, where a dump and restore rebuilds the collation anyway.
+
+```bash
+# the findings of the third-party images by status
+for image in pgvector/pgvector:pg17 pgvector/pgvector:pg18; do
+  trivy image -q --scanners vuln --format json "$image" |
+    jq -r --arg image "$image" '.Results[] | "\($image) \(.Type): " +
+      ([(.Vulnerabilities // [])[].Status] | group_by(.) | map("\(.[0]) \(length)") | join(", "))'
+done
+
+# no PL/Perl or PL/Python in the image: 0
+docker run --rm pgvector/pgvector:pg17 sh -c 'dpkg -l | grep -cE "plperl|plpython" || true'
+
+# in the directory of the installation: postgres publishes no port (null),
+# the extensions and the xml columns of the database, how clients sign in
+export CADENCE_VERSION=$(cat VERSION)
+docker compose config --format json | jq '.services.postgres.ports'
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At' <<'SQL'
+select string_agg(extname, ', ' order by extname) from pg_extension;
+select count(*) from information_schema.columns where data_type = 'xml';
+SQL
+docker compose exec -T postgres sh -c 'grep -Ev "^(#|$)" "$PGDATA/pg_hba.conf"'
+```
+
 How base images are kept up to date:
 
 - every `FROM` of the backend and frontend `Dockerfile` is pinned by digest
@@ -2416,21 +2511,23 @@ How base images are kept up to date:
   `node:24-alpine`, `caddy:2-alpine`); Dependabot proposes a new digest of
   the same tag once a week, and the image is built on the pull request
   before it is merged;
+- the release of Caddy and the Go modules it is built with are pinned in
+  `caddy/go.mod` and `caddy/go.sum` of the frontend; Dependabot proposes a
+  new patch or minor release of Caddy and new `golang.org/x/*` modules once
+  a week;
 - a new base reaches your installation with the next release; a finding in a
   base image that affects Cadence Lab is a reason for a patch release on its
   own;
 - a new line of a base image (Go, Node, Caddy, Debian) is a separate change,
   never an automatic one;
 - the third-party images of the stack, `pgvector/pgvector:pg17` and
-  `caddy:2-alpine` in `docker-compose.yml`, are used by tag, as their
-  maintainers publish them: their findings are upstream ones, and
-  `docker compose pull` brings their fixes. The frontend image is built on
-  `caddy:2-alpine` too and shows the same findings in `/usr/bin/caddy` until
-  Caddy is rebuilt upstream.
+  `pgvector/pgvector:pg18`, are used by tag: `docker compose pull` brings
+  their fixes, see the classes above.
 
 ```bash
-# the operating system of the backend image and its findings
+# the operating system and the binaries of the images of the release
 trivy image --scanners vuln --vex oci ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:"$(cat VERSION)"
+trivy image --scanners vuln --vex oci ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:"$(cat VERSION)"
 ```
 
 ## Managing the installation with clab server
