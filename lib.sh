@@ -194,6 +194,11 @@ check_mode() {
 # COMPOSE_FILE (docs/admin.md, "External PostgreSQL"). clab server follows the
 # same rules (cmd/clab/server_db.go of the backend) with the same messages.
 EXTERNAL_DB_FILE=compose.external-db.yml
+# Secrets in files (docs/admin.md, "Secrets in files"): Docker secrets of the
+# bundled database password and the administrator token. In COMPOSE_FILE it
+# goes before compose.external-db.yml, which turns the password file of the
+# bundled database off again.
+SECRETS_FILE=compose.secrets.yml
 # depends_on.required of compose.external-db.yml came with Compose 2.20.
 EXTERNAL_DB_MIN_COMPOSE=2.20.0
 # pg_dump options of every backup, in both modes: a dump without owners,
@@ -207,23 +212,73 @@ external_db() {
   [ "${CADENCE_DB:-bundled}" = external ]
 }
 
-# check_db_mode verifies that CADENCE_DB, SDLC_DATABASE_URL and COMPOSE_FILE
-# agree.
+# check_db_mode verifies that CADENCE_DB, SDLC_DATABASE_URL (or
+# SDLC_DATABASE_URL_FILE) and COMPOSE_FILE agree. It reads no secret file:
+# db_conn does, where the URL is needed.
 check_db_mode() {
-  local listed=false
+  local listed=false cf
   case ":${COMPOSE_FILE:-}:" in *":$EXTERNAL_DB_FILE:"*) listed=true ;; esac
+  [ -z "${SDLC_DATABASE_URL:-}" ] || [ -z "${SDLC_DATABASE_URL_FILE:-}" ] ||
+    die "both SDLC_DATABASE_URL and SDLC_DATABASE_URL_FILE are set in .env: keep one of them"
   case "${CADENCE_DB:-bundled}" in
   bundled)
     [ "$listed" = false ] ||
       die "COMPOSE_FILE in .env ('${COMPOSE_FILE:-}') lists $EXTERNAL_DB_FILE, but CADENCE_DB is bundled: set CADENCE_DB=external with SDLC_DATABASE_URL, or drop the file from COMPOSE_FILE"
     ;;
   external)
-    [ -n "${SDLC_DATABASE_URL:-}" ] || die "CADENCE_DB=external needs SDLC_DATABASE_URL in .env"
+    [ -n "${SDLC_DATABASE_URL:-}${SDLC_DATABASE_URL_FILE:-}" ] ||
+      die "CADENCE_DB=external needs SDLC_DATABASE_URL or SDLC_DATABASE_URL_FILE in .env"
     [ "$listed" = true ] ||
       die "COMPOSE_FILE in .env ('${COMPOSE_FILE:-}') does not include $EXTERNAL_DB_FILE for CADENCE_DB=external: add it after compose.${CADENCE_MODE:-tls}.yml"
+    cf=":${COMPOSE_FILE:-}:"
+    case ":${cf#*":$EXTERNAL_DB_FILE:"}" in
+    *":$SECRETS_FILE:"*)
+      die "COMPOSE_FILE in .env ('${COMPOSE_FILE:-}') lists $SECRETS_FILE after $EXTERNAL_DB_FILE: put it before, otherwise the password file of the bundled database reaches the service"
+      ;;
+    esac
     ;;
   *) die "CADENCE_DB in .env is '${CADENCE_DB}', expected bundled or external" ;;
   esac
+}
+
+# --- secrets in files --------------------------------------------------------------
+# A secret X of the service may come as X_FILE: the path of a file inside the
+# containers (docs/admin.md, "Secrets in files"). The scripts read such a file
+# on this machine only where they need the value - the URL and the password
+# of an external database for the backup client - and know only the files of
+# ./secrets: /secrets/<file> (the directory mounted into api, worker and
+# db-client) and /run/secrets/<name> (Docker secrets, whose file is
+# ./secrets/<name> in compose.secrets.yml and in the sample of admin.md).
+# clab server follows the same rules (cmd/clab/server_db.go of the backend).
+
+# host_secret_path NAME PATH sets SECRET_PATH - the file of PATH (the value of
+# NAME) on this machine - or refuses a path outside ./secrets.
+host_secret_path() {
+  local name="$1" p="$2" rel=""
+  case "$p" in
+  /secrets/*) rel="${p#/secrets/}" ;;
+  /run/secrets/*) rel="${p#/run/secrets/}" ;;
+  esac
+  case "/$rel/" in //* | */../* | */./* | *//*) rel="" ;; esac
+  [ -n "$rel" ] ||
+    die "$name is '$p': the scripts read this file on this machine and know only the files in secrets/ of the installation (/secrets/<file> or /run/secrets/<name> in the containers). Move the file into secrets/ and set $name=/secrets/<file> (docs/admin.md, \"Secrets in files\")"
+  SECRET_PATH="$PWD/secrets/$rel"
+}
+
+# read_secret_file NAME PATH sets SECRET_VALUE to the content of the file
+# without the trailing newlines (\n, \r\n). An error names NAME and the file,
+# never the content.
+read_secret_file() {
+  local name="$1" value
+  host_secret_path "$name" "$2"
+  [ ! -d "$SECRET_PATH" ] || die "$name: $SECRET_PATH is a directory, not a file"
+  [ -e "$SECRET_PATH" ] || die "$name: stat $SECRET_PATH: no such file or directory"
+  [ -r "$SECRET_PATH" ] || die "$name: open $SECRET_PATH: permission denied (it must be readable by $(id -un), docs/admin.md, \"Secrets in files\")"
+  value="$(cat "$SECRET_PATH" && printf x)" || die "$name: cannot read $SECRET_PATH"
+  value="${value%x}"
+  while [[ "$value" == *$'\n' || "$value" == *$'\r' ]]; do value="${value%?}"; done
+  [ -n "$value" ] || die "$name: $SECRET_PATH is empty"
+  SECRET_VALUE="$value"
 }
 
 # compose_version prints the version of Docker Compose without the leading v
@@ -269,6 +324,40 @@ db_target() {
   printf '%s\n' "${s%%\?*}"
 }
 
+# db_label prints the external database for the messages: host:port/database
+# of SDLC_DATABASE_URL, or the file of SDLC_DATABASE_URL_FILE - which is not
+# read for a message.
+db_label() {
+  if [ -n "${SDLC_DATABASE_URL:-}" ] || [ -z "${SDLC_DATABASE_URL_FILE:-}" ]; then
+    db_target "${SDLC_DATABASE_URL:-}"
+  else
+    printf '(URL in %s)\n' "$SDLC_DATABASE_URL_FILE"
+  fi
+}
+
+# db_conn sets DB_URL_SAFE and DB_PASSWORD of the external database: from
+# SDLC_DATABASE_URL or the file of SDLC_DATABASE_URL_FILE, the password from
+# the URL or from the file of SDLC_DATABASE_PASSWORD_FILE. Both forms of one
+# value refuse, like the service does.
+db_conn() {
+  local url="${SDLC_DATABASE_URL:-}"
+  if [ -n "${SDLC_DATABASE_URL_FILE:-}" ]; then
+    [ -z "$url" ] || die "both SDLC_DATABASE_URL and SDLC_DATABASE_URL_FILE are set in .env: keep one of them"
+    read_secret_file SDLC_DATABASE_URL_FILE "$SDLC_DATABASE_URL_FILE"
+    url="$SECRET_VALUE"
+  fi
+  [ -n "$url" ] || die "CADENCE_DB=external needs SDLC_DATABASE_URL or SDLC_DATABASE_URL_FILE in .env"
+  db_url_parts "$url"
+  if [ -n "${SDLC_DATABASE_PASSWORD_FILE:-}" ]; then
+    [[ "$url" =~ ^postgres(ql)?://[^/?#]+ ]] ||
+      die "SDLC_DATABASE_PASSWORD_FILE needs SDLC_DATABASE_URL as a URL postgres://USER@HOST:PORT/DATABASE; the URL does not parse as one"
+    [ -z "$DB_PASSWORD" ] ||
+      die "both SDLC_DATABASE_PASSWORD_FILE and a password in the URL of SDLC_DATABASE_URL (or SDLC_DATABASE_URL_FILE) are set: keep one of them"
+    read_secret_file SDLC_DATABASE_PASSWORD_FILE "$SDLC_DATABASE_PASSWORD_FILE"
+    DB_PASSWORD="$SECRET_VALUE"
+  fi
+}
+
 # db_check [ARGS...]: the check of the database in the backend image
 # (/api dbcheck) - the driver and the TLS of the service: the URL, the
 # connection, the server version, the extensions, the privileges, the schema.
@@ -277,10 +366,10 @@ db_check() {
 }
 
 # db_client ARGS...: a command of the backup client (db-client of
-# compose.external-db.yml) with PGPASSWORD of SDLC_DATABASE_URL; the URL on
-# its command line is DB_URL_SAFE.
+# compose.external-db.yml) with the password of the database (db_conn) in
+# PGPASSWORD; the URL on its command line is DB_URL_SAFE.
 db_client() {
-  db_url_parts "$SDLC_DATABASE_URL"
+  db_conn
   PGPASSWORD="$DB_PASSWORD" docker compose run --rm --no-deps -T -e PGPASSWORD db-client "$@"
 }
 
@@ -288,7 +377,7 @@ db_client() {
 # URL the service takes but pg_dump does not would surface only at the first
 # backup.
 db_client_check() {
-  db_url_parts "$SDLC_DATABASE_URL"
+  db_conn
   db_client psql -X -q -At -d "$DB_URL_SAFE" -c 'SELECT 1' >/dev/null
 }
 
@@ -347,8 +436,11 @@ SQL
 # /api backup-s3 of the backend image (v0.10.0+): the host needs no aws or
 # rclone, and no other image is pulled. clab server follows the same rules
 # (cmd/clab/server_offsite.go of the backend) with the same messages.
+# The keys may come as files (BACKUP_S3_*_FILE, a path inside the container):
+# /api backup-s3 reads them as the caller.
 BACKUP_S3_VARS=(BACKUP_S3_BUCKET BACKUP_S3_ENDPOINT BACKUP_S3_REGION BACKUP_S3_PREFIX
-  BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY BACKUP_S3_PATH_STYLE BACKUP_S3_KEEP)
+  BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_ACCESS_KEY_ID_FILE BACKUP_S3_SECRET_ACCESS_KEY BACKUP_S3_SECRET_ACCESS_KEY_FILE
+  BACKUP_S3_PATH_STYLE BACKUP_S3_KEEP)
 
 backup_s3_configured() {
   [ -n "${BACKUP_S3_BUCKET:-}" ]

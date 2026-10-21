@@ -1,0 +1,123 @@
+{{- $metrics := ne (toString .Values.metrics.enabled) "false" }}
+# Background jobs: leases, indexing with drift detection, pull request state,
+# embeddings, the blob collector. Same image, another entrypoint; no
+# migrations, no HTTP but the metrics. Several replicas share the jobs
+# (SKIP LOCKED).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cadence.fullname" . }}-worker
+  labels:
+    {{- include "cadence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  strategy:
+    {{- toYaml .Values.worker.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "cadence.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "cadence.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      {{- if or .Values.worker.podAnnotations (and $metrics .Values.metrics.podAnnotations) }}
+      annotations:
+        {{- if and $metrics .Values.metrics.podAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "cadence.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "cadence.podSecurityContext" . | nindent 8 }}
+      # The worker starts once the API is ready - the schema is there - as
+      # in docker-compose.yml. /api healthcheck asks /readyz of the API once;
+      # until it answers, the kubelet restarts this container with a backoff.
+      initContainers:
+        - name: wait-for-api
+          image: {{ include "cadence.image" (list . "backend") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/api", "healthcheck"]
+          env:
+            - name: SDLC_HTTP_ADDR
+              value: {{ printf "%s-api:8080" (include "cadence.fullname" .) | quote }}
+          securityContext:
+            {{- include "cadence.containerSecurityContext" . | nindent 12 }}
+      containers:
+        - name: worker
+          image: {{ include "cadence.image" (list . "backend") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/worker"]
+          securityContext:
+            {{- include "cadence.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "cadence.env" (list . "worker") | trim | nindent 12 }}
+          {{- if $metrics }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          # No traffic, no readiness; alive while the metrics listener is.
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          {{- end }}
+          {{- with .Values.worker.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with include "cadence.secretMount" (list . "worker") }}
+          volumeMounts:
+            {{- . | trim | nindent 12 }}
+          {{- end }}
+      {{- with include "cadence.secretVolume" (list . "worker") }}
+      volumes:
+        {{- . | trim | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $metrics }}
+---
+# The metrics of the worker, inside the cluster only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cadence.fullname" . }}-worker-metrics
+  labels:
+    {{- include "cadence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cadence.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+{{- end }}

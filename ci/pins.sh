@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034 # the constants are read by the scripts that source it
 #
-# The digests the package pins its images to (docker-compose.yml). Sourced by
+# The digests the package pins its images to (docker-compose.yml and the Helm
+# chart, charts/cadence/values.yaml). Sourced by
 # ci/release-pr.sh, which writes them for a released version, by
 # ci/check-config.sh and by the check workflow, which compare them with the
 # registry. Not part of the package.
@@ -70,4 +71,47 @@ registry_digest() {
     return 1
   }
   printf '%s\n' "$digest"
+}
+
+# The Helm chart pins the same digests (charts/cadence/values.yaml), one line
+# per image, the variable of docker-compose.yml as a comment:
+#
+#   digest: "sha256:<64 hex>" # CADENCE_BACKEND_DIGEST
+#
+# and carries the version in charts/cadence/Chart.yaml: version X.Y.Z (VERSION
+# without the v, Helm wants SemVer) and appVersion vX.Y.Z.
+CHART_VALUES=charts/cadence/values.yaml
+CHART_FILE=charts/cadence/Chart.yaml
+
+# chart_pin_of IMAGE [FILE]: the digest values.yaml pins IMAGE to; nothing
+# (and status 1) when there is no pin.
+chart_pin_of() {
+  local var
+  var="$(pin_var "$1")" || return 1
+  sed -n "s/^ *digest: \"\(sha256:[0-9a-f]\{64\}\)\" # $var\$/\1/p" "${2:-$CHART_VALUES}" | head -n 1 | grep .
+}
+
+# set_chart_pin IMAGE DIGEST [FILE]: writes DIGEST as the pin of IMAGE in
+# values.yaml.
+set_chart_pin() {
+  local var file="${3:-$CHART_VALUES}"
+  var="$(pin_var "$1")" || return 1
+  [[ "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  chart_pin_of "$1" "$file" >/dev/null || return 1
+  sed -i.bak "s/^\( *digest: \"\)sha256:[0-9a-f]\{64\}\(\" # $var\)\$/\1$2\2/" "$file" && rm -f "$file.bak"
+  [ "$(chart_pin_of "$1" "$file")" = "$2" ]
+}
+
+# chart_version_of [FILE]: "version appVersion" of Chart.yaml.
+chart_version_of() {
+  local file="${1:-$CHART_FILE}"
+  printf '%s %s\n' "$(sed -n 's/^version: \(.*\)$/\1/p' "$file")" "$(sed -n 's/^appVersion: \(.*\)$/\1/p' "$file")"
+}
+
+# set_chart_version VERSION [FILE]: version X.Y.Z and appVersion vX.Y.Z.
+set_chart_version() {
+  local file="${2:-$CHART_FILE}"
+  [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  sed -i.bak -e "s/^version: .*/version: ${1#v}/" -e "s/^appVersion: .*/appVersion: $1/" "$file" && rm -f "$file.bak"
+  [ "$(chart_version_of "$file")" = "${1#v} $1" ]
 }

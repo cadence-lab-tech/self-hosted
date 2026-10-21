@@ -1,0 +1,4 @@
+# Findings of gitleaks that are not secrets: fingerprint per line.
+# CLAB-201: the expected fixed values of compose (SDLC_STRICT_GATES=true and
+# the like) in a line of ci/check-config.sh, rewritten since.
+56774dcc5703479b5e5a7d5d724bd17a455a9176:ci/check-config.sh:generic-api-key:941

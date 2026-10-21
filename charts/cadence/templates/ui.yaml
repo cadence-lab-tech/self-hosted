@@ -1,0 +1,105 @@
+# The UI: static files served by Caddy inside the frontend image. The image
+# runs as root and listens on :80, so the pod meets Pod Security "baseline",
+# not "restricted" (docs/admin.md, "Kubernetes (Helm)"); everything else is
+# taken away from it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cadence.fullname" . }}-ui
+  labels:
+    {{- include "cadence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      {{- include "cadence.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ui
+  template:
+    metadata:
+      labels:
+        {{- include "cadence.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ui
+      {{- with .Values.ui.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "cadence.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ui
+          image: {{ include "cadence.image" (list . "frontend") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+          {{- with .Values.ui.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # Caddy keeps its state under /data and /config.
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: config
+          emptyDir: {}
+      {{- with .Values.ui.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.ui.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.ui.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cadence.fullname" . }}-ui
+  labels:
+    {{- include "cadence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cadence.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

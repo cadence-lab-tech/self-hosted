@@ -2,7 +2,8 @@
 #
 # The digests docker-compose.yml pins are the images of VERSION in the
 # registry: for each image, the digest of the tag VERSION today equals the
-# pin. A tag moved after the release (or a pin written by hand) turns the
+# pin, and the values of the Helm chart pin the same digest (its Chart.yaml
+# is of VERSION). A tag moved after the release (or a pin written by hand) turns the
 # check red with both digests - the package would install other bytes than
 # its version names. The check workflow runs it on every pull request and
 # push to main; it needs Docker with buildx and the registry.
@@ -37,5 +38,17 @@ for image in $PIN_IMAGES; do
     continue
   fi
   ok "$ref is $pin, the pin of docker-compose.yml"
+  # The Helm chart pins the same bytes.
+  chart_pin="$(chart_pin_of "$image" || true)"
+  if [ "$chart_pin" != "$pin" ]; then
+    printf '::error file=%s::%s: the chart pins %s, docker-compose.yml and the registry %s\n' "$CHART_VALUES" "$image" "${chart_pin:-nothing}" "$pin"
+    failures=$((failures + 1))
+    continue
+  fi
+  ok "$CHART_VALUES pins $image to the same $pin"
 done
+if [ "$(chart_version_of)" != "${version#v} $version" ]; then
+  printf '::error file=%s::version and appVersion are %s, VERSION is %s\n' "$CHART_FILE" "$(chart_version_of)" "$version"
+  failures=$((failures + 1))
+fi
 [ "$failures" -eq 0 ] || die "$failures image(s) of $version do not match their pin"

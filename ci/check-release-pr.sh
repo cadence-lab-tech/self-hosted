@@ -7,7 +7,8 @@
 #   ci/check-release-pr.sh
 #
 # Scenarios: both images signed - the branch release/vX.Y.Z moves VERSION and
-# pins both digests in docker-compose.yml, the pull request names them; an
+# pins both digests in docker-compose.yml and in the values of the Helm chart,
+# with the version of the chart; the pull request names them; an
 # image without the signature of its release.yml, a tag moved after the
 # release event, an image that is not published - a failed run, no branch, no
 # pull request; main already on the version, an open pull request - nothing
@@ -139,8 +140,32 @@ if remote_branch; then
   check_pin backend "$backend_digest" "the branch pins backend to $backend_digest"
   check_pin frontend "$frontend_digest" "the branch pins frontend to $frontend_digest"
   if [ "$(git -C "$work/origin.git" show "release/$version:VERSION")" = "$version" ]; then pass "the branch has VERSION $version"; else fail "VERSION on the branch is not $version"; fi
+  # The chart pins the same digests and carries the version (ci/pins.sh).
+  git -C "$work/origin.git" show "release/$version:$CHART_VALUES" >"$work/values.yaml"
+  git -C "$work/origin.git" show "release/$version:$CHART_FILE" >"$work/Chart.yaml"
+  check_chart_pin() {
+    if [ "$(chart_pin_of "$1" "$work/values.yaml")" = "$2" ]; then pass "$3"; else fail "$3: $(chart_pin_of "$1" "$work/values.yaml" || true)"; fi
+  }
+  check_chart_pin backend "$backend_digest" "the chart pins backend to $backend_digest"
+  check_chart_pin frontend "$frontend_digest" "the chart pins frontend to $frontend_digest"
+  if [ "$(chart_version_of "$work/Chart.yaml")" = "${version#v} $version" ]; then
+    pass "Chart.yaml has version ${version#v} and appVersion $version"
+  else
+    fail "Chart.yaml has version and appVersion $(chart_version_of "$work/Chart.yaml")"
+  fi
   changed="$(git -C "$work/origin.git" diff --name-only main "release/$version" | tr '\n' ' ')"
-  if [ "$changed" = "VERSION docker-compose.yml " ]; then pass "the commit changes VERSION and docker-compose.yml only"; else fail "the commit changes: $changed"; fi
+  if [ "$changed" = "VERSION $CHART_FILE $CHART_VALUES docker-compose.yml " ]; then
+    pass "the commit changes VERSION, docker-compose.yml and the chart only"
+  else
+    fail "the commit changes: $changed"
+  fi
+  for f in "$CHART_VALUES" "$CHART_FILE"; do
+    if [ "$(git -C "$work/origin.git" diff main "release/$version" -- "$f" | grep -c '^[-+][^-+]')" = 4 ]; then
+      pass "$f: only the two lines change"
+    else
+      fail "$f: more than the two lines change"
+    fi
+  done
   # Nothing else in the compose file moved: only the two digests.
   if [ "$(git -C "$work/origin.git" diff main "release/$version" -- docker-compose.yml | grep -c '^[-+] ')" = 4 ]; then
     pass "docker-compose.yml: only the two image lines change"

@@ -1,0 +1,21 @@
+# The Helm chart of Cadence Lab: the second way to install the package, next
+# to docker-compose.yml (docs/admin.md, "Kubernetes (Helm)").
+#
+# One version for the package, the images and the chart: version is VERSION
+# of the package without the "v" (Helm wants SemVer), appVersion is VERSION.
+# The release pull request (ci/release-pr.sh) writes both together with the
+# digests of the images in values.yaml; ci/check-config.sh keeps them equal.
+apiVersion: v2
+name: cadence
+description: Cadence Lab - the development cycle for teams of people and agents, on your PostgreSQL and S3 bucket.
+type: application
+version: 0.12.0
+appVersion: v0.12.0
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/cadence-lab-tech/self-hosted
+sources:
+  - https://github.com/cadence-lab-tech/self-hosted
+  - https://github.com/cadence-lab-tech/sdlc-pipeline-backend
+  - https://github.com/cadence-lab-tech/sdlc-pipeline-frontend
+annotations:
+  licenses: FSL-1.1-ALv2

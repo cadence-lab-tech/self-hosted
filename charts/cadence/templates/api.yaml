@@ -1,0 +1,129 @@
+{{- include "cadence.validate" . -}}
+{{- $metrics := ne (toString .Values.metrics.enabled) "false" }}
+# The API: REST, MCP, webhooks and the probes. It applies the migrations on
+# start (SDLC_AUTO_MIGRATE) under an advisory lock, so several replicas start
+# safely; /readyz answers 200 only after them.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cadence.fullname" . }}-api
+  labels:
+    {{- include "cadence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  strategy:
+    {{- toYaml .Values.api.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "cadence.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "cadence.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      {{- if or .Values.api.podAnnotations (and $metrics .Values.metrics.podAnnotations) }}
+      annotations:
+        {{- if and $metrics .Values.metrics.podAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "cadence.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "cadence.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "cadence.image" (list . "backend") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "cadence.containerSecurityContext" . | nindent 12 }}
+          env:
+            {{- include "cadence.env" (list . "api") | trim | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+            {{- if $metrics }}
+            - name: metrics
+              containerPort: 9090
+            {{- end }}
+          # The migrations of an upgrade run before the first /readyz.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: {{ .Values.api.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.api.startupProbe.failureThreshold }}
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          {{- with .Values.api.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with include "cadence.secretMount" (list . "api") }}
+          volumeMounts:
+            {{- . | trim | nindent 12 }}
+          {{- end }}
+      {{- with include "cadence.secretVolume" (list . "api") }}
+      volumes:
+        {{- . | trim | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cadence.fullname" . }}-api
+  labels:
+    {{- include "cadence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cadence.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    {{- if $metrics }}
+    # Inside the cluster only: the Ingress does not route it.
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+    {{- end }}
