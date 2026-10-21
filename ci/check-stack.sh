@@ -622,7 +622,7 @@ x86_64 | amd64) host_platform=linux/amd64 ;;
 aarch64 | arm64) host_platform=linux/arm64 ;;
 *) host_platform="linux/$(docker info --format '{{.Architecture}}')" ;;
 esac
-for service in api ui; do
+for service in api ui caddy; do
   check "$service runs natively ($host_platform)" \
     [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$(docker compose images -q "$service")")" = "$host_platform" ]
 done
@@ -630,9 +630,10 @@ done
 # --- images --------------------------------------------------------------------------
 # The containers run what compose names: the tag of VERSION with the digest
 # the package pins, or the tag alone with the pin dropped (images of a branch).
+# caddy runs the frontend image, as ui does (since CLAB-234).
 info "images"
 compose_json="$(docker compose config --format json)"
-for service in api worker ui; do
+for service in api worker ui caddy; do
   want="$(jq -r ".services.$service.image" <<<"$compose_json")"
   check "$service runs $want" [ "$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q "$service")")" = "$want" ]
 done
