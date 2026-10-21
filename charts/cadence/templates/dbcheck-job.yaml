@@ -1,0 +1,76 @@
+{{- if .Values.dbcheck.enabled }}
+# The precheck of the database (/api dbcheck of the backend image of the
+# version being installed): before an installation (--install) and before an
+# upgrade. A database it refuses fails helm install or helm upgrade before
+# any Deployment changes; the pods of an upgrade keep running. The Job of a
+# failed check stays for its log until the next attempt.
+#
+# A hook runs before the resources of the chart exist: it uses the service
+# account "default" (or serviceAccount.name of yours) and the Secrets that
+# exist before the installation.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cadence.fullname" . }}-dbcheck
+  labels:
+    {{- include "cadence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dbcheck
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "cadence.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dbcheck
+    spec:
+      restartPolicy: Never
+      {{- if not .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "cadence.serviceAccountName" . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "cadence.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: dbcheck
+          image: {{ include "cadence.image" (list . "backend") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - dbcheck
+            {{- if .Release.IsInstall }}
+            - --install
+            {{- end }}
+            - --timeout
+            - {{ .Values.dbcheck.timeout | quote }}
+          securityContext:
+            {{- include "cadence.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: SDLC_DATABASE_URL
+              value: {{ default "" .Values.database.url | quote }}
+            {{- range (include "cadence.secretFiles" (list . "dbcheck") | fromYaml).files }}
+            {{- if .env }}
+            - name: {{ .env }}
+              value: {{ .path | quote }}
+            {{- end }}
+            {{- end }}
+          {{- with .Values.dbcheck.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with include "cadence.secretMount" (list . "dbcheck") }}
+          volumeMounts:
+            {{- . | trim | nindent 12 }}
+          {{- end }}
+      {{- with include "cadence.secretVolume" (list . "dbcheck") }}
+      volumes:
+        {{- . | trim | nindent 8 }}
+      {{- end }}
+{{- end }}

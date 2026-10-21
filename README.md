@@ -12,6 +12,11 @@ and the [administrator guide](docs/admin.md). Each release publishes them as
 one package; installing and upgrading need no git. Agents connect to your
 instance from developers' machines over MCP; nothing goes through us.
 
+A Kubernetes cluster takes the Helm chart `charts/cadence` instead (from
+v0.13.0): the same images and settings on your PostgreSQL and S3 bucket,
+published as `oci://ghcr.io/cadence-lab-tech/charts/cadence` and signed like
+the package ([Kubernetes (Helm)](docs/admin.md#kubernetes-helm)).
+
 ## Quick start
 
 On a Linux machine with Docker, one line downloads the package of the latest
@@ -134,6 +139,7 @@ production: when the evaluation is over, deploy on a server.
 | `bundles/starter.json` | a starter of roles and cycles for a new project, applied with `clab import` |
 | `package.sha256` | in the package only: the sha256 of each of its files, against which `upgrade.sh` finds local edits |
 | `get-cadence.sh` | the one-line installer, published next to the package (not in it) |
+| `charts/cadence` | not in the package: the Helm chart for Kubernetes, published with each release as an OCI artifact ([Kubernetes (Helm)](docs/admin.md#kubernetes-helm)) |
 | `ci/` | not in the package: building it (`ci/package.sh`) and the checks CI runs on the published images |
 
 ## Upgrading

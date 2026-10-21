@@ -1,0 +1,221 @@
+# Values of the Cadence Lab chart. docs/admin.md, "Kubernetes (Helm)", has
+# the guide and an example; the settings are the SDLC_* variables of
+# docker-compose.yml with the same defaults (ci/check-config.sh compares
+# them).
+#
+# No secret goes into these values: Helm keeps the values of a release in a
+# Secret of its own and shows them with `helm get values`. The chart refers
+# to Secrets that exist in the namespace before the installation (secrets
+# below) and mounts their keys as files: every secret X of the service gets
+# X_FILE (docs/admin.md, "Secrets in files").
+
+# The images: <registry>/<repository>:<tag>@<digest>. The tag is the
+# appVersion of the chart (VERSION of the package) unless image.tag is set.
+# The release pull request writes both digests - the same as the pins of
+# docker-compose.yml. A mirror in image.registry keeps the digests (copy with
+# crane copy or skopeo copy --all). An empty digest drops the pin: only for
+# development checks on images of a branch.
+image:
+  registry: ghcr.io/cadence-lab-tech
+  tag: ""
+  pullPolicy: IfNotPresent
+  backend:
+    repository: sdlc-pipeline-backend
+    digest: "sha256:3bec7e7c5f55ad40a4a544eb728a0f598e9f2958d68af06826f8f49c05c0ecd8" # CADENCE_BACKEND_DIGEST
+  frontend:
+    repository: sdlc-pipeline-frontend
+    digest: "sha256:95e140812a738c6ff6d1d99055a4224a9b2ac897f7119187b7086e3fcad5ba31" # CADENCE_FRONTEND_DIGEST
+imagePullSecrets: []
+
+# The single entry point, in place of the Caddy of the package: /v1, /mcp,
+# /webhooks, /healthz and /readyz go to the API, everything else to the UI.
+# The metrics port is not routed. MCP answers with a stream (SSE): the
+# controller must not buffer it nor cut it by a read timeout - for
+# ingress-nginx see the annotations in docs/admin.md.
+ingress:
+  # The IngressClass; empty - the default class of the cluster.
+  className: ""
+  # The address people open, without the scheme. Required.
+  host: ""
+  tls:
+    # The Secret with the certificate of the host (cert-manager or yours);
+    # empty - no TLS on the Ingress (TLS ends before it).
+    secretName: ""
+  annotations: {}
+
+# The database: your PostgreSQL with pgvector (docs/admin.md, "External
+# PostgreSQL"); the chart has none. Either the whole URL in a key of a Secret
+# (secrets.keys.SDLC_DATABASE_URL), or the URL without a password here and
+# the password in a key of a Secret (secrets.keys.SDLC_DATABASE_PASSWORD).
+# A URL with a password is a secret itself: not here.
+database:
+  # postgres://cadence@db.internal:5432/cadence?sslmode=verify-full&sslrootcert=/secrets/cadence/db-ca.pem
+  url: ""
+
+# Artifact content: an S3 bucket, required - the pods of the API and of the
+# worker share no volume. The keys come from secrets.keys.
+blobs:
+  s3:
+    bucket: ""
+    endpoint: ""
+    region: ""
+    prefix: ""
+    pathStyle: true
+
+# Secrets, by reference. Every secret of docs/admin.md, "Secrets in files",
+# is a key of a Secret that exists in the namespace: secrets.name is the
+# Secret, secrets.keys.<variable> the key in it. A key that is set is mounted
+# read-only at /secrets/<secret>/<key> and its variable X gets X_FILE with
+# that path; an empty key sets nothing. A key missing in the Secret keeps the
+# pod from starting, naming the volume. "<secret>/<key>" takes the key of
+# another Secret.
+secrets:
+  # The Secret the keys below are looked up in. Required.
+  name: ""
+  keys:
+    # SDLC_DATABASE_URL_FILE: the URL with its password. Or:
+    SDLC_DATABASE_URL: ""
+    # SDLC_DATABASE_PASSWORD_FILE: the password put into database.url.
+    SDLC_DATABASE_PASSWORD: ""
+    # Required: the token of the administrator (SDLC_ADMIN_TOKEN_FILE).
+    SDLC_ADMIN_TOKEN: ""
+    # Required: the keys of the bucket of blobs.s3.
+    SDLC_BLOB_S3_ACCESS_KEY_ID: ""
+    SDLC_BLOB_S3_SECRET_ACCESS_KEY: ""
+    SDLC_BLOB_S3_SESSION_TOKEN: ""
+    SDLC_GITHUB_TOKEN: ""
+    # The private key of the GitHub App (a path already: SDLC_GITHUB_APP_KEY_FILE).
+    SDLC_GITHUB_APP_KEY_FILE: ""
+    SDLC_GITHUB_APP_CLIENT_SECRET: ""
+    SDLC_GITHUB_WEBHOOK_SECRET: ""
+    SDLC_EMBEDDINGS_API_KEY: ""
+    SDLC_VOYAGE_API_KEY: ""
+  # Tokens of repositories by their secret name: NAME: key gives
+  # SDLC_GITHUB_TOKEN_<NAME>_FILE.
+  githubTokens: {}
+  # Other keys to mount as files, without a variable: the CA of the database
+  # for sslrootcert=/secrets/<secret>/<key> of database.url. A key, or
+  # <secret>/<key>.
+  files: []
+
+# Settings of docker-compose.yml, as variables with their defaults. Shared by
+# the API and the worker, which must agree on them (the model of the
+# embeddings, the leases), then of each alone. Values are strings. The
+# values fixed in docker-compose.yml are fixed here too and are not listed:
+# SDLC_ENV=production, SDLC_STRICT_GATES=true, SDLC_MCP_ENABLED=true,
+# SDLC_AUTO_MIGRATE (true for the API, false for the worker),
+# SDLC_TENANCY=single, SDLC_PROJECT_CREATION=teams, SDLC_HTTP_ADDR=:8080.
+config:
+  shared:
+    SDLC_DB_MAX_CONNS: "10"
+    SDLC_DB_CONNECT_TIMEOUT: 30s
+    SDLC_LOG_LEVEL: info
+    SDLC_LEASE_TTL: 30m
+    SDLC_HEARTBEAT_INTERVAL: 5m
+    SDLC_GITHUB_API_URL: https://api.github.com
+    SDLC_GITHUB_APP_ID: ""
+    SDLC_EMBEDDINGS_PROVIDER: none
+    SDLC_EMBEDDINGS_MODEL: ""
+    SDLC_EMBEDDINGS_URL: ""
+    SDLC_EMBEDDINGS_BATCH: "96"
+    SDLC_EMBEDDINGS_SEND_DIMENSIONS: "true"
+  api:
+    SDLC_SEED: ""
+    SDLC_AUTH_MODE: token
+    SDLC_ADMIN_HANDLE: admin
+    SDLC_BOOTSTRAP_TEAM: ""
+    SDLC_BOOTSTRAP_TEAM_NAME: ""
+    SDLC_SESSION_TTL: 12h
+    SDLC_GITHUB_URL: https://github.com
+    SDLC_GITHUB_APP_CLIENT_ID: ""
+    SDLC_GITHUB_APP_SLUG: ""
+    SDLC_OIDC_ISSUER: ""
+    SDLC_OIDC_CLIENT_ID: ""
+    SDLC_OIDC_GROUPS_CLAIM: groups
+    # Traces of the API over OTLP/HTTP (docs/admin.md, "Tracing"); empty -
+    # nothing is exported. The worker is not traced.
+    OTEL_EXPORTER_OTLP_ENDPOINT: ""
+    OTEL_EXPORTER_OTLP_HEADERS: ""
+    OTEL_TRACES_EXPORTER: ""
+    OTEL_SERVICE_NAME: ""
+    OTEL_RESOURCE_ATTRIBUTES: ""
+    OTEL_TRACES_SAMPLER: ""
+    OTEL_TRACES_SAMPLER_ARG: ""
+  worker:
+    SDLC_LEASE_SWEEP_INTERVAL: 1m
+    SDLC_INDEX_ENABLED: "true"
+    SDLC_INDEX_INTERVAL: 5m
+    SDLC_INDEX_POLL_INTERVAL: 15s
+    SDLC_INDEX_RETAIN_RUNS: "5"
+    SDLC_BLOB_GC_ENABLED: "true"
+    SDLC_BLOB_GC_INTERVAL: 1h
+    SDLC_BLOB_GC_MIN_AGE: 24h
+    SDLC_EMBEDDING_CACHE_GC_ENABLED: "true"
+    SDLC_EMBEDDING_CACHE_TTL: 720h
+    SDLC_EMBEDDING_CACHE_MAX_ROWS: "1000000"
+    SDLC_AUDIT_RETENTION_DAYS: "180"
+# More variables for the API and the worker (a list of env entries, e.g. a
+# variable not in docker-compose.yml such as SDLC_BLOB_INLINE_MAX_BYTES). A
+# variable of the chart is not repeated here: change it in config.
+extraEnv: []
+
+# Prometheus metrics of the API and the worker on port 9090 inside the
+# cluster (docs/admin.md, "Monitoring"): Services of type ClusterIP, never
+# routed by the Ingress, served without a token. enabled: false turns the
+# listeners off (SDLC_METRICS_ADDR empty).
+metrics:
+  enabled: true
+  # prometheus.io/* annotations on the pods, for a Prometheus that discovers
+  # pods by them.
+  podAnnotations: false
+
+api:
+  replicas: 1
+  # Recreate: the old pods stop before the new ones start. Migrations only go
+  # forward and the old code is not promised to run on the new schema; a
+  # RollingUpdate here is your decision (docs/admin.md).
+  strategy:
+    type: Recreate
+  # Time for the migrations of an upgrade before the first /readyz: the pod
+  # is not restarted in the middle of them (failureThreshold x periodSeconds).
+  startupProbe:
+    periodSeconds: 5
+    failureThreshold: 120
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+worker:
+  replicas: 1
+  strategy:
+    type: Recreate
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+ui:
+  replicas: 1
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+# The precheck of the database before an installation and an upgrade: a Job
+# of the backend image of the new version runs /api dbcheck (--install on an
+# installation), and a database it refuses fails the helm command before any
+# Deployment changes (docs/admin.md, "External PostgreSQL").
+dbcheck:
+  enabled: true
+  # Seconds to connect and check.
+  timeout: 15s
+  resources: {}
+
+# The service account of the pods; they need no access to the Kubernetes API.
+serviceAccount:
+  create: true
+  name: ""

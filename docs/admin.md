@@ -2,7 +2,8 @@
 
 This guide takes a Cadence Lab installation from `./install.sh` to teams
 working with agents: first sign-in, teams and invites, GitHub, single sign-on,
-the CLI and agents, embeddings, backups and upgrades, monitoring.
+the CLI and agents, embeddings, backups and upgrades, monitoring. A cluster
+of Kubernetes takes the Helm chart instead: [Kubernetes (Helm)](#kubernetes-helm).
 
 Commands below run in the directory of the installation: where the package
 of a release is unpacked (`./cadence` by default). For a direct
@@ -20,6 +21,7 @@ public address of your proxy in the `proxy` mode.
 - [Behind your reverse proxy](#behind-your-reverse-proxy)
 - [External PostgreSQL](#external-postgresql)
 - [Secrets in files](#secrets-in-files)
+- [Kubernetes (Helm)](#kubernetes-helm)
 - [First sign-in with the administrator token](#first-sign-in-with-the-administrator-token)
 - [Teams, projects and invites](#teams-projects-and-invites)
 - [First cycle and roles](#first-cycle-and-roles)
@@ -622,8 +624,252 @@ The same `X_FILE` variables carry secrets of Kubernetes into the pods: mount
 the secret as a volume and point `X_FILE` at its keys (for the database
 `SDLC_DATABASE_URL_FILE` or `SDLC_DATABASE_PASSWORD_FILE`). A key written
 with `echo` ends with a newline; it is cut. A missing key stops the pod on
-start, naming the variable. The Helm chart of Cadence Lab, coming in a later
-release, is built on this.
+start, naming the variable. The Helm chart of Cadence Lab is built on this:
+[Kubernetes (Helm)](#kubernetes-helm).
+
+## Kubernetes (Helm)
+
+Next to the compose package, Cadence Lab installs into a Kubernetes cluster
+with the Helm chart `charts/cadence` of this repository, from v0.13.0. The
+chart runs the same images of the same version — the API, the worker and
+the UI as three Deployments — on your PostgreSQL and your S3 bucket, with
+the secrets in Secrets of the cluster; the Ingress of the cluster takes the
+place of the Caddy of the package. The settings are the `SDLC_*` variables
+of `docker-compose.yml` with the same defaults. The chart has no database,
+no Caddy and no volumes.
+
+### What you need
+
+- **Kubernetes 1.27 or newer and Helm 3.8 or newer** (charts from an OCI
+  registry).
+- **An ingress controller** that passes a stream through: MCP answers with
+  server-sent events. The controller must not buffer the responses of
+  `/mcp`, must keep a request open for an hour, and must take a request
+  body of 64 MiB (the largest artifact). For ingress-nginx the annotations
+  of the example below do it; for another controller set its equivalents.
+- **PostgreSQL with pgvector**, as for an
+  [external database](#server-extensions-and-the-role): the role, the
+  extensions and `sslmode`. The pods reach it from the cluster.
+- **An S3 bucket** and its keys: the pods of the API and of the worker share
+  no volume, so artifact content lives in the bucket (`blobs.s3.bucket`).
+- **The certificate of the host**: a Secret of type `kubernetes.io/tls`
+  (cert-manager or yours) named in `ingress.tls.secretName`, or TLS that
+  ends before the Ingress.
+- **Pod Security `baseline`** for the namespace. The API, the worker and the
+  precheck meet `restricted`; the UI does not: its image runs Caddy as root
+  on port 80 (with only `NET_BIND_SERVICE`), and a namespace that enforces
+  `restricted` refuses its pod.
+
+### The chart
+
+The chart of a release is published with the release as an OCI artifact,
+`oci://ghcr.io/cadence-lab-tech/charts/cadence`; its version is the version
+of the package without the `v` (Cadence Lab v0.13.0 is the chart 0.13.0). It
+is signed like `checksums.txt` of the package — see
+[Verifying a release](#verifying-a-release):
+
+```bash
+helm show values oci://ghcr.io/cadence-lab-tech/charts/cadence --version 0.13.0
+```
+
+`image.backend.digest` and `image.frontend.digest` of the chart pin the
+images by the same digests as `docker-compose.yml` of the version. A mirror
+in `image.registry` keeps them (copy with `crane copy` or
+`skopeo copy --all`); an empty digest drops the pin and is only for
+development checks. `charts/cadence` of a checkout of this repository on the
+tag `vX.Y.Z` is the same chart.
+
+### Secrets
+
+No secret goes into the values: Helm keeps the values of a release in a
+Secret of its own and shows them with `helm get values`, and the chart
+refuses a URL of the database with a password in `database.url`. The chart
+refers to Secrets that exist before the installation and mounts their keys
+read-only as files under `/secrets/<secret>/<key>`; every secret `X` of the
+service gets `X_FILE` with that path ([Secrets in files](#secrets-in-files)).
+`secrets.name` is the Secret, and each entry of `secrets.keys` names a key
+in it — or `<secret>/<key>` of another Secret. An empty entry passes
+nothing.
+
+| `secrets.keys.` | the service gets | required |
+|---|---|---|
+| `SDLC_DATABASE_URL` | `SDLC_DATABASE_URL_FILE`: the URL with its password | one of the two |
+| `SDLC_DATABASE_PASSWORD` | `SDLC_DATABASE_PASSWORD_FILE`: the password put into `database.url`, the URL without one | one of the two |
+| `SDLC_ADMIN_TOKEN` | `SDLC_ADMIN_TOKEN_FILE` | yes |
+| `SDLC_BLOB_S3_ACCESS_KEY_ID` | `SDLC_BLOB_S3_ACCESS_KEY_ID_FILE` | yes |
+| `SDLC_BLOB_S3_SECRET_ACCESS_KEY` | `SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE` | yes |
+| `SDLC_BLOB_S3_SESSION_TOKEN` | `SDLC_BLOB_S3_SESSION_TOKEN_FILE` | no |
+| `SDLC_GITHUB_TOKEN` | `SDLC_GITHUB_TOKEN_FILE` | no |
+| `SDLC_GITHUB_APP_KEY_FILE` | `SDLC_GITHUB_APP_KEY_FILE`: the private key of the [GitHub App](#github-app) | no |
+| `SDLC_GITHUB_APP_CLIENT_SECRET` | `SDLC_GITHUB_APP_CLIENT_SECRET_FILE` | no |
+| `SDLC_GITHUB_WEBHOOK_SECRET` | `SDLC_GITHUB_WEBHOOK_SECRET_FILE` | no |
+| `SDLC_EMBEDDINGS_API_KEY` | `SDLC_EMBEDDINGS_API_KEY_FILE` | no |
+| `SDLC_VOYAGE_API_KEY` | `SDLC_VOYAGE_API_KEY_FILE` | no |
+
+`secrets.githubTokens` maps the secret name of a repository token to its
+key (`ACME: github-token-acme` gives `SDLC_GITHUB_TOKEN_ACME_FILE`), and
+`secrets.files` mounts keys without a variable — the CA of the database for
+`sslrootcert=/secrets/<secret>/<key>` of the URL. The worker gets no
+sign-in or webhook secret; the precheck only the database.
+
+A key missing in its Secret keeps the pod from starting: its events name
+the Secret and the key (`kubectl -n cadence describe pod`). A key written
+with `echo` ends with a newline; it is cut. Make the Secret from files, so
+that no value is on a command line:
+
+```bash
+kubectl create namespace cadence
+kubectl label namespace cadence pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/warn=restricted
+openssl rand -hex 32 | sed 's/^/sdlc_/' >admin-token
+kubectl -n cadence create secret generic cadence \
+  --from-file=admin-token --from-file=db-password --from-file=db-ca.pem \
+  --from-file=s3-access-key-id --from-file=s3-secret-access-key
+rm admin-token
+```
+
+Keep the administrator token where you keep the secrets of the cluster:
+it is the first sign-in.
+
+### Values
+
+The example below is what the check of the chart installs, with your
+addresses. Settings of `docker-compose.yml` go in `config.shared` (the API
+and the worker, which must agree on them: the leases, the model of the
+embeddings), `config.api` and `config.worker`, as variables with their
+values — `config.shared.SDLC_LOG_LEVEL: debug`; `helm show values` lists
+them with the defaults of compose. What compose fixes the chart fixes too
+and refuses in `config`: `SDLC_ENV=production`, `SDLC_STRICT_GATES`,
+`SDLC_MCP_ENABLED`, `SDLC_AUTO_MIGRATE` (the API only), `SDLC_TENANCY=single`,
+`SDLC_PROJECT_CREATION=teams`. A variable that compose does not pass goes in
+`extraEnv`; a secret is refused in both.
+
+```yaml
+# cadence-values.yaml
+ingress:
+  className: nginx
+  host: cadence.example.com
+  tls:
+    secretName: cadence-tls
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: 64m
+database:
+  url: postgres://cadence@db.internal:5432/cadence?sslmode=verify-full&sslrootcert=/secrets/cadence/db-ca.pem
+blobs:
+  s3:
+    bucket: acme-cadence
+    endpoint: https://s3.eu-central-1.amazonaws.com
+    region: eu-central-1
+    prefix: cadence/
+secrets:
+  name: cadence
+  keys:
+    SDLC_DATABASE_PASSWORD: db-password
+    SDLC_ADMIN_TOKEN: admin-token
+    SDLC_BLOB_S3_ACCESS_KEY_ID: s3-access-key-id
+    SDLC_BLOB_S3_SECRET_ACCESS_KEY: s3-secret-access-key
+  files: [db-ca.pem]
+config:
+  shared:
+    SDLC_LOG_LEVEL: info
+```
+
+`blobs.s3.pathStyle` is `true` by default, as the service has it; set it to
+`false` for a provider that wants virtual-hosted addresses.
+
+### Install
+
+```bash
+helm install cadence oci://ghcr.io/cadence-lab-tech/charts/cadence --version 0.13.0 \
+  -n cadence -f cadence-values.yaml --wait --timeout 10m
+```
+
+1. A rendering without the database, the bucket, its keys, the
+   administrator token or `ingress.host` stops before anything reaches the
+   cluster, naming the missing key.
+2. The hook `pre-install` runs `/api dbcheck --install` of the backend image
+   of the version as a Job (`cadence-dbcheck`), with the secrets of the
+   database only. A database it refuses — no `vector`, a wrong password, a
+   weak `sslmode` the server refuses — fails `helm install` before any
+   Deployment is created; `kubectl -n cadence logs job/cadence-dbcheck`
+   names the reason, never the password. Fix the database or the Secret,
+   `helm uninstall cadence -n cadence` and install again.
+3. The API applies the migrations on start under an advisory lock: several
+   replicas (`api.replicas`) start at once safely, one of them migrates.
+   `/readyz` answers 200 after the migrations; the startup probe gives them
+   `api.startupProbe.failureThreshold` x `api.startupProbe.periodSeconds`
+   (ten minutes by default) before the pod is restarted.
+4. The worker waits for the API as in compose: its init container asks
+   `/readyz` of the Service `cadence-api` once and is restarted by the
+   kubelet with a backoff until it answers, so on a long migration the
+   worker starts up to a few minutes after the API.
+
+Then sign in as described in the notes `helm install` prints, and go on
+with [teams and projects](#teams-projects-and-invites) and the
+[first cycle](#first-cycle-and-roles): from here everything is as in
+compose. `clab auth login --host https://<host> --with-token` takes the
+token from stdin.
+
+### Upgrades and rollback
+
+```bash
+helm upgrade cadence oci://ghcr.io/cadence-lab-tech/charts/cadence --version 0.14.0 \
+  -n cadence -f cadence-values.yaml --wait --timeout 10m
+```
+
+- **Back up first**, by the means of your database and bucket (below).
+- **The precheck** (`pre-upgrade`, `/api dbcheck` of the new image) runs
+  before anything changes: a refusal fails `helm upgrade`, the pods of the
+  installed version keep running.
+- **`Recreate`.** `api.strategy` and `worker.strategy` are `Recreate`: the
+  old pods stop before the new ones start, the downtime is that of
+  `./upgrade.sh`. Migrations only go forward, and the code of a version is
+  not promised to run on the schema of the next; a `RollingUpdate` (old and
+  new pods on one schema for a while) is your decision.
+- **Rollback.** `helm rollback` does not take the schema back. When the new
+  version does not come up, restore the database and the bucket from the
+  backup made before the upgrade, then `helm rollback cadence -n cadence`
+  (or install the chart of the version of the backup). A chart older than
+  the schema must not run on it.
+- Changing only the values (`--set config.shared.SDLC_LOG_LEVEL=debug`,
+  the replicas) on the same version recreates the pods; the data stays.
+
+### Backups
+
+`backup.sh`, `restore.sh` and `clab server` belong to the compose package
+and do not touch a cluster. Back up with the means of your platform:
+
+- **The database:** the snapshots or point-in-time recovery of your managed
+  PostgreSQL, or `pg_dump` with the options of
+  [the dump contract](#backups-restore-and-snapshots) (without owners,
+  privileges and the extensions `vector` and `pgcrypto`).
+- **The bucket:** versioning of the bucket, or its replication to another
+  one.
+- **Restore** the database and the bucket to the same moment, then install
+  the chart of the version that made the backup (a newer one migrates the
+  schema forward, which is fine; an older one is not).
+
+### Monitoring
+
+The API (`cadence-api`, port `metrics`) and the worker
+(`cadence-worker-metrics`) serve Prometheus metrics on port 9090 inside the
+cluster: Services of type ClusterIP, never routed by the Ingress, without a
+token — `/metrics` through the Ingress is the UI. Point a scrape job or your
+ServiceMonitor at them, or set `metrics.podAnnotations: true` for a
+Prometheus that discovers pods by `prometheus.io/*` annotations;
+`metrics.enabled: false` turns the listeners off. The
+[metrics](#metrics) and the [alert rules](#alert-rules) are the same as in
+compose; traces go by `OTEL_*` in `config.api` ([Tracing](#tracing)).
+
+### Limits
+
+The chart brings no PostgreSQL, no autoscaling (`api.replicas` and
+`worker.replicas` are numbers), no PodDisruptionBudget, NetworkPolicy,
+ServiceMonitor or PrometheusRule, and no backups of its own. The UI needs
+Pod Security `baseline`.
 
 ## First sign-in with the administrator token
 
@@ -1890,6 +2136,7 @@ not signed.
 | image `sdlc-pipeline-backend` | `https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/vX.Y.Z` |
 | image `sdlc-pipeline-frontend` | `https://github.com/cadence-lab-tech/sdlc-pipeline-frontend/.github/workflows/release.yml@refs/tags/vX.Y.Z` |
 | `checksums.txt` of the package | `https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main` |
+| the Helm chart `charts/cadence` (from v0.13.0) | `https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main` |
 | `checksums.txt` of the `clab` archives | `https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/vX.Y.Z` |
 
 The issuer of every certificate is `https://token.actions.githubusercontent.com`.
@@ -1929,6 +2176,21 @@ done
 
 The signature covers the digest of the image index, and with it everything
 the index lists: the image of each platform and its attestations.
+
+**The Helm chart** (from v0.13.0), by the digest of the OCI artifact
+`helm pull` fetched, before `helm install` or `helm upgrade`; install that
+archive, or the chart by the same digest. The digests its values pin are the
+images above:
+
+```bash
+v=0.13.0
+digest=$(helm pull oci://ghcr.io/cadence-lab-tech/charts/cadence --version $v 2>&1 | awk '$1 == "Digest:" { print $2 }')
+cosign verify \
+  --certificate-identity https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/cadence-lab-tech/charts/cadence@$digest" >/dev/null && echo "chart $v ($digest): signature verified"
+tar -xzOf cadence-$v.tgz cadence/values.yaml | grep -E 'digest: '
+```
 
 **SBOM.** Each platform of each image has a software bill of materials
 (SPDX 2.3) — the Go modules of `/api`, `/worker` and `/clab` with their

@@ -2,9 +2,10 @@
 #
 #   pull-request  on the cadence-release event, sent by the release of the
 #                 backend and frontend images (or run by hand), opens the pull
-#                 request "VERSION -> vX.Y.Z" (ci/release-pr.sh): VERSION and
-#                 the digests of both images in docker-compose.yml, once the
-#                 signatures of both images verify. The event may arrive
+#                 request "VERSION -> vX.Y.Z" (ci/release-pr.sh): VERSION, the
+#                 digests of both images in docker-compose.yml and in the
+#                 values of the Helm chart, and the version of the chart,
+#                 once the signatures of both images verify. The event may arrive
 #                 twice; the second run finds the open pull request.
 #   tag           when VERSION changes on main, tags that commit vX.Y.Z and
 #                 publishes the GitHub Release vX.Y.Z with the package
@@ -18,6 +19,11 @@
 #                 the tag and the release and uploads only the assets that
 #                 are missing; it never replaces one, and signs only when the
 #                 signature is missing - the checksums.txt already published.
+#                 Then the Helm chart of the version (ci/publish-chart.sh):
+#                 oci://ghcr.io/cadence-lab-tech/charts/cadence:X.Y.Z, signed
+#                 by the same identity; a version already in the registry is
+#                 never pushed again, only signed when its signature is
+#                 missing.
 #
 # The pull request is opened with the secret RELEASE_PR_TOKEN, not with
 # GITHUB_TOKEN: a pull request opened by GITHUB_TOKEN starts no workflows, and
@@ -81,11 +87,14 @@ jobs:
   tag:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
-      # The OIDC token of this run signs checksums.txt (cosign keyless).
+      # The OIDC token of this run signs checksums.txt and the chart (cosign
+      # keyless).
       id-token: write
+      # The chart goes to ghcr.io/cadence-lab-tech/charts.
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: sigstore/cosign-installer@v4.1.2
@@ -144,3 +153,13 @@ jobs:
               gh release upload "$v" "$f"
             fi
           done
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - name: the Helm chart
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          ci/publish-chart.sh
