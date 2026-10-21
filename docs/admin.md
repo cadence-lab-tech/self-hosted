@@ -437,7 +437,8 @@ external server works too.
 `install.sh` writes the secrets of the installation into `.env` (mode 600),
 and that stays the default. Where `.env` must hold no secrets — it is read
 by whoever has the directory, it lands in backups of the machine, and its
-values show up in `docker inspect` — every secret also comes from a file:
+values show up in `docker inspect` — every secret also comes from a file
+(since v0.12.0; the images of earlier versions read no `*_FILE`):
 
 - **`X_FILE` for every secret `X`.** The value is the path of a file inside
   the containers; its content is the value of `X`. A trailing newline (`\n`
