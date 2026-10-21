@@ -448,6 +448,23 @@ webhook_code="$(http_code -X POST -H 'X-GitHub-Event: ping' -d '{}' "$base/webho
 check "/webhooks/github reaches the API and rejects an unsigned delivery ($webhook_code)" client_error "$webhook_code"
 check "caddy does not try ACME in proxy mode" lacks "$(docker compose logs caddy 2>&1 | tr '[:upper:]' '[:lower:]')" acme
 
+# --- agent kit and /docs --------------------------------------------------------------
+# clab setup takes the agent kit from the instance (since v0.12.0): an open
+# GET /v1/agent-kit with the version of the server, reaching the API through
+# the same /v1/* route of Caddy. The page /docs is a route of the UI. Images
+# of a branch (a pin variable set) are checked whatever VERSION says.
+info "agent kit"
+check "/docs serves the UI" bash -c "curl -sf '$base/docs' | grep -qi '<html'"
+if version_lt "$version" v0.12.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+  info "skipped: the images of $version have no agent kit (v0.12.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+else
+  check "/v1/agent-kit answers 200 without a token" [ "$(http_code "$base/v1/agent-kit")" = 200 ]
+  kit="$(curl -sf "$base/v1/agent-kit" || true)"
+  check "the agent kit has the version of the stack: $version" [ "$(jq -r '.version' <<<"$kit" 2>/dev/null)" = "$version" ]
+  check "the agent kit has clab-work, clab-guide and the agent clab-stage" \
+    [ "$(jq -r '[.skills[].name, .agents[].name] | map(select(. == "clab-work" or . == "clab-guide" or . == "clab-stage")) | length' <<<"$kit" 2>/dev/null)" = 3 ]
+fi
+
 # --- metrics -------------------------------------------------------------------------
 # Prometheus metrics (since v0.10.0): each process listens on :9090 inside the
 # network, nothing is published, Caddy does not serve them. Read from the

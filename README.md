@@ -111,7 +111,10 @@ versions shipped amd64-only images and ran under emulation; see
 `docs/admin.md`, "Upgrades and rollback"). A laptop is still not
 production: when the evaluation is over, deploy on a server.
 `brew install cadence-lab-tech/tap/clab` gives a native CLI;
-`clab auth login --host http://127.0.0.1:8080` signs it in. When done,
+`clab auth login --host http://127.0.0.1:8080` signs it in, and `clab setup`
+in a local clone connects it to a project: MCP and the agent skills, from
+the instance itself ([connecting developers](docs/admin.md#connecting-developers),
+or `/docs` in the UI). When done,
 `docker compose down -v` in `cadence-lab` removes the containers and the data.
 
 ## What is in here
