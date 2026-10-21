@@ -77,7 +77,12 @@ The checksum protects against a broken or altered download, not against a
 release replaced at its source. From v0.9.0 the package and the images are
 signed by the release workflows of our repositories (Sigstore, no keys),
 carry an SBOM and a build provenance, and `docker-compose.yml` pins the
-images by digest; the commands that check all of it are in
+images by digest. With [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+3.x on the machine the installer, `./upgrade.sh` and `clab server` verify
+the signatures of the package and of both images before they change
+anything; `CADENCE_VERIFY` says what they do without it (`auto` warns,
+`require` refuses, `off` skips the check — for a closed network). The
+commands that check all of it by hand are in
 [docs/admin.md](docs/admin.md#verifying-a-release).
 
 ## Requirements
@@ -88,7 +93,7 @@ images by digest; the commands that check all of it are in
 | CPU | 2 vCPU | 4 vCPU |
 | RAM | 4 GB | 8 GB |
 | Disk | 20 GB SSD | 50 GB SSD; code indexes and backups grow with repositories |
-| Software | Docker Engine 24+ with the compose v2 plugin, curl, tar, openssl | [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x to [verify a release](docs/admin.md#verifying-a-release) (recommended, not required) |
+| Software | Docker Engine 24+ with the compose v2 plugin, curl, tar, openssl | [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x: the installer and the upgrades [verify the release](docs/admin.md#verifying-a-release) with it (recommended; `CADENCE_VERIFY=require` makes it required) |
 | Database | none: the stack runs PostgreSQL 17 with pgvector | your own PostgreSQL 15-18 with pgvector 0.5+ and pgcrypto, and Docker Compose 2.20+ ([external PostgreSQL](docs/admin.md#external-postgresql)) |
 | Network | `tls`: ports 80 and 443 from the internet; `proxy`: one port for your proxy | outbound HTTPS to `ghcr.io`, GitHub and your embeddings provider, if any |
 

@@ -390,14 +390,17 @@ upload_failed() {
 }
 
 # --- releases ----------------------------------------------------------------------
-# Every release vX.Y.Z of this repository carries three assets:
+# Every release vX.Y.Z of this repository carries four assets (the bundle
+# from v0.9.0 on):
 #
 #   cadence-self-hosted-vX.Y.Z.tar.gz   the package: the files of this
 #                                       directory without ci/ and .github/,
 #                                       and package.sha256 - the sha256 of
 #                                       each of them, against which upgrade.sh
 #                                       finds local edits
-#   checksums.txt                       sha256 of the other two assets
+#   checksums.txt                       sha256 of the package and the installer
+#   checksums.txt.sigstore.json         the signature of checksums.txt
+#                                       (cosign keyless, see "signatures")
 #   get-cadence.sh                      the one-line installer
 #
 # The names are a contract: the scripts of every later version, clab and
@@ -501,4 +504,183 @@ package_files_hint() {
   else
     printf 'curl -fsSL %s/archive/refs/tags/%s.tar.gz | tar -xpzf - --strip-components=1\n' "$CADENCE_REPO_URL" "$version"
   fi
+}
+
+# --- signatures --------------------------------------------------------------------
+# From v0.9.0 the release workflows sign checksums.txt of the package and
+# both images with cosign keyless (docs/admin.md, "Verifying a release").
+# CADENCE_VERIFY - from the environment, for an installation from its .env
+# over the environment, like every variable of the package - says what the
+# scripts do with the signatures before they install or upgrade:
+#
+#   auto     the default: verify with cosign 3.x when it is installed, warn
+#            once when it is not; a signature that does not verify stops
+#   require  also stop on no cosign, an unsigned version (before v0.9.0), an
+#            image without a digest and an unreachable ghcr.io
+#   off      no verification, one line says so (a closed network)
+#
+# cosign is the external tool from PATH; one older than 3.x counts as none.
+# get-cadence.sh (POSIX sh, before the package is unpacked) and clab server
+# (cmd/clab/server_verify.go of the backend) follow the same rules with the
+# same messages.
+VERIFY_FIRST_SIGNED=v0.9.0
+VERIFY_ISSUER=https://token.actions.githubusercontent.com
+VERIFY_SOURCE=https://github.com/cadence-lab-tech
+VERIFY_REGISTRY=ghcr.io/cadence-lab-tech
+VERIFY_PACKAGE_IDENTITY=$VERIFY_SOURCE/self-hosted/.github/workflows/release.yml@refs/heads/main
+VERIFY_BUNDLE=checksums.txt.sigstore.json
+VERIFY_IMAGES="sdlc-pipeline-backend sdlc-pipeline-frontend"
+VERIFY_COSIGN_URL=https://docs.sigstore.dev/cosign/system_config/installation/
+VERIFY_MODE=""
+VERIFY_COSIGN="" # a usable cosign was found
+VERIFY_WHY=""    # ...or why there is none
+VERIFY_NOTED=""  # the notice of the mode is printed
+
+# verify_identity REPO VERSION: the identity that signs the image REPO of
+# VERSION - release.yml of its repository on the tag.
+verify_identity() {
+  printf '%s/%s/.github/workflows/release.yml@refs/tags/%s\n' "$VERIFY_SOURCE" "$1" "$2"
+}
+
+# verify_init NOTHING reads CADENCE_VERIFY and looks for cosign, before the
+# script does anything: an unknown value is refused, and so is require
+# without cosign. NOTHING ends every refusal: what was not done.
+# CADENCE_VERIFY_NOTED=1 comes from get-cadence.sh, which has already said
+# what the mode means for this release.
+verify_init() {
+  local nothing="$1" v
+  VERIFY_MODE="${CADENCE_VERIFY:-auto}"
+  VERIFY_NOTED="${CADENCE_VERIFY_NOTED:-}"
+  VERIFY_COSIGN="" VERIFY_WHY=""
+  case "$VERIFY_MODE" in
+  auto | require) ;;
+  off)
+    [ -n "$VERIFY_NOTED" ] || info "signature verification is off (CADENCE_VERIFY=off)"
+    VERIFY_NOTED=1
+    return 0
+    ;;
+  *) die "CADENCE_VERIFY is '$VERIFY_MODE', expected auto, require or off. $nothing" ;;
+  esac
+  if ! command -v cosign >/dev/null 2>&1; then
+    VERIFY_WHY="cosign 3.x is not installed"
+  else
+    v="$(cosign version 2>&1 | sed -n 's/^GitVersion:[[:space:]]*\(v\{0,1\}[0-9][0-9.]*\).*/\1/p' | head -n 1 || true)"
+    case "${v#v}" in
+    "") VERIFY_WHY="cosign of an unknown version is not 3.x" ;;
+    [012].*) VERIFY_WHY="cosign $v is older than 3.x" ;;
+    *) VERIFY_COSIGN=1 ;;
+    esac
+  fi
+  if [ "$VERIFY_MODE" = require ] && [ -z "$VERIFY_COSIGN" ]; then
+    die "CADENCE_VERIFY=require, but $VERIFY_WHY: install cosign 3.x ($VERIFY_COSIGN_URL), or set CADENCE_VERIFY=auto. $nothing"
+  fi
+}
+
+# verify_note TEXT: the warning of the mode, once per run.
+verify_note() {
+  [ -z "$VERIFY_NOTED" ] || return 0
+  VERIFY_NOTED=1
+  warn "$1"
+}
+
+# verify_skip VERSION NOTHING: true when there is nothing to verify for
+# VERSION - the mode is off, VERSION is older than the signatures, or
+# (auto) there is no cosign - and says why once. require refuses an
+# unsigned version.
+verify_skip() {
+  local version="$1" nothing="$2"
+  [ "$VERIFY_MODE" != off ] || return 0
+  if version_lt "$version" "$VERIFY_FIRST_SIGNED"; then
+    [ "$VERIFY_MODE" = auto ] ||
+      die "$version is not signed (signatures start with $VERIFY_FIRST_SIGNED), and CADENCE_VERIFY=require refuses it. $nothing"
+    verify_note "$version is not signed (signatures start with $VERIFY_FIRST_SIGNED): its package and images are not verified"
+    return 0
+  fi
+  if [ -z "$VERIFY_COSIGN" ]; then
+    verify_note "$VERIFY_WHY: the signatures of the release are not verified (CADENCE_VERIFY=auto). Install cosign 3.x to verify them: docs/admin.md, \"Verifying a release\""
+    return 0
+  fi
+  return 1
+}
+
+# verify_package VERSION DIR NOTHING: the signature of DIR/checksums.txt of
+# VERSION by the bundle of the same release, downloaded next to it - before
+# the package is unpacked. A release of v0.9.0 or later without the bundle
+# is refused: a mirror that drops the signature is no reason to skip it.
+verify_package() {
+  local version="$1" dir="$2" nothing="$3" out
+  verify_skip "$version" "$nothing" && return 0
+  fetch "$(releases_url)/download/$version/$VERIFY_BUNDLE" "$dir/$VERIFY_BUNDLE" ||
+    die "the release $version has no $VERIFY_BUNDLE at $(releases_url): the signature of its checksums.txt cannot be verified.
+  Copy $VERIFY_BUNDLE of the release to the mirror, or set CADENCE_VERIFY=off. $nothing"
+  if ! out="$(cosign verify-blob --bundle "$dir/$VERIFY_BUNDLE" --certificate-identity "$VERIFY_PACKAGE_IDENTITY" \
+    --certificate-oidc-issuer "$VERIFY_ISSUER" "$dir/checksums.txt" 2>&1)"; then
+    printf '%s\n' "$out" | tail -n 5 >&2
+    die "the signature of checksums.txt of $version did not verify for $VERIFY_PACKAGE_IDENTITY: the release is altered or not ours.
+  Do not use it and report it privately (SECURITY.md). $nothing"
+  fi
+  ok "the signature of checksums.txt of $version verified: signed by $VERIFY_PACKAGE_IDENTITY"
+}
+
+# registry_reachable: ghcr.io answers HTTP at all (401 without a token is an
+# answer), so a check that failed there is about the signature, not the
+# network.
+registry_reachable() {
+  curl -s -o /dev/null --max-time 15 "https://${VERIFY_REGISTRY%%/*}/v2/"
+}
+
+# verify_images VERSION NOTHING COMPOSE_ARGS...: the signatures of the
+# images of sdlc-pipeline-backend and sdlc-pipeline-frontend that
+# `docker compose COMPOSE_ARGS... config --images` names for VERSION - the
+# final configuration, with CADENCE_REGISTRY, the pin variables and the
+# local override. Each is verified at ghcr.io by its digest, whatever
+# registry it is pulled from: a mirror keeps the digests.
+verify_images() {
+  local version="$1" nothing="$2" images err repo refs ref digest identity out pin
+  shift 2
+  verify_skip "$version" "$nothing" && return 0
+  err="$(mktemp)"
+  if ! images="$(CADENCE_VERSION="$version" docker compose "$@" config --images 2>"$err")"; then
+    tail -n 5 "$err" >&2
+    rm -f "$err"
+    die "could not read the images of $version from the compose configuration (see above). $nothing"
+  fi
+  rm -f "$err"
+  info "verifying the signatures of the images of $version"
+  for repo in $VERIFY_IMAGES; do
+    pin="CADENCE_$(printf '%s' "${repo#sdlc-pipeline-}" | tr '[:lower:]' '[:upper:]')_DIGEST"
+    refs="$(grep -E "(^|/)$repo([:@]|$)" <<<"$images" | sort -u || true)"
+    if [ -z "$refs" ]; then
+      [ "$VERIFY_MODE" = auto ] ||
+        die "the compose configuration runs no image of $repo (compose.override.yml replaces it?), and CADENCE_VERIFY=require verifies only the images of the release. $nothing"
+      warn "the compose configuration runs no image of $repo (compose.override.yml replaces it?): not pinned, not verified"
+      continue
+    fi
+    while IFS= read -r ref; do
+      case "$ref" in
+      *@sha256:*) digest="${ref##*@}" ;;
+      *)
+        [ "$VERIFY_MODE" = auto ] ||
+          die "$ref is not pinned to a digest (an empty $pin, or compose.override.yml), and CADENCE_VERIFY=require verifies images by digest only. $nothing"
+        warn "$ref is not pinned to a digest (an empty $pin, or compose.override.yml): not pinned, not verified"
+        continue
+        ;;
+      esac
+      identity="$(verify_identity "$repo" "$version")"
+      if out="$(cosign verify --certificate-identity "$identity" --certificate-oidc-issuer "$VERIFY_ISSUER" \
+        "$VERIFY_REGISTRY/$repo@$digest" 2>&1 >/dev/null)"; then
+        ok "$VERIFY_REGISTRY/$repo@$digest is signed by $identity"
+        continue
+      fi
+      if ! registry_reachable; then
+        [ "$VERIFY_MODE" = auto ] ||
+          die "the images cannot be verified: ghcr.io is unreachable from this host, and CADENCE_VERIFY=require needs it (the signatures are checked there by digest). $nothing"
+        warn "images not verified: ghcr.io is unreachable from this host (a registry mirror in a closed network?); verify them where it is reachable: docs/admin.md, \"Verifying a release\""
+        return 0
+      fi
+      printf '%s\n' "$out" | tail -n 5 >&2
+      die "the signature of $VERIFY_REGISTRY/$repo@$digest ($repo $version) did not verify for $identity: the image is altered or not ours.
+  Do not run it and report it privately (SECURITY.md). $nothing"
+    done <<<"$refs"
+  done
 }
