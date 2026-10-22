@@ -22,7 +22,7 @@
 #
 # The clab is CLAB_BIN - a linux clab for the architecture of Docker (the
 # one of a branch) - else the clab of VERSION from the tap. A clab without
-# "clab server images" (before the release after v0.13.0) skips the check
+# "clab server images" (v0.14.1 and older) skips the check
 # with a note: it starts with the release that brings the command. regctl
 # and cosign are downloaded at the versions below and checked against the
 # sums below (.cache/airgap of this checkout keeps them).
@@ -195,10 +195,15 @@ regtar="$(on "$c" "tar -xOf /share/cadence-$first-airgap.tar cadence-images.json
 on "$c" "tar -xOf /share/cadence-$first-airgap.tar $regtar | docker load -q" >/dev/null || die "could not load the registry image of the archive"
 regimg="$(on "$c" "tar -xOf /share/cadence-$first-airgap.tar cadence-images.json" | grep -o '"name": "[^"]*"' | head -n 1 | cut -d'"' -f4)"
 on "$c" "docker run -d --name admin-registry -p 127.0.0.1:5001:5000 $regimg" >/dev/null || die "could not start a registry on $c"
-out="$(on "$c" "cd /share && clab server images load cadence-$first-airgap.tar --registry 127.0.0.1:5001/cadence" 2>&1)" ||
-  { printf '%s\n' "$out" | tail -n 20 >&2; die "clab server images load --registry of $first failed"; }
+for i in $(seq 30); do
+  on "$c" "wget -q -O /dev/null http://127.0.0.1:5001/v2/" 2>/dev/null && break
+  [ "$i" -lt 30 ] || die "the registry on $c does not answer"
+  sleep 1
+done
 # A plain-http registry for regctl of the administrator, as docs/admin.md says.
 on "$c" "regctl registry set --tls disabled 127.0.0.1:5001" >/dev/null || die "could not configure regctl for the registry on $c"
+out="$(on "$c" "cd /share && clab server images load cadence-$first-airgap.tar --registry 127.0.0.1:5001/cadence" 2>&1)" ||
+  { printf '%s\n' "$out" | tail -n 20 >&2; die "clab server images load --registry of $first failed"; }
 host="--host reg=127.0.0.1:5001,tls=disabled"
 check "load --registry: sdlc-pipeline-backend has its pin there" [ "$(on "$c" "regctl $host image digest 127.0.0.1:5001/cadence/sdlc-pipeline-backend:$first")" = \
   "$(on "$c" "tar -xOf /share/cadence-$first-airgap.tar cadence-images.json" | grep -o "sdlc-pipeline-backend:$first@sha256:[0-9a-f]*" | head -n 1 | cut -d@ -f2)" ]
