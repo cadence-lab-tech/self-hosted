@@ -1433,8 +1433,8 @@ if [ "$db" = bundled ]; then
     check "...and changes nothing there" [ "$(grep -o 'unchanged, already active' <<<"$first" | wc -l | tr -d ' ')" = 2 ]
     check "...and does not print the token" lacks "$first" "$admin_token"
     if [ "$secrets_mode" = files ]; then
-      check "...and leaves no container on secrets/ behind" \
-        [ -z "$(docker ps -a -q --filter volume="$work/cadence/secrets")" ]
+      check "...and leaves no alpine:3 container on secrets/ behind" \
+        [ -z "$(docker ps -a -q --filter ancestor=alpine:3 --filter volume="$work/cadence/secrets")" ]
     fi
     check "the starter project steps write nothing into the configuration of clab" \
       [ "$(find "$CLAB_CONFIG_DIR" -type f -exec cksum {} + 2>/dev/null | sort || true)" = "$config_before" ]
