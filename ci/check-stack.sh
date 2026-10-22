@@ -368,8 +368,9 @@ bundled_db_checks() {
     [ "$(docker inspect -f '{{.Config.Image}}' "$pg")" = pgvector/pgvector:pg18-trixie ]
   check "...PostgreSQL 18 (SHOW server_version)" grep -q '^18\.' <<<"$(pg_sql 'SHOW server_version')"
   check "...on Debian 13" grep -q '^13\.' <<<"$(docker compose exec -T postgres cat /etc/debian_version)"
-  mounts="$(docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} {{.Destination}}{{println}}{{end}}' "$pg" | grep . || true)"
-  check "...one mount, the volume ${name}_postgres at /var/lib/postgresql: no anonymous volume" \
+  # Volumes only: with secrets in files a Docker secret is a bind mount too.
+  mounts="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Type}} {{.Name}} {{.Destination}}{{println}}{{end}}{{end}}' "$pg" | grep . || true)"
+  check "...one volume, ${name}_postgres at /var/lib/postgresql: no anonymous volume" \
     [ "$mounts" = "volume ${name}_postgres /var/lib/postgresql" ]
   check "...its data directory is /var/lib/postgresql/18/docker" [ "$(pg_sql 'SHOW data_directory')" = /var/lib/postgresql/18/docker ]
   check "...no database with a collation version mismatch" \
