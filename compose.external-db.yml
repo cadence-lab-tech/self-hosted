@@ -8,9 +8,13 @@
 # Needs Docker Compose 2.20 or newer (depends_on.required); the bundled mode
 # keeps working on older ones.
 services:
-  # Never started: its profile is never enabled. Its volume pgdata is not
-  # created either.
+  # Never started: their profile is never enabled. Their volumes postgres and
+  # pgdata are not created either.
   postgres:
+    profiles: ["bundled-db"]
+  pg-upgrade-dump:
+    profiles: ["bundled-db"]
+  pg-upgrade-load:
     profiles: ["bundled-db"]
 
   api:
@@ -36,7 +40,7 @@ services:
   # CA in /secrets. Started only by the scripts (docker compose run). The
   # password reaches it as PGPASSWORD, never on a command line.
   db-client:
-    image: pgvector/pgvector:pg18
+    image: pgvector/pgvector:pg18-trixie
     profiles: ["tools"]
     entrypoint: []
     command: ["psql", "--version"]
