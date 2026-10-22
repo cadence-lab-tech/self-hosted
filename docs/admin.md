@@ -1890,11 +1890,24 @@ rollback as printed.
 previous version and `./restore.sh --yes` of its backup - starts PostgreSQL
 17 on the volume `pgdata` with the data of the backup. Upgrading again later
 moves the data again: the old cluster changed after the move, so the data
-written on the previous version since the rollback comes along, and the
-PostgreSQL 18 cluster of the earlier move is replaced (what was written on
-the new version before the rollback is gone, as with any restore of a
-backup). Without a change of the old cluster, `docker compose up -d` on the
-new version moves nothing: both services log `nothing to do` and exit.
+written on the previous version since the rollback comes along. The
+PostgreSQL 18 cluster of the earlier move (with what was written on the new
+version before the rollback) is not deleted: the move keeps it aside in the
+volume `postgres` as `cadence-upgrade/replaced-<date>`, and so it does with a
+cluster an interrupted move left in place. Without a change of the old
+cluster, `docker compose up -d` on the new version moves nothing: both
+services log `nothing to do` and exit. If the old volume changes while
+PostgreSQL 18 runs on the moved data - something started PostgreSQL 17 on it
+by hand - `docker compose up -d` stops with an error and touches nothing:
+remove the old volume (below) to keep PostgreSQL 18 as it is.
+
+The clusters kept aside, and their removal once you do not need them:
+
+```bash
+export CADENCE_VERSION=$(cat VERSION)
+docker compose run --rm --no-deps --entrypoint sh pg-upgrade-load -c 'du -sh /var/lib/postgresql/cadence-upgrade/replaced-*'
+docker compose run --rm --no-deps --entrypoint sh pg-upgrade-load -c 'rm -rf /var/lib/postgresql/cadence-upgrade/replaced-*'
+```
 
 **Removing the old volume.** Once the new version runs and you will not
 roll back to a release on PostgreSQL 17, the volume `pgdata` only takes

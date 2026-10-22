@@ -844,6 +844,12 @@ JSON
     else
       fail "the volume $old_volume is gone after the move"
     fi
+    # The move after the rollback replaced the cluster of the earlier one.
+    if in_volume "$new_volume" 'ls -d /v/cadence-upgrade/replaced-* >/dev/null 2>&1'; then
+      pass "the PostgreSQL 18 cluster of the earlier move is kept aside (cadence-upgrade/replaced-*)"
+    else
+      fail "the PostgreSQL 18 cluster of the earlier move is not kept aside"
+    fi
     info "docker compose up -d again on $to"
     local on_to
     on_to="$(SDLC_PROJECT=UPG "$clab" --host "$base" create --title "Written on $to" --json | jq -r '.key')"
