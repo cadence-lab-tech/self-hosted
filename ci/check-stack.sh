@@ -863,7 +863,7 @@ info "an external clab: clab server --dir"
 mkdir -p "$work/ext"
 cp "$pkg_clab" "$work/ext/clab"
 ext_clab="$work/ext/clab"
-ext_clab_status="$(cd "$work" && "$ext_clab" server status --dir "$work/cadence" 2>&1 || true)"
+ext_clab_status="$(cd "$work" && { "$ext_clab" server status --dir "$work/cadence" 2>&1 || true; })"
 check "the external clab: status --dir names the installation and $version" contains "$ext_clab_status" "$version (VERSION)"
 dumps_before_ext="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')"
 sleep 1
