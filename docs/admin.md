@@ -564,10 +564,16 @@ values show up in `docker inspect` — every secret also comes from a file
   database): `X_FILE=/secrets/<file>`. Docker secrets of
   `compose.secrets.yml` and of `compose.override.yml` are mounted as
   `/run/secrets/<name>`; name the file `secrets/<name>` after the secret.
-  The scripts and `clab server` read a file themselves only for an external
-  database (below) and only from `secrets/`: `/secrets/<file>` and
+  The scripts and `clab server` read a file themselves for an external
+  database (below) and, in `clab server starter`, for the administrator
+  token, and only from `secrets/`: `/secrets/<file>` and
   `/run/secrets/<name>` are `secrets/<file>` and `secrets/<name>` to them; a
-  path elsewhere is refused before anything runs, naming the variable.
+  path elsewhere is refused before anything runs, naming the variable. A
+  file you cannot read yourself (owned by 65532, mode `400`, as the table
+  recommends) `clab server` reads with a one-off `alpine:3` container as
+  root, like the blobs archive of a backup: `secrets/` mounted read-only, no
+  network, no log of the container; the value comes back to `clab` only,
+  never in arguments or output.
 
 The secrets — this table matches the list in the code of the service, and a
 new secret comes with a row here:
@@ -576,7 +582,7 @@ new secret comes with a row here:
 |---|---|---|---|
 | `SDLC_DATABASE_URL` | `SDLC_DATABASE_URL_FILE` | api, worker, `/api dbcheck`; external database: also `backup.sh`, `restore.sh`, `upgrade.sh`, `clab server` | your user, group 65532, `440` |
 | `SDLC_DATABASE_PASSWORD_FILE` | the only form: the password put into the URL | api, worker, `/api dbcheck` (and the scripts with an external database) | bundled: 65532, group 999, `440`; external: your user, group 65532, `440` |
-| `SDLC_ADMIN_TOKEN` | `SDLC_ADMIN_TOKEN_FILE` | api | 65532, `400` |
+| `SDLC_ADMIN_TOKEN` | `SDLC_ADMIN_TOKEN_FILE` | api, `clab server starter` | 65532, `400` |
 | `SDLC_GITHUB_TOKEN` | `SDLC_GITHUB_TOKEN_FILE` | api, worker | 65532, `400` |
 | `SDLC_GITHUB_TOKEN_<NAME>` | `SDLC_GITHUB_TOKEN_<NAME>_FILE` | api, worker (tokens of repositories by their secret name) | 65532, `400` |
 | `SDLC_GITHUB_APP_KEY_FILE` | a path already, no value form | api, worker | 65532, `400` ([GitHub App](#github-app)) |
@@ -1071,7 +1077,9 @@ On a machine where Cadence Lab already runs - installed without the flag,
 or after the step failed - `clab server starter` does the same on the
 installation directory, with the administrator token of the installation
 (`SDLC_ADMIN_TOKEN` in `.env`, or the file of `SDLC_ADMIN_TOKEN_FILE` in
-`secrets/`, also when [compose.secrets.yml](#composesecretsyml) sets it) and the team of
+`secrets/`, also when [compose.secrets.yml](#composesecretsyml) sets it; a
+file owned by the service it reads with a one-off `alpine:3` container, see
+[Secrets in files](#secrets-in-files)) and the team of
 `SDLC_BOOTSTRAP_TEAM` unless `--team` names another:
 
 ```bash

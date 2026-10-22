@@ -32,7 +32,10 @@
 # created; clab server starter repeats it with nothing changed, and on the
 # first installation finds the project CHECK, set up by hand, unchanged. A
 # clab without --with-starter skips this with a note before VERSION v0.14.0
-# and fails from it.
+# and fails from it. With CHECK_SECRETS=files the first installation holds
+# the administrator token only in secrets/admin_token, 65532:65532 and mode
+# 400 as docs/admin.md says (CLAB-252): clab server starter reads it with a
+# one-off alpine:3 container, prints no token and leaves no container.
 #
 #   ci/check-stack.sh
 #
@@ -1416,10 +1419,23 @@ if [ "$db" = bundled ]; then
       [ "$(grep -o 'unchanged, already active' <<<"$again" | wc -l | tr -d ' ')" = 2 ]
     check "...and makes no new version of a cycle" [ "$(workflows_of | jq '.workflows | length')" = "$(jq '.workflows | length' <<<"$flows")" ]
 
+    if [ "$secrets_mode" = files ]; then
+      # The token is in the file only, handed over to the service: the host
+      # user cannot read it (on Linux; Docker Desktop shows the files as
+      # yours), the owner and mode are seen from a container.
+      check "secrets/admin_token of the first installation is 65532:65532, mode 400, when the step runs" \
+        [ "$(docker run --rm -v "$work/cadence/secrets:/s:ro" alpine:3 stat -c '%u:%g %a' /s/admin_token)" = "65532:65532 400" ]
+      check "...and .env has no value of SDLC_ADMIN_TOKEN" [ "$(grep -E '^SDLC_ADMIN_TOKEN=' "$work/cadence/.env")" = "SDLC_ADMIN_TOKEN=" ]
+    fi
     first="$(cd "$work" && PATH="$work/nogit:$PATH" "$starter_clab" server starter --dir "$work/cadence" --team check --project CHECK 2>&1)" && code=0 || code=$?
     [ "$code" = 0 ] || printf '%s\n' "$first" >&2
     check "clab server starter on CHECK, set up by hand on the first installation, exits with 0" [ "$code" = 0 ]
     check "...and changes nothing there" [ "$(grep -o 'unchanged, already active' <<<"$first" | wc -l | tr -d ' ')" = 2 ]
+    check "...and does not print the token" lacks "$first" "$admin_token"
+    if [ "$secrets_mode" = files ]; then
+      check "...and leaves no container on secrets/ behind" \
+        [ -z "$(docker ps -a -q --filter volume="$work/cadence/secrets")" ]
+    fi
     check "the starter project steps write nothing into the configuration of clab" \
       [ "$(find "$CLAB_CONFIG_DIR" -type f -exec cksum {} + 2>/dev/null | sort || true)" = "$config_before" ]
   fi
