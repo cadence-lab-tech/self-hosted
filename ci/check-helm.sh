@@ -5,7 +5,8 @@
 # annotations of the guide, the stand-in of an external PostgreSQL
 # (ci/external-db.sh: pgvector 18, TLS with a CA of its own, a role that is
 # no superuser) and the stand-in bucket (ci/s3.sh), both containers in the
-# Docker network of kind; the secrets are Secrets of the namespace, made
+# Docker network of kind under names of the cluster (<cluster>-extdb,
+# <cluster>-s3stand); the secrets are Secrets of the namespace, made
 # with kubectl before the installation. The namespace enforces Pod Security
 # "baseline" and warns on "restricted".
 #
@@ -24,7 +25,10 @@
 #
 #   CHECK_CLUSTER     name of the kind cluster, default cadence-check-helm;
 #                     an existing cluster of that name is refused, the check
-#                     deletes its own at the end
+#                     deletes its own at the end. The stand-ins are named
+#                     after it, containers and network aliases: checks with
+#                     their own CHECK_CLUSTER and CHECK_HTTP_PORT run at the
+#                     same time on one machine
 #   CHECK_HTTP_PORT   host port of the Ingress (127.0.0.1), default 8090
 #   CHECK_S3_PORT     host port of the stand-in bucket, default
 #                     CHECK_HTTP_PORT + 4
@@ -153,8 +157,13 @@ for i in $(seq 1 60); do
 done
 
 # --- the stand-ins, in the network of kind ---------------------------------------------
-info "external PostgreSQL and the bucket in the network kind"
-EXT_DB_NETWORK=kind ext_db_up "$cluster-db" 5432 "$work/db"
+# The network kind is one for every cluster of the machine: the names the
+# pods reach the stand-ins by are those of this cluster, so two checks with
+# their own CHECK_CLUSTER run side by side, each on its own database and
+# bucket (the certificate of the database is for that name).
+info "external PostgreSQL ($cluster-extdb) and the bucket ($cluster-s3stand) in the network kind"
+EXT_DB_NETWORK=kind EXT_DB_ALIAS="$cluster-extdb" ext_db_up "$cluster-db" 5432 "$work/db"
+S3_ALIAS="$cluster-s3stand"
 s3_up "$cluster-s3" "$s3_port" kind
 
 # --- images ------------------------------------------------------------------------------

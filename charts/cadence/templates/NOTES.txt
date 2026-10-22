@@ -1,4 +1,5 @@
-{{- $scheme := ternary "https" "http" (ne .Values.ingress.tls.secretName "") -}}
+{{- include "cadence.sections" . -}}
+{{- $scheme := ternary "https" "http" (not (empty .Values.ingress.tls.secretName)) -}}
 {{- $ref := include "cadence.secretRef" (list . .Values.secrets.keys.SDLC_ADMIN_TOKEN "secrets.keys.SDLC_ADMIN_TOKEN") | fromYaml -}}
 Cadence Lab {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}" in the namespace {{ .Release.Namespace }}.
 

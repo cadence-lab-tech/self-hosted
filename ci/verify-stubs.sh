@@ -1,12 +1,14 @@
 # shellcheck shell=bash
 #
 # Stand-ins for the checks of the signatures (lib.sh, "signatures"): sourced
-# by ci/check-get-cadence.sh, ci/check-verify.sh, ci/check-stack.sh and
-# ci/check-upgrade.sh. Not part of the package.
+# by ci/check-get-cadence.sh, ci/check-verify.sh, ci/check-stack.sh,
+# ci/check-upgrade.sh and ci/check-publish-chart.sh. Not part of the
+# package.
 #
 #   stub_cosign DIR LOG         DIR/cosign: a cosign 3.x that writes its
 #                               command line to LOG and verifies everything,
-#                               except what FAKE_COSIGN_BAD names
+#                               except what FAKE_COSIGN_BAD names; sign
+#                               signs anything
 #   stub_cosign_local DIR LOG   DIR/cosign: accepts verify-blob of a package
 #                               built by ci/package.sh --bundle (unsigned:
 #                               it is this checkout) and hands everything
@@ -27,8 +29,8 @@
 #
 #   FAKE_COSIGN_VERSION  what `cosign version` reports, default v3.1.3
 #   FAKE_COSIGN_BAD      package - verify-blob fails (another identity);
-#                        a repository (sdlc-pipeline-backend) - verify of its
-#                        image fails
+#                        a repository (sdlc-pipeline-backend, cadence of the
+#                        chart) - verify of its image fails
 #   FAKE_WATCH           a path; each call logs whether it exists then
 #                        ([exists] or [absent]) - "before unpacking"
 
@@ -65,6 +67,9 @@ verify)
     ;;
   esac
   echo '[{"critical":{}}]'
+  ;;
+sign)
+  echo "tlog entry created (cosign stub)" >&2
   ;;
 *) echo "cosign stub: \$*" >&2; exit 1 ;;
 esac
