@@ -1070,7 +1070,8 @@ with `--with-starter` (see [Install](#install)):
 On a machine where Cadence Lab already runs - installed without the flag,
 or after the step failed - `clab server starter` does the same on the
 installation directory, with the administrator token of the installation
-(`SDLC_ADMIN_TOKEN` in `.env`, or `SDLC_ADMIN_TOKEN_FILE`) and the team of
+(`SDLC_ADMIN_TOKEN` in `.env`, or the file of `SDLC_ADMIN_TOKEN_FILE` in
+`secrets/`, also when [compose.secrets.yml](#composesecretsyml) sets it) and the team of
 `SDLC_BOOTSTRAP_TEAM` unless `--team` names another:
 
 ```bash

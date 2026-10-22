@@ -1409,6 +1409,7 @@ if [ "$db" = bundled ]; then
     check "an epic is created in it" "${sclab[@]}" create --title "First epic" --type epic
 
     again="$(cd "$work" && PATH="$work/nogit:$PATH" "$starter_clab" server starter --dir "$work/starter" --project START 2>&1)" && code=0 || code=$?
+    [ "$code" = 0 ] || printf '%s\n' "$again" >&2
     check "clab server starter again exits with 0" [ "$code" = 0 ]
     check "...finds the project" contains "$again" "project START already exists (team starter)"
     check "...leaves the roles and cycles unchanged and active" \
@@ -1416,6 +1417,7 @@ if [ "$db" = bundled ]; then
     check "...and makes no new version of a cycle" [ "$(workflows_of | jq '.workflows | length')" = "$(jq '.workflows | length' <<<"$flows")" ]
 
     first="$(cd "$work" && PATH="$work/nogit:$PATH" "$starter_clab" server starter --dir "$work/cadence" --team check --project CHECK 2>&1)" && code=0 || code=$?
+    [ "$code" = 0 ] || printf '%s\n' "$first" >&2
     check "clab server starter on CHECK, set up by hand on the first installation, exits with 0" [ "$code" = 0 ]
     check "...and changes nothing there" [ "$(grep -o 'unchanged, already active' <<<"$first" | wc -l | tr -d ' ')" = 2 ]
     check "the starter project steps write nothing into the configuration of clab" \
