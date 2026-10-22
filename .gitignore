@@ -4,3 +4,4 @@ secrets/
 docker-compose.override.yml
 compose.override.yml
 .upgrade.*/
+.cache/

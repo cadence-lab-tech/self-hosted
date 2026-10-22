@@ -1,409 +1,65 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # First installation of Cadence Lab on this machine: checks the environment,
 # writes .env with generated secrets, starts the stack of the version in
-# VERSION and prints the administrator token.
+# VERSION and prints the administrator token. It runs once: with .env here
+# it stops and changes nothing.
 #
 #   ./install.sh                                  # asks questions
 #   ./install.sh --mode tls --domain cadence.example.com --email ops@example.com
 #   ./install.sh --mode proxy --http-addr 127.0.0.1:8080 --yes
 #   ./install.sh --name cadence-stage --mode proxy --http-addr 127.0.0.1:8081
+#   ./install.sh --external-db URL --external-db-ca FILE --yes
 #
-# Without a terminal, or with --yes, it asks nothing: every answer comes from
-# flags or from the environment (CADENCE_MODE, SDLC_DOMAIN, ACME_EMAIL,
-# CADENCE_HTTP_ADDR, SDLC_BOOTSTRAP_TEAM, SDLC_BOOTSTRAP_TEAM_NAME). An
-# administrator token may be supplied as SDLC_ADMIN_TOKEN (at least 16
-# characters); otherwise one is generated.
+# A wrapper: it runs clab server install of the clab in bin/
+# of this package - bin/clab-<os>-<arch> of this machine - on this directory,
+# with the arguments as given. The flags, the variables (CADENCE_MODE,
+# SDLC_DOMAIN, SDLC_ADMIN_TOKEN, CADENCE_VERIFY, ...) and the exit codes
+# (0 done, 1 refused or failed, 2 a wrong argument) are those of clab server
+# install: ./install.sh --help lists them; docs/admin.md, "Install".
 #
-# --name NAME (or COMPOSE_PROJECT_NAME) names this installation on the
-# machine, default cadence: the Docker Compose project of its containers,
-# volumes and network, kept in .env. A second installation on the same
-# machine needs a name of its own. It is not a project inside Cadence Lab:
-# one installation holds any number of teams and projects.
-#
-# --external-db URL (or CADENCE_EXTERNAL_DB) puts the data into your own
-# PostgreSQL 15-18 instead of the postgres container: URL is
-# postgres://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=verify-full, and
-# --external-db-ca FILE (or CADENCE_EXTERNAL_DB_CA) the CA of the server,
-# copied to secrets/. The database is checked before anything is written
-# (docs/admin.md, "External PostgreSQL").
-#
-# Before anything is written it verifies the signatures of both images of
-# VERSION at ghcr.io by the digests docker-compose.yml pins - with cosign 3.x
-# in PATH; CADENCE_VERIFY=auto (the default) warns without it, require
-# refuses, off skips the check (docs/admin.md, "Verifying a release").
-#
-# It runs once. With an existing .env it stops and changes nothing:
-# regenerating the secrets would lock the database volume out with a new
-# password.
-set -euo pipefail
+#   CADENCE_CLAB  the clab to run instead of the one in bin/ (a machine the
+#                 package has no clab for); of the version in VERSION or newer
+set -eu
 
-cd "$(dirname "$0")"
-# shellcheck source=lib.sh
-. ./lib.sh
+dir="$(cd "$(dirname "$0")" && pwd)"
+cd "$dir"
+command=install
 
-usage() {
-  sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
-  exit "${1:-0}"
-}
-
-mode="${CADENCE_MODE:-}"
-domain="${SDLC_DOMAIN:-}"
-email="${ACME_EMAIL:-}"
-http_addr="${CADENCE_HTTP_ADDR:-}"
-team="${SDLC_BOOTSTRAP_TEAM:-}"
-team_name="${SDLC_BOOTSTRAP_TEAM_NAME:-}"
-admin_token="${SDLC_ADMIN_TOKEN:-}"
-db_url="${CADENCE_EXTERNAL_DB:-}"
-db_ca="${CADENCE_EXTERNAL_DB_CA:-}"
-name=""
-assume_yes=false
-timeout="${CADENCE_READY_TIMEOUT:-300}"
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-  --mode) mode="${2:?--mode needs tls or proxy}"; shift 2 ;;
-  --domain) domain="${2:?--domain needs a host name}"; shift 2 ;;
-  --email) email="${2:?--email needs an address}"; shift 2 ;;
-  --http-addr) http_addr="${2:?--http-addr needs [ip:]port}"; shift 2 ;;
-  --team) team="${2:?--team needs a key}"; shift 2 ;;
-  --team-name) team_name="${2:?--team-name needs a name}"; shift 2 ;;
-  --name) name="${2:?--name needs a name of the installation}"; shift 2 ;;
-  --external-db) db_url="${2:?--external-db needs a URL postgres://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=verify-full}"; shift 2 ;;
-  --external-db-ca) db_ca="${2:?--external-db-ca needs the file of the CA of the database server}"; shift 2 ;;
-  -y | --yes | --non-interactive) assume_yes=true; shift ;;
-  -h | --help) usage 0 ;;
-  *) warn "unknown argument: $1"; usage 2 >&2 ;;
-  esac
-done
-
-interactive=false
-if [ "$assume_yes" = false ] && [ -t 0 ]; then
-  interactive=true
-fi
-
-# ask VAR "question" "default": in interactive mode read an answer, keeping
-# the current value (or the default) on an empty line.
-ask() {
-  local var="$1" question="$2" current="${!1:-$3}" answer
-  if [ "$interactive" = true ]; then
-    read -r -p "$question [${current}]: " answer
-    printf -v "$var" '%s' "${answer:-$current}"
-  else
-    printf -v "$var" '%s' "$current"
-  fi
-}
-
-# --- 1. nothing to overwrite ---------------------------------------------------
-if [ -e .env ]; then
-  die ".env already exists: this instance is installed, and install.sh never regenerates secrets
-  (a new POSTGRES_PASSWORD would no longer open the existing database volume).
-  - start the configured stack:  export CADENCE_VERSION=\$(cat VERSION) && docker compose up -d
-  - upgrade:                     ./upgrade.sh
-  - start over, DELETING ALL DATA: docker compose down -v && rm .env && ./install.sh"
-fi
-
-# --- 2. environment ---------------------------------------------------------------
-# The installation name: --name, else COMPOSE_PROJECT_NAME, else the default.
-# Both given and different is a mistake in one of them, not a choice.
-env_name="${COMPOSE_PROJECT_NAME:-}"
-if [ -n "$name" ] && [ -n "$env_name" ] && [ "$name" != "$env_name" ]; then
-  die "--name is '$name', but COMPOSE_PROJECT_NAME in the environment is '$env_name': give one of them, or the same name in both"
-fi
-name="${name:-${env_name:-$CADENCE_DEFAULT_NAME}}"
-valid_name "$name" || die "'$name' is not a valid installation name (--name): $(name_rule)"
-
-info "checking the environment"
-verify_init "Nothing was installed."
-require_docker
-load_version
-# Another installation under the same name would share its containers and
-# volumes: the new database password would not open its volume, and this
-# installation would break that one.
-taken="$(name_in_use "$name")" || die "could not ask Docker which installation names are taken (docker ps, docker volume ls)"
-if [ -n "$taken" ]; then
-  case "$taken" in
-  volumes) where="Docker keeps volumes of the compose project '$name' (an installation removed without its data)" ;;
-  containers) where="Docker has containers of the compose project '$name'" ;;
-  *) where="the installation in $taken uses it" ;;
-  esac
-  die "the installation name '$name' is taken on this machine: $where.
-  Every installation on one machine needs a name of its own; pick another one with --name:
-    cd $(pwd) && ./install.sh --name ${name}-2 ...   (or get-cadence.sh ... --dir <a new directory> --name ${name}-2)
-  The name is the Docker Compose project of the installation, not a project inside Cadence Lab. Nothing was changed."
-fi
-# The images are built for linux/amd64 and linux/arm64 (uname -m says
-# aarch64 on Linux and arm64 on macOS); anything else has no image to pull.
+case "$(uname -s)" in
+Linux) os=linux ;;
+Darwin) os=darwin ;;
+*) os="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+esac
 case "$(uname -m)" in
-x86_64 | amd64 | aarch64 | arm64) ;;
-*) warn "this machine is $(uname -m); the images are built for linux/amd64 and linux/arm64 only, so pulling them here will most likely fail" ;;
+x86_64 | amd64) arch=amd64 ;;
+aarch64 | arm64) arch=arm64 ;;
+*) arch="$(uname -m)" ;;
 esac
-
-gen_hex() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex "$1"
-  elif [ -r /dev/urandom ]; then
-    od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'
+clab="${CADENCE_CLAB:-$dir/bin/clab-$os-$arch}"
+if [ -n "${CADENCE_CLAB:-}" ]; then
+  what="CADENCE_CLAB=$clab"
+elif [ -f "$clab" ]; then
+  what="bin/clab-$os-$arch"
+else
+  what=""
+fi
+if [ -z "$what" ] || ! err="$("$clab" server --help 2>&1 >/dev/null)"; then
+  version="$(tr -d '[:space:]' <VERSION 2>/dev/null || true)"
+  if [ -z "$what" ]; then
+    printf '✗ this package has no clab for %s/%s: it carries bin/clab-<os>-<arch> for linux and darwin, amd64 and arm64.\n' "$os" "$arch" >&2
   else
-    die "need openssl or /dev/urandom to generate secrets"
+    printf '✗ %s does not run on this machine (%s/%s): %s\n' "$what" "$os" "$arch" "${err:-no output}" >&2
   fi
-}
-# Fail before any question, not after the answers.
-[ -n "$(gen_hex 4)" ] || die "could not generate a random secret (openssl or /dev/urandom)"
-
-# The images of VERSION, as compose will run them - pins, CADENCE_REGISTRY
-# and a compose.override.yml put here before the installation - are verified
-# before any question, before the precheck of an external database runs the
-# backend image and before .env is written.
-verify_compose=(-f docker-compose.yml)
-[ ! -f compose.override.yml ] || verify_compose+=(-f compose.override.yml)
-verify_images "$CADENCE_VERSION" "Nothing was installed." "${verify_compose[@]}"
-
-# port_busy PORT [ADDR]: something already listens on the port.
-port_busy() {
-  local port="$1" addr="${2:-}"
-  if command -v ss >/dev/null 2>&1; then
-    ss -Hltn "sport = :$port" 2>/dev/null | grep -q . && return 0
-    return 1
-  fi
-  # No ss (e.g. macOS for a test run): try to connect.
-  (exec 3<>"/dev/tcp/${addr:-127.0.0.1}/$port") 2>/dev/null
-}
-
-# --- 3. answers --------------------------------------------------------------------
-ask mode "Mode: tls (HTTPS on your domain) or proxy (HTTP behind your reverse proxy)" tls
-case "$mode" in
-tls)
-  ask domain "Domain name that points at this machine" ""
-  [ -n "$domain" ] || die "tls mode needs a domain: --domain cadence.example.com (or SDLC_DOMAIN), or use --mode proxy"
-  ask email "E-mail for Let's Encrypt notices" "admin@${domain}"
-  for port in 80 443; do
-    if port_busy "$port"; then
-      die "port $port is already in use on this machine; tls mode needs ports 80 and 443 (or use --mode proxy behind the existing web server)"
-    fi
-  done
-  # The certificate is only issued if the domain resolves to this machine.
-  resolved=""
-  if command -v getent >/dev/null 2>&1; then
-    resolved="$(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)"
-  fi
-  if [ -z "$resolved" ]; then
-    warn "$domain does not resolve. Create a DNS record pointing at this machine before the first start,"
-    warn "or install in proxy mode behind your reverse proxy: ./install.sh --mode proxy"
-  else
-    local_ips="$(hostname -I 2>/dev/null || true)"
-    match=false
-    for ip in $resolved; do
-      case " $local_ips " in *" $ip "*) match=true ;; esac
-    done
-    if [ "$match" = false ]; then
-      warn "$domain resolves to ${resolved% } which is not an address of this machine (${local_ips:-unknown})."
-      warn "Fine behind NAT with ports 80/443 forwarded here; otherwise Let's Encrypt will fail - consider --mode proxy."
-    fi
-  fi
-  compose_file="docker-compose.yml:compose.tls.yml:compose.override.yml"
-  ;;
-proxy)
-  ask http_addr "Address Caddy listens on for your proxy ([ip:]port)" "127.0.0.1:8080"
-  port="${http_addr##*:}"
-  host="${http_addr%:*}"
-  [ "$host" = "$http_addr" ] && host=""
-  [[ "$port" =~ ^[0-9]+$ ]] || die "--http-addr '$http_addr' is not [ip:]port"
-  case "$host" in "" | 0.0.0.0) host=127.0.0.1 ;; esac
-  if port_busy "$port" "$host"; then
-    die "port $port is already in use on this machine; pick another with --http-addr 127.0.0.1:<port>"
-  fi
-  compose_file="docker-compose.yml:compose.proxy.yml:compose.override.yml"
-  ;;
-*) die "mode must be tls or proxy, not '$mode'" ;;
-esac
-ask team "Key of the first team (empty: create teams later with clab)" ""
-if [ -n "$team" ] && [ -z "$team_name" ]; then
-  ask team_name "Display name of team $team" "$team"
+  cat >&2 <<EOF
+  Nothing was done. Install clab ${version:-of this version} for this machine from the tap and run it on this directory:
+    curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=${version:-vX.Y.Z} sh
+    clab server $command --dir $dir [the same arguments]
+  or let this script run it: CADENCE_CLAB=/path/to/clab $0 [the same arguments]
+  (docs/admin.md, "clab in the package").
+EOF
+  exit 1
 fi
-
-if [ -n "$admin_token" ]; then
-  [ "${#admin_token}" -ge 16 ] || die "SDLC_ADMIN_TOKEN must be at least 16 characters"
-  token_generated=false
-else
-  admin_token="sdlc_$(gen_hex 24)"
-  token_generated=true
-fi
-
-# --- external database -------------------------------------------------------------
-# url_with_param URL KEY VALUE appends KEY=VALUE to the query of URL.
-url_with_param() {
-  case "$1" in
-  *"?"*) printf '%s&%s=%s\n' "$1" "$2" "$3" ;;
-  *) printf '%s?%s=%s\n' "$1" "$2" "$3" ;;
-  esac
-}
-# external_precheck: the database, as the service will see it (/api dbcheck
-# of the image of VERSION) and as the backup client will (psql of db-client).
-# Runs before .env exists, so the settings come from the environment; what
-# compose creates for the run (network, volumes) is removed after it.
-external_precheck() (
-  # shellcheck disable=SC2030 # the settings of this run only
-  export COMPOSE_PROJECT_NAME="$name" COMPOSE_FILE="docker-compose.yml:$EXTERNAL_DB_FILE" \
-    CADENCE_DB=external SDLC_DATABASE_URL="$db_url" POSTGRES_PASSWORD=
-  rc=0
-  db_check --install || rc=1
-  if [ "$rc" = 0 ]; then
-    info "checking the backup client (pg_dump and psql of $(docker compose config --images db-client 2>/dev/null || echo db-client)) with the same URL"
-    if db_client_check; then
-      ok "the backup client connects"
-    else
-      warn "the backup client (libpq) cannot connect with SDLC_DATABASE_URL, though the service can: see its error above"
-      rc=1
-    fi
-  fi
-  # The run created the network and the volumes of api under the name of
-  # this installation, which was free a moment ago: a refused attempt must
-  # not leave them to make the name look taken.
-  docker compose down -v --remove-orphans >/dev/null 2>&1 || true
-  exit "$rc"
-)
-db_mode=bundled
-if [ -n "$db_ca" ] && [ -z "$db_url" ]; then
-  die "--external-db-ca needs --external-db URL"
-fi
-if [ -n "$db_url" ]; then
-  db_mode=external
-  case "$db_url" in
-  postgres://* | postgresql://*) ;;
-  *) die "--external-db must be a URL: postgres://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=verify-full (the key=value form is not supported)" ;;
-  esac
-  case "$db_url" in
-  *"'"* | *$'\n'*) die "--external-db must not contain a single quote or a line break: percent-encode it (%27)" ;;
-  esac
-  require_compose_for_external_db
-  mkdir -p secrets
-  chmod 711 secrets
-  if [ -n "$db_ca" ]; then
-    if [ ! -f "$db_ca" ] || [ ! -r "$db_ca" ]; then
-      die "--external-db-ca: no readable file $db_ca"
-    fi
-    grep -q 'BEGIN CERTIFICATE' "$db_ca" || die "--external-db-ca: $db_ca is not a PEM certificate"
-    case "$db_url" in
-    *"?sslrootcert="* | *"&sslrootcert="*) die "the CA is given twice: --external-db-ca and sslrootcert in --external-db; keep one" ;;
-    esac
-    # The service runs as uid 65532: the CA must be readable by it.
-    cp "$db_ca" secrets/db-ca.pem
-    chmod 644 secrets/db-ca.pem
-    db_url="$(url_with_param "$db_url" sslrootcert /secrets/db-ca.pem)"
-    case "$db_url" in
-    *"?sslmode="* | *"&sslmode="*) ;;
-    *) db_url="$(url_with_param "$db_url" sslmode verify-full)" ;;
-    esac
-  fi
-  info "checking the external database $(db_target "$db_url")"
-  external_precheck || die "the external database is not ready (see above). Nothing was written:
-  fix the database or the URL and run ./install.sh again in $(pwd) with the same flags (docs/admin.md, \"External PostgreSQL\")"
-  compose_file="docker-compose.yml:compose.$mode.yml:$EXTERNAL_DB_FILE:compose.override.yml"
-fi
-
-# --- 4. .env ---------------------------------------------------------------------------
-info "writing .env"
-# set_kv writes KEY=VALUE over the template line; values go through ENVIRON,
-# so awk needs no escaping. compose reads .env and the scripts source it as
-# shell, so a value with spaces or shell characters is single-quoted, which
-# both read the same way.
-set_kv() {
-  case "$2" in
-  *"'"* | *$'\n'*) die "the value of $1 must not contain a single quote or a line break" ;;
-  esac
-  KEY="$1" VALUE="$2" awk '
-    BEGIN {
-      k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]; done = 0
-      if (v ~ /[^A-Za-z0-9_.,:\/@+=-]/) v = "\047" v "\047"
-    }
-    index($0, k "=") == 1 { print k "=" v; done = 1; next }
-    { print }
-    END { if (!done) print k "=" v }
-  ' .env.tmp >.env.tmp.next && mv .env.tmp.next .env.tmp
-}
-trap 'rm -f .env.tmp .env.tmp.next' EXIT
-cp .env.example .env.tmp
-chmod 600 .env.tmp
-set_kv COMPOSE_PROJECT_NAME "$name"
-set_kv CADENCE_MODE "$mode"
-set_kv COMPOSE_FILE "$compose_file"
-if [ "$mode" = tls ]; then
-  set_kv SDLC_DOMAIN "$domain"
-  set_kv ACME_EMAIL "$email"
-else
-  set_kv SDLC_DOMAIN ""
-  set_kv ACME_EMAIL ""
-  set_kv CADENCE_HTTP_ADDR "$http_addr"
-fi
-set_kv CADENCE_DB "$db_mode"
-if [ "$db_mode" = external ]; then
-  set_kv SDLC_DATABASE_URL "$db_url"
-  set_kv POSTGRES_PASSWORD ""
-else
-  set_kv POSTGRES_PASSWORD "$(gen_hex 24)"
-fi
-set_kv SDLC_ADMIN_TOKEN "$admin_token"
-set_kv SDLC_GITHUB_WEBHOOK_SECRET "$(gen_hex 24)"
-set_kv SDLC_BOOTSTRAP_TEAM "$team"
-set_kv SDLC_BOOTSTRAP_TEAM_NAME "$team_name"
-mv .env.tmp .env
-trap - EXIT
-# Local compose changes live in compose.override.yml, which COMPOSE_FILE
-# lists from the start: compose reads it with no edit of .env, and upgrade.sh
-# never touches it.
-if [ ! -e compose.override.yml ]; then
-  cat >compose.override.yml <<'YAML'
-# Local changes of the compose configuration (docs/admin.md, "Local compose
-# changes"). COMPOSE_FILE in .env lists this file; upgrade.sh never touches it.
-#
-# services:
-#   api:
-#     extra_hosts: ["host.docker.internal:host-gateway"]
-services: {}
-YAML
-  chmod 644 compose.override.yml
-fi
-mkdir -p backups secrets
-# The service runs as uid 65532 and must traverse secrets/ to read the GitHub
-# App key; listing it is not needed.
-chmod 700 backups
-chmod 711 secrets
-ok ".env written (mode 600)"
-
-# --- 5. start ------------------------------------------------------------------------------
-load_env
-check_mode
-info "pulling images of $CADENCE_VERSION"
-if ! docker compose pull --quiet; then
-  die "could not pull the images of $CADENCE_VERSION: check that ghcr.io is reachable from this host.
-  Then start the stack: export CADENCE_VERSION=\$(cat VERSION) && docker compose up -d"
-fi
-info "starting the stack"
-docker compose up -d --remove-orphans
-info "waiting for the service to become ready (up to ${timeout}s)"
-if ! wait_ready "$timeout"; then
-  docker compose ps
-  docker compose logs --tail 40 api caddy || true
-  die "the stack did not become ready in ${timeout}s; the logs are above. .env is kept: fix the cause and run
-  export CADENCE_VERSION=\$(cat VERSION) && docker compose up -d"
-fi
-
-ok "Cadence Lab $CADENCE_VERSION is up"
-say ""
-say "  Address:              $(public_url)"
-if external_db; then
-  # shellcheck disable=SC2031 # from .env (load_env), not from the precheck
-  say "  Database:             external $(db_target "$SDLC_DATABASE_URL")"
-fi
-if [ "$token_generated" = true ]; then
-  say "  Administrator token:  $SDLC_ADMIN_TOKEN"
-  say "                        (shown once; it is also in .env - keep both private)"
-else
-  say "  Administrator token:  the one supplied in SDLC_ADMIN_TOKEN"
-fi
-say ""
-say "Next: sign in with the token and follow docs/admin.md (teams, GitHub App, OIDC, CLI)."
-say "Set up nightly backups: 0 3 * * * $(pwd)/backup.sh >> $(pwd)/backups/backup.log 2>&1"
-say "and a weekly restore check: 0 5 * * 0 $(pwd)/backup.sh verify >> $(pwd)/backups/backup.log 2>&1"
-say "Copy the backups off this machine: BACKUP_S3_* in .env (docs/admin.md, \"Off-machine copy\")."
+CADENCE_WRAPPER=1
+export CADENCE_WRAPPER
+exec "$clab" server "$command" --dir "$dir" "$@"

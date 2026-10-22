@@ -25,8 +25,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# shellcheck source=lib.sh
-. ./lib.sh
+# shellcheck source=ci/lib.sh
+. ./ci/lib.sh
 # shellcheck source=ci/verify-stubs.sh
 . ./ci/verify-stubs.sh
 

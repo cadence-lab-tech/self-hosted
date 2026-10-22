@@ -3,25 +3,39 @@
 # Static checks of the package that need no published images: the compose
 # configuration in both modes, the Caddyfile in both modes, the defaults of
 # .env.example, the file layout, the release package that ci/package.sh
-# builds and the Helm chart (rendered, in parity with compose). CI runs it
-# on every pull request next to the shell linter; it needs Docker and jq
-# (helm of PATH, or its image).
+# builds - with the clab of every platform from the tap - and its wrappers,
+# and the Helm chart (rendered, in parity with compose). CI runs it on every
+# pull request next to the shell linter; it needs Docker and jq (helm of
+# PATH, or its image), and the network for the clab of the tap (kept in
+# .cache/clab).
 #
 #   ci/check-config.sh
 #
+# The wrappers (decision 0057): install.sh, upgrade.sh, backup.sh and
+# restore.sh are POSIX sh, a few dozen lines without lib.sh and without
+# docker, ending in exec of the clab of the package; their --help is the
+# help of clab server <command>, an unknown flag exits with 2, a platform
+# the package has no clab for - and a clab that does not run - with 1 and
+# the commands that install clab of VERSION from the tap and run it on the
+# directory, nothing changed. The flags of the scripts in the documentation
+# are checked against clab server <command> --help of the clab of the
+# package for this machine. ci/package.sh refuses an archive of the tap
+# whose sum does not match its checksums.txt and a release of the tap
+# without the archives, and builds without the tap from --clab DIR.
+#
 #   CLAB_BIN  clab whose "clab server ... --help" the documented clab server
-#             flags are checked against; default: the CLI of VERSION from the
-#             public tap, once VERSION has clab server (v0.7.0). Without
-#             CLAB_BIN a documented command that the clab of VERSION does not
-#             have yet (documented ahead of the release that brings it) is
-#             skipped with a note; with CLAB_BIN it fails. An unknown flag of
-#             an existing command fails either way. The same clab checks the
-#             line docs/admin.md quotes for clab without a host (from v0.10.1).
+#             commands are checked against; default: the clab of the package
+#             for this machine (bin/clab-<os>-<arch>). Without CLAB_BIN a
+#             documented command that the clab of VERSION does not have yet
+#             (documented ahead of the release that brings it) is skipped
+#             with a note; with CLAB_BIN it fails. An unknown flag of an
+#             existing command fails either way. The same clab checks the
+#             line docs/admin.md quotes for clab without a host.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# shellcheck source=lib.sh
-. ./lib.sh
+# shellcheck source=ci/lib.sh
+. ./ci/lib.sh
 # shellcheck source=ci/pins.sh
 . ./ci/pins.sh
 
@@ -54,6 +68,28 @@ for p in .env backups/ secrets/ compose.override.yml; do
   check ".gitignore has $p" grep -qxF "$p" .gitignore
 done
 check "get-cadence.sh is a POSIX sh script" [ "$(head -n 1 get-cadence.sh)" = "#!/bin/sh" ]
+check ".gitignore has .cache/ (the clab of the tap, ci/package.sh)" grep -qxF .cache/ .gitignore
+check "lib.sh is no file of the installation any more, the checks have ci/lib.sh" [ ! -e lib.sh ]
+
+info "wrappers"
+# install.sh, upgrade.sh, backup.sh and restore.sh: exec of clab server
+# <command> of the clab of the package, nothing else (decision 0057).
+# shellcheck disable=SC2016 # the text of the scripts
+wrapper_exec='exec "$clab" server "$command" --dir "$dir" "$@"'
+for f in install.sh upgrade.sh backup.sh restore.sh; do
+  check "$f is a POSIX sh script" [ "$(head -n 1 "$f")" = "#!/bin/sh" ]
+  check "$f has a few dozen lines ($(grep -c . "$f"))" [ "$(grep -c . "$f")" -le 80 ]
+  check "$f runs clab server ${f%.sh}" grep -qxF "command=${f%.sh}" "$f"
+  check "$f ends in exec of the clab of the package with --dir and its arguments" [ "$(tail -n 1 "$f")" = "$wrapper_exec" ]
+  check "$f sources no lib.sh" lacks "$(grep -v '^#' "$f")" "lib.sh"
+  check "$f calls no docker" lacks "$(grep -v '^#' "$f")" "docker"
+  check "$f sets CADENCE_WRAPPER=1 for the hints of clab server" grep -qxF "CADENCE_WRAPPER=1" "$f"
+done
+# Apart from the first lines and the command, the wrappers are one text.
+wrapper_body() { sed -n '/^set -eu$/,$p' "$1" | grep -vx "command=${1%.sh}"; }
+for f in upgrade.sh backup.sh restore.sh; do
+  check "$f is install.sh but for the command" [ "$(wrapper_body "$f")" = "$(wrapper_body install.sh)" ]
+done
 
 info "release package"
 # What ci/package.sh builds for a release: the files an installation needs
@@ -61,7 +97,8 @@ info "release package"
 # apart from the list in ci/package.sh, so that a file dropped from the
 # package turns this check red.
 required_files="VERSION docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml compose.secrets.yml Caddyfile .env.example
-  install.sh upgrade.sh backup.sh restore.sh lib.sh bundles/starter.json docs/admin.md README.md LICENSE SECURITY.md
+  install.sh upgrade.sh backup.sh restore.sh bundles/starter.json docs/admin.md README.md LICENSE SECURITY.md
+  bin/clab-linux-amd64 bin/clab-linux-arm64 bin/clab-darwin-amd64 bin/clab-darwin-arm64
   package.sha256"
 dist="$(mktemp -d)"
 trap 'rm -rf "$dist"' EXIT
@@ -88,7 +125,7 @@ no_entry() {
     case "$e" in "$p" | "$p"/*) return 1 ;; esac
   done <<<"$listing"
 }
-for p in ci/ .github/ .git .gitignore .env backups/ secrets/ compose.override.yml docker-compose.override.yml get-cadence.sh; do
+for p in ci/ .github/ .git .gitignore .env backups/ secrets/ compose.override.yml docker-compose.override.yml get-cadence.sh lib.sh .cache/; do
   check "the package has no $p" no_entry "$p"
 done
 # only_known: every entry is a required file or lies under bundles/ or docs/ -
@@ -102,6 +139,7 @@ only_known() {
   done <<<"$listing"
 }
 check "the package has nothing but the required files, bundles/ and docs/" only_known
+check "the package has no clab-runner" [ -z "$(grep -F clab-runner <<<"$listing" || true)" ]
 check "the package has no ._ metadata files of macOS" [ -z "$(grep -E '(^|/)\._' <<<"$listing" || true)" ]
 check "the package has no top directory" [ -z "$(grep -E '^[^/]+/$' <<<"$listing" || true)" ]
 mkdir -p "$dist/unpacked"
@@ -111,8 +149,11 @@ mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 for f in install.sh upgrade.sh backup.sh restore.sh; do
   check "$f unpacks executable (755)" [ "$(mode_of "$dist/unpacked/$f")" = 755 ]
 done
-check "lib.sh and the other files unpack as 644 under umask 077" \
-  [ "$(mode_of "$dist/unpacked/lib.sh") $(mode_of "$dist/unpacked/docker-compose.yml")" = "644 644" ]
+for p in $CLAB_PLATFORMS; do
+  check "bin/clab-$p unpacks executable (755)" [ "$(mode_of "$dist/unpacked/bin/clab-$p")" = 755 ]
+done
+check "the other files unpack as 644 under umask 077" \
+  [ "$(mode_of "$dist/unpacked/docker-compose.yml") $(mode_of "$dist/unpacked/README.md")" = "644 644" ]
 verify_manifest() {
   local sum file listed
   listed="$(awk '{print $2}' "$dist/unpacked/package.sha256" | sort)"
@@ -126,109 +167,164 @@ check "package.sha256 lists every file of the package with its sha256" verify_ma
 check "ci/package.sh --version sets VERSION in the package" ci/package.sh --version v99.0.0 "$dist/other"
 check "...and names the package by it" [ -f "$dist/other/$(package_name v99.0.0)" ]
 
-info "rollback hint"
-# package_files_hint is what upgrade.sh and restore.sh print when they refuse
-# another version. Its branches, run in scratch directories: a kept package
-# copy, the release package (since v0.6.0), and for older versions git in a
-# clone or else the source archive of the tag.
-#
-# hint_in DIR VERSION [NAME=VALUE...] prints the hint for VERSION in DIR with
-# the given environment.
-hint_in() {
-  local in="$1" v="$2"
-  shift 2
-  (
-    cd "$in" && unset BACKUP_DIR CADENCE_RELEASES_URL CADENCE_GIT_REMOTE
-    # shellcheck disable=SC2163 # NAME=VALUE pairs, not names
-    [ $# -eq 0 ] || export "$@"
-    package_files_hint "$v"
-  )
+# The clab of the package for this machine: what the wrappers run here.
+case "$(uname -s)/$(uname -m)" in
+Linux/x86_64 | Linux/amd64) platform=linux-amd64 ;;
+Linux/aarch64 | Linux/arm64) platform=linux-arm64 ;;
+Darwin/x86_64) platform=darwin-amd64 ;;
+Darwin/arm64) platform=darwin-arm64 ;;
+*) die "no clab in the package for $(uname -s)/$(uname -m): the checks of the wrappers need one" ;;
+esac
+pkg_clab="$dist/unpacked/bin/clab-$platform"
+clab_cache="${CADENCE_CLAB_CACHE:-$PWD/.cache/clab}/$version"
+mkdir -p "$dist/clab-config"
+# clab_of CMD ARGS...: CMD with no clab configuration of this machine.
+clab_of() { env -u SDLC_API_URL -u SDLC_TOKEN -u SDLC_PROJECT CLAB_CONFIG_DIR="$dist/clab-config" "$@"; }
+check "bin/clab-$platform version: clab $version" [ "$(clab_of "$pkg_clab" version 2>/dev/null | head -n 1)" = "clab $version" ]
+# clab_in_archive OS-ARCH: the sha256 of clab in the archive of the tap.
+clab_in_archive() {
+  local a
+  a="$(clab_archive "$version" "$1")"
+  tar -xzOf "$clab_cache/$a" "${a%.tar.gz}/clab" >"$dist/clab-of-archive"
+  sha256_of "$dist/clab-of-archive"
 }
-hint_dir() {
-  local d
-  d="$(mktemp -d "$dist/hint.XXXXXX")"
-  mkdir "$d/backups"
-  printf '%s\n' "$d"
+for p in $CLAB_PLATFORMS; do
+  check "bin/clab-$p is clab of the archive $(clab_archive "$version" "$p") of the tap" \
+    [ "$(sha256_of "$dist/unpacked/bin/clab-$p")" = "$(clab_in_archive "$p")" ]
+done
+
+# The clab of the tap is checked before anything is packed; --clab DIR
+# builds without the tap. A tap of the archives of $version in a scratch
+# directory, an empty cache each time.
+info "clab of the tap (ci/package.sh)"
+tap="$dist/tap/download/$version"
+mkdir -p "$tap"
+cp "$clab_cache/checksums.txt" "$tap/"
+for p in $CLAB_PLATFORMS; do cp "$clab_cache/$(clab_archive "$version" "$p")" "$tap/"; done
+# package_from_tap NAME: ci/package.sh from the scratch tap into $dist/NAME;
+# prints its output, the exit status is its.
+package_from_tap() {
+  CADENCE_TAP_RELEASES_URL="file://$dist/tap" CADENCE_CLAB_CACHE="$dist/cache-$1" ci/package.sh "$dist/$1" 2>&1
 }
-releases="$CADENCE_RELEASES_DEFAULT"
+check "ci/package.sh builds from a tap with the archives of $version" package_from_tap from-tap
+first="$(clab_archive "$version" linux-amd64)"
+printf 'x' >>"$tap/$first"
+if out="$(package_from_tap tampered)"; then
+  fail "ci/package.sh with an archive whose sum does not match must fail"
+else
+  check "an archive whose sum does not match checksums.txt of the tap: refused, naming it" contains "$out" "the sum of $first does not match checksums.txt"
+fi
+check "...and no package is written" [ ! -e "$dist/tampered/$package" ]
+mv "$tap/$first" "$dist/$first.moved"
+if out="$(package_from_tap missing)"; then
+  fail "ci/package.sh with an archive missing from the tap must fail"
+else
+  check "an archive missing from the release of the tap: refused, naming it" contains "$out" "has no $first"
+fi
+check "...and no package is written" [ ! -e "$dist/missing/$package" ]
+if out="$(CADENCE_TAP_RELEASES_URL="file://$dist/no-tap" CADENCE_CLAB_CACHE="$dist/cache-none" ci/package.sh "$dist/none" 2>&1)"; then
+  fail "ci/package.sh without a release of the tap must fail"
+else
+  check "no release of clab $version in the tap: refused, the archives are not published" contains "$out" "the archives of clab $version are not published"
+fi
+check "...and no package is written" [ ! -e "$dist/none/$package" ]
+mkdir -p "$dist/local-clab"
+for p in $CLAB_PLATFORMS; do printf '#!/bin/sh\necho local clab %s\n' "$p" >"$dist/local-clab/clab-$p"; done
+check "ci/package.sh --clab DIR builds with no tap at all" \
+  env CADENCE_TAP_RELEASES_URL="file://$dist/no-tap" CADENCE_CLAB_CACHE="$dist/cache-local" ci/package.sh --clab "$dist/local-clab" "$dist/local"
+mkdir -p "$dist/local/unpacked"
+tar -xpzf "$dist/local/$package" -C "$dist/local/unpacked" 2>/dev/null || true
+check "...with the clab of DIR as bin/clab-<os>-<arch>, 755" \
+  [ "$("$dist/local/unpacked/bin/clab-linux-arm64" 2>/dev/null) $(mode_of "$dist/local/unpacked/bin/clab-linux-arm64" 2>/dev/null)" = "local clab linux-arm64 755" ]
+mv "$dist/local-clab/clab-darwin-amd64" "$dist/clab-darwin-amd64.moved"
+if out="$(ci/package.sh --clab "$dist/local-clab" "$dist/local-short" 2>&1)"; then
+  fail "ci/package.sh --clab DIR without a platform must fail"
+else
+  check "ci/package.sh --clab DIR without clab-darwin-amd64: refused, naming it" contains "$out" "has no clab-darwin-amd64"
+fi
+
+info "wrappers in the package"
+# wrapper_state DIR: the files of DIR with their sums - what "nothing was
+# done" means.
+wrapper_state() { (cd "$1" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s  %s\n' "$(sha256_of "$f")" "$f"; done); }
+w="$dist/unpacked"
+before="$(wrapper_state "$w")"
+for f in install.sh upgrade.sh backup.sh restore.sh; do
+  code=0
+  out="$(clab_of "$w/$f" --help 2>&1)" || code=$?
+  check "$f --help exits with 0 and is the help of clab server ${f%.sh}" [ "$code/$(head -n 1 <<<"$out" | cut -d' ' -f1-3)" = "0/clab server ${f%.sh}" ]
+  code=0
+  out="$(clab_of "$w/$f" --no-such-flag </dev/null 2>&1)" || code=$?
+  check "$f --no-such-flag exits with 2: unknown option" [ "$code" = 2 ]
+  check "...and says so" contains "$out" "unknown option: --no-such-flag"
+done
+# A platform the package has no clab for: a stand-in uname.
+mkdir -p "$dist/uname"
+# shellcheck disable=SC2016 # the text of the stand-in
+printf '#!/bin/sh\ncase "$1" in -s) echo FreeBSD ;; -m) echo riscv64 ;; esac\n' >"$dist/uname/uname"
+chmod 755 "$dist/uname/uname"
+for f in install.sh backup.sh; do
+  code=0
+  out="$(PATH="$dist/uname:$PATH" "$w/$f" --yes </dev/null 2>&1)" || code=$?
+  check "$f on freebsd/riscv64 exits with 1" [ "$code" = 1 ]
+  check "...names the platform" contains "$out" "no clab for freebsd/riscv64"
+  check "...prints the installation of clab $version from the tap" contains "$out" "| CLAB_VERSION=$version sh"
+  check "...and clab server ${f%.sh} --dir with the directory" contains "$out" "clab server ${f%.sh} --dir $w"
+done
+code=0
+out="$(CADENCE_CLAB=/etc/hosts "$w/backup.sh" 2>&1)" || code=$?
+check "a clab that does not run (CADENCE_CLAB=/etc/hosts): exit 1" [ "$code" = 1 ]
+check "...naming it" contains "$out" "CADENCE_CLAB=/etc/hosts does not run"
+check "the refusals changed no file of the directory" [ "$(wrapper_state "$w")" = "$before" ]
+cp "$pkg_clab" "$dist/clab-elsewhere"
+check "CADENCE_CLAB runs another clab: backup.sh --help with a clab outside bin/" \
+  [ "$(CADENCE_CLAB="$dist/clab-elsewhere" "$w/backup.sh" --help 2>/dev/null | head -n 1 | cut -d' ' -f1-3)" = "clab server backup" ]
+
+info "rollback hint (docs)"
+# What upgrade.sh and restore.sh print when they refuse another version, for
+# a version before the release packages: the source archive of its tag, or
+# git in a clone (clab server, packageFilesHint). docs/admin.md shows them
+# as they are printed.
 archive_of() { printf 'curl -fsSL https://github.com/cadence-lab-tech/self-hosted/archive/refs/tags/%s.tar.gz | tar -xpzf - --strip-components=1' "$1"; }
 checkout_of() { printf 'git -c advice.detachedHead=false checkout --force %s' "$1"; }
-git_q() { git -c user.name=check -c user.email=check@localhost -c init.defaultBranch=main "$@" >/dev/null 2>&1; }
-
-d="$(hint_dir)"
-touch "$d/backups/package-v0.6.0-20261001-000000.tar.gz" "$d/backups/package-v0.6.0-20261008-030000.tar.gz" \
-  "$d/backups/package-v0.5.3-20261008-030000.tar.gz"
-check "[kept copy] v0.6.0: tar of the latest copy in backups/" \
-  [ "$(hint_in "$d" v0.6.0)" = "tar -xpzf backups/package-v0.6.0-20261008-030000.tar.gz" ]
-out="$(hint_in "$d" v0.5.3)"
-check "[kept copy] v0.5.3: tar of the copy, before any other way" [ "$out" = "tar -xpzf backups/package-v0.5.3-20261008-030000.tar.gz" ]
-check "[kept copy] v0.5.3: no releases/download" lacks "$out" "releases/download"
-
-d="$(hint_dir)"
-check "[release] v0.6.0 without a copy: the package of its release" \
-  [ "$(hint_in "$d" v0.6.0)" = "curl -fsSLO $releases/download/v0.6.0/cadence-self-hosted-v0.6.0.tar.gz && tar -xpzf cadence-self-hosted-v0.6.0.tar.gz && rm cadence-self-hosted-v0.6.0.tar.gz" ]
-check "[release] ...from the mirror when CADENCE_RELEASES_URL is set" \
-  contains "$(hint_in "$d" v0.6.0 CADENCE_RELEASES_URL=file:///srv/mirror/)" "curl -fsSLO file:///srv/mirror/download/v0.6.0/"
-git_q -C "$d" init && git_q -C "$d" commit --allow-empty -m init && git_q -C "$d" tag v0.6.0
-check "[release] v0.6.0 in a git clone: still the package, not git" \
-  contains "$(hint_in "$d" v0.6.0)" "curl -fsSLO $releases/download/v0.6.0/"
-
-d="$(hint_dir)"
-git_q -C "$d" init && git_q -C "$d" commit --allow-empty -m init && git_q -C "$d" tag v0.5.3
-check "[git clone, tag here] v0.5.3: git checkout of the tag" [ "$(hint_in "$d" v0.5.3)" = "$(checkout_of v0.5.3)" ]
-
-d="$(hint_dir)"
-git_q -C "$d" init && git_q -C "$d" commit --allow-empty -m init
-check "[git clone, no tag] v0.5.3: fetch the tags from origin, then checkout" \
-  [ "$(hint_in "$d" v0.5.3)" = "git fetch --tags origin && $(checkout_of v0.5.3)" ]
-check "[git clone, no tag] ...from CADENCE_GIT_REMOTE when set" \
-  [ "$(hint_in "$d" v0.5.3 CADENCE_GIT_REMOTE=upstream)" = "git fetch --tags upstream && $(checkout_of v0.5.3)" ]
-
-d="$(hint_dir)"
-out="$(hint_in "$d" v0.5.3)"
-check "[no git clone] v0.5.3: the source archive of the tag" [ "$out" = "$(archive_of v0.5.3)" ]
-check "[no git clone] v0.5.3: no releases/download" lacks "$out" "releases/download/v0.5.3"
-check "[no git clone] ...from GitHub even when CADENCE_RELEASES_URL is set" \
-  [ "$(hint_in "$d" v0.5.3 CADENCE_RELEASES_URL=file:///srv/mirror)" = "$(archive_of v0.5.3)" ]
-# .git without git on PATH: only the tools the function needs besides git.
-nogit="$dist/nogit-bin"
-mkdir -p "$nogit"
-for tool in find sort tail head; do ln -sf "$(command -v "$tool")" "$nogit/$tool"; done
-git_q -C "$d" init && git_q -C "$d" commit --allow-empty -m init && git_q -C "$d" tag v0.5.3
-check "[.git, no git on PATH] v0.5.3: the source archive of the tag" \
-  [ "$(hint_in "$d" v0.5.3 PATH="$nogit")" = "$(archive_of v0.5.3)" ]
-# docs/admin.md shows these commands as the function prints them.
 for cmd in "$(archive_of v0.5.3)" "$(checkout_of v0.5.3)" "git fetch --tags origin && $(checkout_of v0.5.3)"; do
   check "docs/admin.md shows: $cmd" grep -qF -- "$cmd" docs/admin.md
 done
 
 info "documented flags"
-# The flags install.sh takes are the labels of the case in its argument loop
-# ("--mode) ...", "-y | --yes | --non-interactive) ..."), not its usage
-# comment: that comment is documentation too and drifts the same way.
-install_flags="$(sed -n '/^while \[ \$# -gt 0 \]; do$/,/^done$/p' install.sh |
-  sed -n 's/^ *\(-[^)]*\)).*/\1/p' | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u || true)"
+# The scripts pass their arguments to clab server <command> of the clab of
+# the package (decision 0057): the flags they take are those its help lists.
+# flags_of COMMAND: the flags of clab server COMMAND --help.
+flags_of() {
+  { printf '%s\n' -h --help; clab_of "$pkg_clab" server "$1" --help 2>/dev/null; } |
+    grep -oE -- '(^|[ ,[])-{1,2}[a-z][a-z-]*' | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u
+}
+install_flags="$(flags_of install)"
 if [ -n "$install_flags" ]; then
   pass "install.sh takes $(tr '\n' ' ' <<<"$install_flags")"
 else
-  fail "install.sh: no flags found in its argument loop"
+  fail "install.sh: no flags in the help of clab server install"
 fi
-# Every ./install.sh command of the documentation, on a line of a code block
-# or inline up to the closing backtick, uses only those flags.
-documented=0
-for f in README.md docs/admin.md; do
-  while IFS=: read -r line command; do
-    for flag in $(grep -oE -- ' -{1,2}[a-z][a-z-]*' <<<"$command" | tr -d ' ' || true); do
-      documented=$((documented + 1))
-      if grep -qxF -- "$flag" <<<"$install_flags"; then
-        pass "$f:$line: install.sh takes $flag"
-      else
-        fail "$f:$line: install.sh has no flag $flag"
-      fi
-    done
-  done < <(grep -noE -- '\./install\.sh[^`]*' "$f" || true)
+# Every ./<script> command of the documentation, on a line of a code block or
+# inline up to the closing backtick (or a comment, a redirection), uses only
+# the flags of its command.
+for script in install upgrade backup restore; do
+  script_flags="$(flags_of "$script")"
+  documented=0
+  for f in README.md docs/admin.md; do
+    while IFS=: read -r line command; do
+      for flag in $(grep -oE -- ' -{1,2}[a-z][a-z-]*' <<<"$command" | tr -d ' ' || true); do
+        documented=$((documented + 1))
+        if grep -qxF -- "$flag" <<<"$script_flags"; then
+          pass "$f:$line: $script.sh takes $flag"
+        else
+          fail "$f:$line: $script.sh (clab server $script) has no flag $flag"
+        fi
+      done
+    done < <(grep -noE -- "\./$script\.sh[^\`#>|]*" "$f" || true)
+  done
+  check "the documentation shows $script.sh ($documented flags)" grep -qF "./$script.sh" docs/admin.md
 done
-check "the documentation shows install.sh with flags" [ "$documented" -gt 0 ]
 
 # The one-line installer: every flag after "sh -s --" in the documentation is
 # a flag of get-cadence.sh itself or one it hands to install.sh.
@@ -255,56 +351,28 @@ for f in README.md docs/admin.md; do
 done
 check "the documentation shows the one-line installer with flags" [ "$documented" -gt 0 ]
 
-# backup.sh: the flags and the commands (verify, fetch) of its argument loop;
-# every ./backup.sh of the documentation uses only those (CLAB-132).
-backup_flags="$(sed -n '/^while \[ \$# -gt 0 \]; do$/,/^done$/p' backup.sh |
-  sed -n 's/^ *\(-[^)]*\)).*/\1/p' | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u || true)"
+backup_flags="$(flags_of backup)"
 check "backup.sh takes --no-upload and --ignore-version" [ "$(grep -cxE -- '--no-upload|--ignore-version' <<<"$backup_flags")" = 2 ]
-documented=0
-for f in README.md docs/admin.md; do
-  while IFS=: read -r line command; do
-    for flag in $(grep -oE -- ' -{1,2}[a-z][a-z-]*' <<<"$command" | tr -d ' ' || true); do
-      documented=$((documented + 1))
-      if grep -qxF -- "$flag" <<<"$backup_flags"; then
-        pass "$f:$line: backup.sh takes $flag"
-      else
-        fail "$f:$line: backup.sh has no flag $flag"
-      fi
-    done
-  done < <(grep -noE -- '\./backup\.sh[^`#>]*' "$f" || true)
-done
-check "the documentation shows backup.sh with flags" [ "$documented" -gt 0 ]
 check "the documentation shows ./backup.sh verify" grep -qF "./backup.sh verify" docs/admin.md
 check "the documentation shows ./backup.sh fetch" grep -qF "./backup.sh fetch" docs/admin.md
 
 # clab server: every "clab server <command> ..." of the documentation uses
 # only flags that "clab server <command> --help" lists. The clab is CLAB_BIN,
-# else the CLI of VERSION from the public tap once VERSION is a release that
-# has clab server (v0.7.0); before that the check is skipped. A command the
-# tap's clab of VERSION does not list yet is documented ahead of its release
-# (CLAB-160): skipped with a note until VERSION catches up, checked with
-# CLAB_BIN of the branch that brings it. The same for a flag of clab server
-# install that install.sh of this checkout already takes.
+# else the clab of the package for this machine - clab of VERSION from the
+# tap. A command it does not list yet is documented ahead of its release:
+# skipped with a note until VERSION catches up, checked with CLAB_BIN of the
+# branch that brings it.
 info "documented clab server flags"
-clab_server="${CLAB_BIN:-}"
-if [ -z "$clab_server" ] && ! version_lt "$version" v0.7.0; then
-  clab_dir="$dist/clab-tap"
-  if curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh |
-    CLAB_VERSION="$version" CLAB_INSTALL_DIR="$clab_dir" sh >/dev/null 2>&1; then
-    clab_server="$clab_dir/clab"
-  else
-    fail "could not install clab $version from the tap to check the documented clab server flags"
-  fi
-fi
+clab_server="${CLAB_BIN:-$pkg_clab}"
 if [ -z "$clab_server" ]; then
-  info "skipped: clab $version has no clab server; CLAB_BIN=<clab with clab server> checks it"
+  fail "no clab to check the documented clab server flags"
 else
   documented=0
-  server_help="$("$clab_server" server --help 2>/dev/null || true)"
+  server_help="$(clab_of "$clab_server" server --help 2>/dev/null || true)"
   for f in README.md docs/admin.md; do
     while IFS=: read -r line command; do
       sub="$(awk '{print $3}' <<<"$command")"
-      if ! sub_help="$("$clab_server" server "$sub" --help 2>/dev/null)"; then
+      if ! sub_help="$(clab_of "$clab_server" server "$sub" --help 2>/dev/null)"; then
         if [ -z "${CLAB_BIN:-}" ] && ! grep -qE "^  $sub " <<<"$server_help"; then
           info "skipped $f:$line: clab $version has no 'clab server $sub'; CLAB_BIN=<clab with it> checks it"
         else
@@ -317,14 +385,6 @@ else
         documented=$((documented + 1))
         if grep -qxF -- "$flag" <<<"$sub_flags"; then
           pass "$f:$line: clab server $sub takes $flag"
-        elif [ -z "${CLAB_BIN:-}" ] && [ "$sub" = backup ] && grep -qxF -- "$flag" <<<"$backup_flags"; then
-          # The same for clab server backup and the flags of backup.sh (CLAB-132).
-          info "skipped $f:$line: clab $version has no 'clab server backup $flag' yet (backup.sh has it); CLAB_BIN=<clab with it> checks it"
-        elif [ -z "${CLAB_BIN:-}" ] && [ "$sub" = install ] && grep -qxF -- "$flag" <<<"$install_flags"; then
-          # clab server install takes the flags of install.sh: a flag
-          # install.sh of this checkout has is documented ahead of the clab
-          # release that brings it (CLAB-127), like a command above.
-          info "skipped $f:$line: clab $version has no 'clab server install $flag' yet (install.sh has it); CLAB_BIN=<clab with it> checks it"
         else
           fail "$f:$line: clab server $sub has no flag $flag"
         fi
@@ -335,19 +395,11 @@ else
 fi
 
 # clab without a host: docs/admin.md quotes the line clab prints when no host
-# is configured (clab v0.10.1, CLAB-147). The clab is CLAB_BIN, else the CLI
-# of VERSION from the tap installed above; before v0.10.1 it went to
-# localhost instead, and the check is skipped.
+# is configured (clab v0.10.1, CLAB-147). The clab is CLAB_BIN, else the
+# clab of the package.
 info "documented clab without a host"
-clab_nohost="${CLAB_BIN:-}"
-if [ -z "$clab_nohost" ] && ! version_lt "$version" v0.10.1; then
-  clab_nohost="$clab_server"
-fi
-if [ -z "$clab_nohost" ]; then
-  if version_lt "$version" v0.10.1; then
-    info "skipped: clab $version goes to localhost without a host; CLAB_BIN=<clab v0.10.1 or newer> checks it"
-  fi
-else
+clab_nohost="${CLAB_BIN:-$pkg_clab}"
+if [ -n "$clab_nohost" ]; then
   nohost_config="$(mktemp -d "$dist/clab-config.XXXXXX")"
   nohost_code=0
   nohost="$(cd "$dist" && CLAB_CONFIG_DIR="$nohost_config" env -u SDLC_API_URL -u SDLC_TOKEN "$clab_nohost" tasks 2>&1 >/dev/null)" ||
@@ -374,8 +426,9 @@ for f in README.md docs/admin.md; do
 done
 
 info "verifying a release (CADENCE_VERIFY)"
-# The scripts verify by themselves (lib.sh, "signatures"); get-cadence.sh
-# repeats the rules in POSIX sh, with the same constants.
+# clab server verifies (the wrappers run it); get-cadence.sh repeats the
+# rules in POSIX sh for the package, with the constants of ci/lib.sh, which
+# the checks verify with.
 for mode in auto require off; do
   check "docs/admin.md describes CADENCE_VERIFY=$mode" contains "$admin" "\`$mode\`"
 done
@@ -386,16 +439,16 @@ check ".env.example does not set CADENCE_VERIFY" lacks "$(grep -v '^#' .env.exam
 for f in get-cadence.sh install.sh upgrade.sh README.md; do
   check "$f names CADENCE_VERIFY" grep -qF CADENCE_VERIFY "$f"
 done
-# same_constant NAME_IN_GET NAME_IN_LIB: get-cadence.sh and lib.sh agree.
+# same_constant NAME_IN_GET NAME_IN_LIB: get-cadence.sh and ci/lib.sh agree.
 same_constant() {
-  [ "$(sed -n "s/^$1=//p" get-cadence.sh)" = "$(bash -c ". ./lib.sh && printf '%s' \"\$$2\"")" ]
+  [ "$(sed -n "s/^$1=//p" get-cadence.sh)" = "$(bash -c ". ./ci/lib.sh && printf '%s' \"\$$2\"")" ]
 }
-check "get-cadence.sh and lib.sh: the same first signed version" same_constant FIRST_SIGNED VERIFY_FIRST_SIGNED
+check "get-cadence.sh and ci/lib.sh: the same first signed version" same_constant FIRST_SIGNED VERIFY_FIRST_SIGNED
 check "...the same issuer" same_constant ISSUER VERIFY_ISSUER
 check "...the same identity of the package" same_constant PACKAGE_IDENTITY VERIFY_PACKAGE_IDENTITY
 check "...the same bundle" same_constant BUNDLE VERIFY_BUNDLE
-check "lib.sh: the identity of the package is the one docs/admin.md names" contains "$admin" "$VERIFY_PACKAGE_IDENTITY"
-check "lib.sh: the identity of an image is the one ci/pins.sh pins with" \
+check "ci/lib.sh: the identity of the package is the one docs/admin.md names" contains "$admin" "$VERIFY_PACKAGE_IDENTITY"
+check "ci/lib.sh: the identity of an image is the one ci/pins.sh pins with" \
   [ "$(verify_identity sdlc-pipeline-backend v1.2.3)" = "$(pin_identity backend v1.2.3)" ]
 
 info "bundles/starter.json"
@@ -439,12 +492,6 @@ backup_s3_of_example() { grep -oE '^(# )?BACKUP_S3_[A-Z_]+=' .env.example | sed 
 while read -r v; do
   check "docs/admin.md describes $v" grep -qF "$v" docs/admin.md
 done < <(backup_s3_of_example)
-check "lib.sh passes every BACKUP_S3_* of .env.example to /api backup-s3" \
-  [ "$(bash -c '. ./lib.sh && printf "%s\n" "${BACKUP_S3_VARS[@]}"' | sort)" = "$(backup_s3_of_example)" ]
-check "backup_s3_location trims the prefix" \
-  [ "$(BACKUP_S3_BUCKET=bk BACKUP_S3_PREFIX=' /a/b/ ' bash -c '. ./lib.sh && backup_s3_location')" = "s3://bk/a/b/" ]
-check "backup_s3_location without a prefix" \
-  [ "$(BACKUP_S3_BUCKET=bk BACKUP_S3_PREFIX='' bash -c '. ./lib.sh && backup_s3_location')" = "s3://bk/" ]
 
 info "installation name"
 # The name of an installation is COMPOSE_PROJECT_NAME of its .env, and
@@ -462,44 +509,6 @@ check "compose takes the name from .env (COMPOSE_PROJECT_NAME=x)" [ "$(compose_n
 printf 'POSTGRES_PASSWORD=x\nCOMPOSE_FILE=docker-compose.yml:compose.proxy.yml\n' >"$name_dir/.env"
 check "without the line in .env the name is cadence" [ "$(compose_name)" = cadence ]
 
-# load_env of the scripts: the name from .env or the default, exported for
-# compose; a COMPOSE_PROJECT_NAME of the caller that names another
-# installation is refused with both names and the way out.
-#
-# name_of LINE CALLER: runs load_env in $name_dir with .env holding LINE (or
-# no name line when LINE is empty) and COMPOSE_PROJECT_NAME=CALLER ("-" -
-# unset); prints the exported name or the refusal.
-name_of() {
-  local line="$1" caller="$2" lib
-  lib="$(pwd)/lib.sh"
-  { [ -z "$line" ] || printf '%s\n' "$line"; printf 'POSTGRES_PASSWORD=x\n'; } >"$name_dir/.env"
-  local caller_env=(-u COMPOSE_PROJECT_NAME)
-  [ "$caller" = - ] || caller_env=(COMPOSE_PROJECT_NAME="$caller")
-  # shellcheck disable=SC2016 # expanded by the inner bash
-  (cd "$name_dir" && env "${caller_env[@]}" bash -c '. "$1" && load_env && printf "%s\n" "$COMPOSE_PROJECT_NAME"' _ "$lib" 2>&1)
-}
-check "load_env: no line, no variable - cadence" [ "$(name_of "" -)" = cadence ]
-check "load_env: COMPOSE_PROJECT_NAME=stage in .env - stage" [ "$(name_of COMPOSE_PROJECT_NAME=stage -)" = stage ]
-check "load_env: the same name in the variable - stage" [ "$(name_of COMPOSE_PROJECT_NAME=stage stage)" = stage ]
-check "load_env: an empty variable is no variable - stage" [ "$(name_of COMPOSE_PROJECT_NAME=stage "")" = stage ]
-check "load_env: an empty line in .env is the default - cadence" [ "$(name_of COMPOSE_PROJECT_NAME= -)" = cadence ]
-if out="$(name_of COMPOSE_PROJECT_NAME=stage other)"; then
-  fail "load_env: another name in the variable must be refused: $out"
-else
-  check "load_env: another name in the variable is refused, naming both" contains "$out" "COMPOSE_PROJECT_NAME is 'other' in the environment, but the installation in $name_dir is 'stage'"
-  check "...and pointing at unset COMPOSE_PROJECT_NAME" contains "$out" "unset COMPOSE_PROJECT_NAME"
-fi
-if out="$(name_of "" other)"; then
-  fail "load_env: a variable on an installation without the line must be refused: $out"
-else
-  check "load_env: a variable on an installation without the line points at the line to add" \
-    contains "$out" "echo COMPOSE_PROJECT_NAME=other >> $name_dir/.env"
-fi
-if out="$(name_of COMPOSE_PROJECT_NAME=Bad_Name -)"; then
-  fail "load_env: an invalid name in .env must be refused: $out"
-else
-  check "load_env: an invalid name in .env is refused" contains "$out" "COMPOSE_PROJECT_NAME in .env is 'Bad_Name', which is not a valid installation name"
-fi
 
 info "compose"
 check "compose refuses to run without CADENCE_VERSION" sh -c '! env -u CADENCE_VERSION docker compose config -q'
@@ -675,7 +684,7 @@ check "[external] the backup client is pgvector/pgvector:pg18 with /secrets" \
   [ "$(jq -r '.services["db-client"] | "\(.image) \(.volumes[0].target)"' <<<"$tools")" = "pgvector/pgvector:pg18 /secrets" ]
 # The URL may come as a file (CLAB-200): compose then passes an empty URL and
 # the path, the service reads the file; with neither it refuses to start,
-# and the scripts before it (check_db_mode below).
+# and clab server before it.
 from_file="$(ext_config SDLC_DATABASE_URL= SDLC_DATABASE_URL_FILE=/secrets/db-url)"
 check "[external] without SDLC_DATABASE_URL compose passes SDLC_DATABASE_URL_FILE to api and worker" \
   [ "$(jq -r '[.services.api.environment, .services.worker.environment] | map("\(.SDLC_DATABASE_URL)|\(.SDLC_DATABASE_URL_FILE)") | unique | join(" ")' <<<"$from_file")" = "|/secrets/db-url" ]
@@ -689,36 +698,6 @@ check "SDLC_DB_MAX_CONNS and SDLC_DB_CONNECT_TIMEOUT of .env reach api and worke
   [ "$(jq -r '[.services.api.environment, .services.worker.environment] | map("\(.SDLC_DB_MAX_CONNS)/\(.SDLC_DB_CONNECT_TIMEOUT)") | unique | join(" ")' <<<"$pool")" = "7/45s" ]
 check "...and default to 10 and 30s" \
   [ "$(jq -r '"\(.services.api.environment.SDLC_DB_MAX_CONNS)/\(.services.api.environment.SDLC_DB_CONNECT_TIMEOUT)"' <<<"$bundled")" = "10/30s" ]
-
-# check_db_mode of the scripts: CADENCE_DB, SDLC_DATABASE_URL and COMPOSE_FILE
-# agree, or the scripts refuse.
-db_mode_of() {
-  (env -u CADENCE_DB -u SDLC_DATABASE_URL "$@" bash -c '. ./lib.sh && check_db_mode && echo ok' 2>&1)
-}
-check "check_db_mode: bundled without the overlay" [ "$(db_mode_of COMPOSE_FILE=docker-compose.yml:compose.proxy.yml)" = ok ]
-check "check_db_mode: external with the URL and the overlay" \
-  [ "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL="$ext_url" COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" = ok ]
-check "check_db_mode: external without the overlay is refused" \
-  contains "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL="$ext_url" COMPOSE_FILE=docker-compose.yml:compose.proxy.yml)" "does not include $EXTERNAL_DB_FILE"
-check "check_db_mode: external without the URL is refused" \
-  contains "$(db_mode_of CADENCE_DB=external COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" "needs SDLC_DATABASE_URL"
-check "check_db_mode: the overlay with bundled is refused" \
-  contains "$(db_mode_of COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" "but CADENCE_DB is bundled"
-check "check_db_mode: external with SDLC_DATABASE_URL_FILE" \
-  [ "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL_FILE=/secrets/db-url COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$SECRETS_FILE:$EXTERNAL_DB_FILE")" = ok ]
-check "check_db_mode: SDLC_DATABASE_URL and SDLC_DATABASE_URL_FILE together are refused" \
-  contains "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL="$ext_url" SDLC_DATABASE_URL_FILE=/secrets/db-url COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE")" \
-  "both SDLC_DATABASE_URL and SDLC_DATABASE_URL_FILE"
-check "check_db_mode: $SECRETS_FILE after $EXTERNAL_DB_FILE is refused" \
-  contains "$(db_mode_of CADENCE_DB=external SDLC_DATABASE_URL="$ext_url" COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$EXTERNAL_DB_FILE:$SECRETS_FILE")" \
-  "lists $SECRETS_FILE after $EXTERNAL_DB_FILE"
-# db_url_parts: the password leaves the URL and is decoded for PGPASSWORD.
-parts="$(bash -c '. ./lib.sh && db_url_parts "$1" && printf "%s|%s|%s" "$DB_URL_SAFE" "$DB_PASSWORD" "$(db_target "$1")"' _ \
-  'postgres://cadence:Cad%40nce%2Fx%25y@db.example.com:5432/cadence?sslmode=require')"
-check "db_url_parts and db_target split and decode the URL" \
-  [ "$parts" = 'postgres://cadence@db.example.com:5432/cadence?sslmode=require|Cad@nce/x%y|db.example.com:5432/cadence' ]
-check "pg_dump options leave owners, privileges and extensions out" \
-  [ "$(bash -c '. ./lib.sh && echo "${DUMP_OPTIONS[*]}"')" = "--clean --if-exists --no-owner --no-privileges --exclude-extension=vector --exclude-extension=pgcrypto" ]
 
 info "secrets in files (compose.secrets.yml)"
 # CLAB-200: every secret X of the table in docs/admin.md ("Secrets in
@@ -773,34 +752,6 @@ check "[secrets+external] the administrator token stays a Docker secret" \
 check "[secrets+external] a password file of .env reaches api" \
   [ "$(secrets_cfg SDLC_DATABASE_URL="postgres://cadence@db/x" SDLC_DATABASE_PASSWORD_FILE=/secrets/db-password COMPOSE_FILE="docker-compose.yml:compose.proxy.yml:$SECRETS_FILE:$EXTERNAL_DB_FILE" |
     jq -r .services.api.environment.SDLC_DATABASE_PASSWORD_FILE)" = /secrets/db-password ]
-
-# db_conn of the scripts: the URL and the password of an external database
-# from the files of ./secrets, as the service reads them.
-conn_dir="$dist/conn"
-mkdir -p "$conn_dir/secrets"
-printf '%s\r\n' 'postgres://cadence:Cad%40nce@db.example.com:5432/cadence?sslmode=require' >"$conn_dir/secrets/db-url"
-printf '%s\n' 'Cad@nce/x%y' >"$conn_dir/secrets/db_password"
-: >"$conn_dir/secrets/empty"
-lib_sh="$PWD/lib.sh"
-# shellcheck disable=SC2016 # expanded by the inner bash
-conn_of() {
-  (cd "$conn_dir" && env -u SDLC_DATABASE_URL -u SDLC_DATABASE_URL_FILE -u SDLC_DATABASE_PASSWORD_FILE "$@" \
-    bash -c '. "$0" && db_conn && printf "%s|%s|%s" "$DB_URL_SAFE" "$DB_PASSWORD" "$(db_label)"' "$lib_sh" 2>&1)
-}
-check "db_conn: the URL of SDLC_DATABASE_URL_FILE, CRLF cut" \
-  [ "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/db-url)" = 'postgres://cadence@db.example.com:5432/cadence?sslmode=require|Cad@nce|(URL in /secrets/db-url)' ]
-check "db_conn: the password of SDLC_DATABASE_PASSWORD_FILE (/run/secrets/<name> is secrets/<name>)" \
-  [ "$(conn_of SDLC_DATABASE_URL='postgres://cadence@db.example.com:5432/cadence' SDLC_DATABASE_PASSWORD_FILE=/run/secrets/db_password)" = 'postgres://cadence@db.example.com:5432/cadence|Cad@nce/x%y|db.example.com:5432/cadence' ]
-check "db_conn: a file outside ./secrets is refused, naming the variable" \
-  contains "$(conn_of SDLC_DATABASE_URL_FILE=/etc/x)" "SDLC_DATABASE_URL_FILE is '/etc/x'"
-check "db_conn: .. is refused" contains "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/../etc/x)" "Move the file into secrets/"
-check "db_conn: a missing file names the variable and the path" \
-  contains "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/nope)" "SDLC_DATABASE_URL_FILE: stat $conn_dir/secrets/nope: no such file or directory"
-check "db_conn: an empty file is refused" contains "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/empty)" "is empty"
-check "db_conn: a password in the URL and SDLC_DATABASE_PASSWORD_FILE are refused" \
-  contains "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/db-url SDLC_DATABASE_PASSWORD_FILE=/secrets/db_password)" "both SDLC_DATABASE_PASSWORD_FILE and a password"
-check "db_conn: no value of a file in its errors" \
-  lacks "$(conn_of SDLC_DATABASE_URL_FILE=/secrets/db-url SDLC_DATABASE_PASSWORD_FILE=/secrets/db_password)" "Cad@nce"
 
 info "Caddyfile"
 adapt() {

@@ -1,32 +1,41 @@
 #!/usr/bin/env bash
 #
 # End-to-end check of the package on the images of VERSION: builds the
-# release package of this checkout (ci/package.sh), installs it the way the
-# documentation says - the one-line installer piped into sh (or clab server
-# install, see CADENCE_DRIVER), from a local copy of the releases, with git
-# out of reach - in proxy mode into a scratch directory, exercises the stack the way an administrator and an agent would,
-# backs it up, restores it, and tears it down. CI runs it on every pull
-# request; it runs the same way on any Linux machine with Docker.
+# release package of this checkout (ci/package.sh, with the clab of VERSION
+# from the tap in bin/), installs it the way the documentation says - the
+# one-line installer piped into sh, from a local copy of the releases, with
+# git out of reach and no clab in PATH - in proxy mode into a scratch
+# directory, exercises the stack the way an administrator and an agent
+# would, backs it up, restores it, and tears it down. CI runs it on every
+# pull request; it runs the same way on any Linux or macOS machine with
+# Docker.
+#
+# The scripts of the package are wrappers of clab server of the clab in the
+# package (decision 0057): one implementation, so the check no longer runs
+# the same scenarios twice for parity. What it checks of the wrappers: the
+# installation, backups, restore, verify, fetch and upgrades through them
+# with the old flags, their exit codes (1 for the refusals: .env exists, a
+# taken name or port, another installation name, restore without --yes and a
+# terminal, a backup of an external database that is down; 2 for an unknown
+# flag), the cron lines install.sh prints run from an empty environment as
+# cron runs them, the printed rollback runs as printed without clab in PATH,
+# and no "older than the target" from the clab of the package. clab server
+# status of the clab of the package reports the installation; an external
+# clab of the same version (outside bin/) serves the installation of the
+# wrappers (status, backup), and the second installation it installs with
+# clab server install has the .env of the first one, key for key.
 #
 #   ci/check-stack.sh
 #
-#   CHECK_HTTP_PORT       host port of the stack, default 8080; with the
-#                         scripts driver a second installation takes the
-#                         next port
+#   CHECK_HTTP_PORT       host port of the stack, default 8080; a second
+#                         installation takes the next port
 #   COMPOSE_PROJECT_NAME  name of the installation (its compose project),
 #                         default cadence-check, never cadence; the second
 #                         one is NAME-2
-#   CLAB_BIN              clab to use; default: install the CLI of VERSION
-#                         from the public tap (the path docs/admin.md describes)
+#   CLAB_BIN              clab of the people and agents in the scenarios of
+#                         the API (sign-in, teams, tasks); default: the clab
+#                         of the package for this machine
 #   CHECK_KEEP=1          leave the stack (and its directory) after the check
-#   CADENCE_DRIVER        scripts (default) - install with get-cadence.sh,
-#                         back up and restore with backup.sh and restore.sh;
-#                         clab - install with clab server install (clab
-#                         v0.8.0+; an older clab falls back to get-cadence.sh
-#                         with a note), back up and restore with clab server
-#                         backup and restore of CLAB_BIN (v0.7.0+), plus the
-#                         checks of clab server status. The same scenarios
-#                         in both prove parity.
 #   CHECK_DB              bundled (default) - the postgres container of the
 #                         stack; external - a stand-in for the PostgreSQL of
 #                         a customer (ci/external-db.sh: a pgvector container
@@ -61,7 +70,7 @@
 # install every command runs without COMPOSE_PROJECT_NAME, as from cron or a
 # new terminal; a second installation under the same name is refused; a
 # COMPOSE_PROJECT_NAME of another installation makes backup, restore and
-# upgrade refuse; with the scripts driver a second installation runs next to
+# upgrade refuse; a second installation runs next to
 # the first one and each sees only itself.
 #
 # Images: docker-compose.yml pins the images of VERSION by digest (ci/pins.sh)
@@ -80,14 +89,14 @@
 #   CADENCE_VERIFY=off CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
 #     COMPOSE_PROJECT_NAME=check-<name> CHECK_HTTP_PORT=<port> ci/check-stack.sh
 #
-# Signatures (CADENCE_VERIFY, lib.sh "signatures"): the package of this
+# Signatures (CADENCE_VERIFY, docs/admin.md "Verifying a release"): the package of this
 # checkout is not signed, so with a real cosign 3.x in PATH (CI installs
 # one) a wrapper (ci/verify-stubs.sh) accepts verify-blob of it and hands
 # the images to the real cosign: the installer verifies the pinned images of
 # VERSION at ghcr.io for real, and the check wants both "is signed by" lines.
 # A stub cosign with a bad signature of the frontend image makes another
-# installation refuse before its .env (both drivers; clab when it has the
-# verification). Without cosign the installers warn and go on. The upgrades
+# installation refuse before its .env. Without cosign the installer warns
+# and goes on. The upgrades
 # of this check to made-up versions (v98.0.0, v99.0.0) run with
 # CADENCE_VERIFY=off: their images are those of VERSION, signed for another
 # tag.
@@ -103,14 +112,17 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# shellcheck source=lib.sh
-. ./lib.sh
+# shellcheck source=ci/lib.sh
+. ./ci/lib.sh
 
 port="${CHECK_HTTP_PORT:-8080}"
-driver="${CADENCE_DRIVER:-scripts}"
-case "$driver" in
-scripts | clab) ;;
-*) die "CADENCE_DRIVER is '$driver', expected scripts or clab" ;;
+[ -z "${CADENCE_DRIVER:-}" ] || die "CADENCE_DRIVER is gone: the scripts are wrappers of clab server (decision 0057), one implementation to check"
+case "$(uname -s)/$(uname -m)" in
+Linux/x86_64 | Linux/amd64) platform=linux-amd64 ;;
+Linux/aarch64 | Linux/arm64) platform=linux-arm64 ;;
+Darwin/x86_64) platform=darwin-amd64 ;;
+Darwin/arm64) platform=darwin-arm64 ;;
+*) die "the package has no clab for $(uname -s)/$(uname -m)" ;;
 esac
 db="${CHECK_DB:-bundled}"
 case "$db" in
@@ -211,16 +223,17 @@ fi
 
 # --- install ---------------------------------------------------------------------
 # The releases as the installer sees them: download/<version>/ and
-# latest/download/ (lib.sh, "releases").
+# latest/download/ (ci/lib.sh, "releases").
 info "release package of this checkout"
 ci/package.sh --bundle "$work/releases/download/$version"
 mkdir -p "$work/releases/latest"
 cp -R "$work/releases/download/$version" "$work/releases/latest/download"
-# git must not be needed: a git that fails and leaves a trace stands first
-# in PATH.
+# git and clab must not be needed: a git and a clab that fail and leave a
+# trace stand first in PATH.
 mkdir -p "$work/nogit"
 printf '#!/bin/sh\necho "git $*" >>"%s/git-calls"\nexit 1\n' "$work" >"$work/nogit/git"
-chmod 755 "$work/nogit/git"
+printf '#!/bin/sh\necho "clab $*" >>"%s/clab-calls"\nexit 1\n' "$work" >"$work/nogit/clab"
+chmod 755 "$work/nogit/git" "$work/nogit/clab"
 # shellcheck source=ci/verify-stubs.sh
 . ./ci/verify-stubs.sh
 real_cosign=false
@@ -230,63 +243,52 @@ if stub_cosign_local "$work/cosign-local" "$work/cosign.log"; then
   info "cosign $(cosign version 2>&1 | sed -n 's/^GitVersion:[[:space:]]*//p' | head -n 1): the images are verified at ghcr.io"
 fi
 
-# The CLI comes first: with the clab driver it is the installer.
-clab="${CLAB_BIN:-}"
 clab_dir="$(mktemp -d)"
-if [ -z "$clab" ]; then
-  curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh |
-    CLAB_VERSION="$version" CLAB_INSTALL_DIR="$clab_dir/bin" sh
-  clab="$clab_dir/bin/clab"
-fi
 export CLAB_CONFIG_DIR="$clab_dir/config"
-# install_with: how this run installs - clab server install, or the one-line
-# installer when the driver is scripts or the clab has no install (before
-# v0.8.0).
-install_with=scripts
-if [ "$driver" = clab ]; then
-  if "$clab" server --help 2>/dev/null | grep -qE '^  install '; then
-    install_with=clab
-  else
-    info "clab $("$clab" version 2>/dev/null | head -n 1) has no clab server install (v0.8.0+): installing with get-cadence.sh"
-  fi
-fi
-# clab_install DIR ARGS...: clab server install from the local releases, as
-# from a new terminal in $work, with git out of reach.
-clab_install() {
-  local d="$1"
-  shift
-  (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
-    "$clab" server install --dir "$d" "$@" </dev/null)
-}
 
-if [ "$install_with" = clab ]; then
-  info "clab server install --mode proxy --http-addr 127.0.0.1:$port --yes"
-  install_out="$(SDLC_ADMIN_TOKEN="$admin_token" clab_install "$work/cadence" --mode proxy --http-addr "127.0.0.1:$port" ${install_db[@]+"${install_db[@]}"} --yes 2>&1)" ||
-    { printf '%s\n' "$install_out" >&2; die "clab server install failed"; }
-  printf '%s\n' "$install_out"
-  check "clab server install says the stack is up" contains "$install_out" "Cadence Lab $version is up"
-  check "clab server install does not print a supplied token" lacks "$install_out" "$admin_token"
-  check "...and says it was supplied" contains "$install_out" "the one supplied in SDLC_ADMIN_TOKEN"
-  check "clab server install prints the cron line of clab server backup --dir" \
-    contains "$install_out" "server backup --dir $work/cadence >> $work/cadence/backups/backup.log 2>&1"
-else
-  info "get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:$port ${install_db[*]:+--external-db ... --external-db-ca ca.pem} --yes"
-  install_out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" SDLC_ADMIN_TOKEN="$admin_token" \
-    sh -s -- --mode proxy --http-addr "127.0.0.1:$port" ${install_db[@]+"${install_db[@]}"} --yes <"$repo/get-cadence.sh" 2>&1)" ||
-    { printf '%s\n' "$install_out" >&2; die "get-cadence.sh failed"; }
-  printf '%s\n' "$install_out"
-fi
+info "get-cadence.sh | sh -s -- --mode proxy --http-addr 127.0.0.1:$port ${install_db[*]:+--external-db ... --external-db-ca ca.pem} --yes"
+install_out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" SDLC_ADMIN_TOKEN="$admin_token" \
+  sh -s -- --mode proxy --http-addr "127.0.0.1:$port" ${install_db[@]+"${install_db[@]}"} --yes <"$repo/get-cadence.sh" 2>&1)" ||
+  { printf '%s\n' "$install_out" >&2; die "get-cadence.sh failed"; }
+printf '%s\n' "$install_out"
 check "the stack is installed from the package into $work/cadence" [ -f "$work/cadence/.env" ]
+# .env as install.sh wrote it, before this check edits it.
+cp "$work/cadence/.env" "$work/env-of-install.sh"
+check "install.sh says the stack is up" contains "$install_out" "Cadence Lab $version is up"
+check "install.sh does not print a supplied token" lacks "$install_out" "$admin_token"
+check "...and says it was supplied" contains "$install_out" "the one supplied in SDLC_ADMIN_TOKEN"
+# The clab of the package; the clab of the people (CLAB_BIN) for the API.
+pkg_clab="$work/cadence/bin/clab-$platform"
+check "the package has its clab for this machine: bin/clab-$platform of $version" \
+  [ "$("$pkg_clab" version 2>/dev/null | head -n 1)" = "clab $version" ]
+clab="${CLAB_BIN:-$pkg_clab}"
+
+# The cron lines install.sh prints are the scripts of the installation by
+# their absolute paths, and run as cron runs them: from /, with the
+# environment of cron - PATH, HOME, SHELL and LOGNAME, nothing else (PATH
+# with the directory of docker, which cron of the machine would need too).
+cron_lines="$(grep -oE "[0-9*]+ [0-9*]+ \* \* [0-9*]+ $work/cadence/backup\.sh( verify)? >> $work/cadence/backups/backup\.log 2>&1" <<<"$install_out" || true)"
+check "install.sh prints the cron lines of backup.sh and backup.sh verify by their paths" [ "$(grep -c . <<<"$cron_lines")" = 2 ]
+check "...and no clab server for cron" lacks "$install_out" "server backup --dir"
+cron_env=(env -i PATH="$(dirname "$(command -v docker)"):/usr/bin:/bin" HOME="$HOME" SHELL=/bin/sh LOGNAME="$(id -un)")
+cron_backup="$(head -n 1 <<<"$cron_lines" | cut -d' ' -f6-)"
+dumps_before_cron="$(find "$work/cadence/backups" -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')"
+if (cd / && "${cron_env[@]}" sh -c "$cron_backup"); then
+  pass "the cron line of backup.sh runs as cron runs it: $cron_backup"
+else
+  fail "the cron line of backup.sh failed from an empty environment: $(tail -n 5 "$work/cadence/backups/backup.log" 2>/dev/null)"
+fi
+check "...writes a backup and its log" [ "$(find "$work/cadence/backups" -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" -gt "$dumps_before_cron" ]
+check "...into backups/backup.log" grep -qF "✓ " "$work/cadence/backups/backup.log"
 
 # --- signatures ----------------------------------------------------------------------
-# The installer verifies what it can: a clab without CADENCE_VERIFY in its
-# help (before the release with the verification) verifies nothing.
+# The installer verifies what it can: install.sh is clab server install of
+# the clab of VERSION, which verifies.
 verifies=true
-if [ "$install_with" = clab ] && ! "$clab" server install --help 2>/dev/null | grep -q CADENCE_VERIFY; then verifies=false; fi
 pinned=true
 [ -z "${CADENCE_BACKEND_DIGEST+set}${CADENCE_FRONTEND_DIGEST+set}" ] || pinned=false
 if [ "$verifies" = true ] && [ "$real_cosign" = true ] && [ "$pinned" = true ] && [ "${CADENCE_VERIFY:-auto}" != off ]; then
-  info "signatures ($install_with)"
+  info "signatures"
   check "the installer verified the signature of checksums.txt (the stand-in of this checkout)" \
     contains "$install_out" "✓ the signature of checksums.txt of $version verified"
   for image in backend frontend; do
@@ -302,13 +304,8 @@ if [ "$verifies" = true ] && [ "$pinned" = true ]; then
   # so even a verification that did not stop it would stop at the port.
   stub_cosign "$work/cosign-bad" "$work/cosign-bad.log"
   bad_env=(CADENCE_VERIFY=auto FAKE_COSIGN_BAD=sdlc-pipeline-frontend COMPOSE_PROJECT_NAME="$name-bad" PATH="$work/cosign-bad:$work/nogit:$PATH")
-  if [ "$install_with" = clab ]; then
-    out="$(cd "$work" && env "${bad_env[@]}" CADENCE_RELEASES_URL="file://$work/releases" \
-      "$clab" server install --dir "$work/badsig" --mode proxy --http-addr "127.0.0.1:$port" --yes </dev/null 2>&1)" && bad_ok=1 || bad_ok=0
-  else
-    out="$(cd "$work" && env "${bad_env[@]}" CADENCE_RELEASES_URL="file://$work/releases" \
-      sh -s -- --dir badsig --mode proxy --http-addr "127.0.0.1:$port" --yes <"$repo/get-cadence.sh" 2>&1)" && bad_ok=1 || bad_ok=0
-  fi
+  out="$(cd "$work" && env "${bad_env[@]}" CADENCE_RELEASES_URL="file://$work/releases" \
+    sh -s -- --dir badsig --mode proxy --http-addr "127.0.0.1:$port" --yes <"$repo/get-cadence.sh" 2>&1)" && bad_ok=1 || bad_ok=0
   if [ "$bad_ok" = 0 ] && contains "$out" "sdlc-pipeline-frontend $version) did not verify for" && [ ! -e "$work/badsig/.env" ]; then
     pass "a bad signature of the frontend image: the installation is refused before .env"
   else
@@ -317,6 +314,7 @@ if [ "$verifies" = true ] && [ "$pinned" = true ]; then
 fi
 check "the installation is not a git clone" [ ! -e "$work/cadence/.git" ]
 check "git was never called" [ ! -s "$work/git-calls" ]
+check "no clab of PATH was called" [ ! -s "$work/clab-calls" ]
 check "VERSION of the installation is $version" [ "$(tr -d '[:space:]' <"$work/cadence/VERSION")" = "$version" ]
 cd "$work/cadence"
 
@@ -337,21 +335,16 @@ check "the installation has backups/ (700) and secrets/ (711)" \
 check "compose.override.yml is there" [ -f compose.override.yml ]
 
 before="$(sha256sum .env 2>/dev/null || shasum -a 256 .env)"
-if [ "$install_with" = clab ]; then
-  if out="$(clab_install "$work/cadence" --mode proxy --http-addr "127.0.0.1:$port" --yes 2>&1)"; then
-    fail "a second clab server install must refuse to run"
-  else
-    check "a second clab server install refuses to run, pointing at clab server upgrade --dir" \
-      contains "$out" "clab server upgrade --dir $work/cadence"
-  fi
-  check "a second clab server install leaves .env untouched" [ "$before" = "$(sha256sum .env 2>/dev/null || shasum -a 256 .env)" ]
-fi
-if ./install.sh --mode proxy --http-addr "127.0.0.1:$port" --yes </dev/null >/dev/null 2>&1; then
-  fail "a second install.sh must refuse to run"
-else
-  pass "a second install.sh refuses to run"
-fi
+code=0
+out="$(PATH="$work/nogit:$PATH" ./install.sh --mode proxy --http-addr "127.0.0.1:$port" --yes </dev/null 2>&1)" || code=$?
+check "a second install.sh refuses to run: exit 1" [ "$code" = 1 ]
+check "...pointing at ./upgrade.sh" contains "$out" "upgrade:    ./upgrade.sh"
 check "a second install.sh leaves .env untouched" [ "$before" = "$(sha256sum .env 2>/dev/null || shasum -a 256 .env)" ]
+for script in install upgrade backup restore; do
+  code=0
+  out="$(./$script.sh --no-such-flag </dev/null 2>&1)" || code=$?
+  check "./$script.sh --no-such-flag: exit 2, unknown option" [ "$code" = 2 ]
+done
 
 load_env
 
@@ -392,9 +385,9 @@ env_set() {
 
 # --- refusals of the external database ------------------------------------------------
 # Each before .env: the directory of an unpacked package stays fit for the
-# next attempt. The scripts run ./install.sh there, clab installs in place.
+# next attempt: ./install.sh runs there and installs in place.
 if [ "$db" = external ]; then
-  info "refusals of the external database ($install_with)"
+  info "refusals of the external database"
   refusals="$work/refusals"
   mkdir -p "$refusals"
   tar -xpzf "$work/releases/download/$version/$(package_name "$version")" -C "$refusals"
@@ -402,15 +395,12 @@ if [ "$db" = external ]; then
   # refuse WHAT EXPECTED ARGS...: an installation with ARGS is refused before
   # .env, the output has EXPECTED and no password of the database.
   refuse() {
-    local what="$1" expected="$2" out
+    local what="$1" expected="$2" out code=0
     shift 2
-    if [ "$install_with" = clab ]; then
-      out="$(cd "$refusals" && env -u COMPOSE_PROJECT_NAME "$clab" server install --dir "$refusals" --name "$name-r" --mode proxy \
-        --http-addr "127.0.0.1:$second_port" --yes "$@" </dev/null 2>&1)" && { fail "$what must be refused"; return; }
-    else
-      out="$(cd "$refusals" && env -u COMPOSE_PROJECT_NAME ./install.sh --name "$name-r" --mode proxy --http-addr "127.0.0.1:$second_port" \
-        --yes "$@" </dev/null 2>&1)" && { fail "$what must be refused"; return; }
-    fi
+    out="$(cd "$refusals" && env -u COMPOSE_PROJECT_NAME ./install.sh --name "$name-r" --mode proxy --http-addr "127.0.0.1:$second_port" \
+      --yes "$@" </dev/null 2>&1)" || code=$?
+    [ "$code" != 0 ] || { fail "$what must be refused"; return; }
+    [ "$code" = 1 ] || fail "$what: exit $code, expected 1"
     if contains "$out" "$expected" && lacks "$out" "$EXT_DB_PASSWORD" && lacks "$out" "$EXT_DB_PASSWORD_URL" && [ ! -e "$refusals/.env" ]; then
       pass "$what is refused before .env: $expected"
     else
@@ -596,38 +586,32 @@ started() {
   fresh "$1" docker compose ps -a -q | xargs docker inspect -f '{{.Name}} {{.State.StartedAt}}' | sort
 }
 started_before="$(started "$work/cadence")"
-if [ "$install_with" = clab ]; then
-  info "clab server install --dir same-name with COMPOSE_PROJECT_NAME=$name: the name is taken"
-  out="$(COMPOSE_PROJECT_NAME="$name" clab_install "$work/same-name" --mode proxy --http-addr "127.0.0.1:$second_port" --yes 2>&1)" && taken_ok=1 || taken_ok=0
-else
-  info "get-cadence.sh --dir same-name with COMPOSE_PROJECT_NAME=$name: the name is taken"
-  out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" COMPOSE_PROJECT_NAME="$name" \
-    sh -s -- --dir same-name --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" 2>&1)" && taken_ok=1 || taken_ok=0
-fi
-if [ "$taken_ok" = 1 ]; then
+info "get-cadence.sh --dir same-name with COMPOSE_PROJECT_NAME=$name: the name is taken"
+code=0
+out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" COMPOSE_PROJECT_NAME="$name" \
+  sh -s -- --dir same-name --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" 2>&1)" || code=$?
+if [ "$code" = 0 ]; then
   fail "a second installation under the name $name must be refused"
 else
+  check "...exit 1" [ "$code" = 1 ]
   check "a second installation under the name $name is refused, naming it and --name" \
     contains "$out" "the installation name '$name' is taken on this machine: the installation in $work/cadence uses it"
   check "...and the refusal suggests --name" contains "$out" "--name $name-2"
 fi
 check "the refused installation wrote no .env" [ ! -e "$work/same-name/.env" ]
-if [ "$install_with" = clab ]; then
-  # A free name on the port of the first installation: the port is busy.
-  if out="$(clab_install "$work/busy-port" --name "$second_name" --mode proxy --http-addr "127.0.0.1:$port" --yes 2>&1)"; then
-    fail "clab server install on the port of the first installation must be refused"
-  else
-    check "clab server install on the port of the first installation is refused: port $port is in use" \
-      contains "$out" "port $port is already in use"
-  fi
-  check "the refused installation on a busy port wrote no .env" [ ! -e "$work/busy-port/.env" ]
-fi
+# A free name on the port of the first installation: the port is busy.
+code=0
+out="$(cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
+  sh -s -- --dir busy-port --name "$second_name" --mode proxy --http-addr "127.0.0.1:$port" --yes <"$repo/get-cadence.sh" 2>&1)" || code=$?
+check "an installation on the port of the first one is refused: port $port is in use, exit 1" \
+  [ "$code" = 1 ]
+check "...naming the port" contains "$out" "port $port is already in use"
+check "the refused installation on a busy port wrote no .env" [ ! -e "$work/busy-port/.env" ]
 check "the first installation was not touched (same containers, same start times)" [ "$(started "$work/cadence")" = "$started_before" ]
 
 # --- local compose changes -------------------------------------------------------
 info "compose.override.yml"
 check "COMPOSE_FILE lists compose.override.yml" contains "$COMPOSE_FILE" ":compose.override.yml"
-check "check_mode accepts COMPOSE_FILE with the override" bash -c '. ./lib.sh && load_env && check_mode'
 cp compose.override.yml "$work/override.orig"
 cat >>compose.override.yml <<'YAML'
   api:
@@ -848,30 +832,31 @@ blocked="$(env SDLC_PROJECT=CHECK "$clab" --host "$base" transition CHECK-3 --to
 check "the start of a blocked task is held by dependencies_closed" contains "$blocked" 'dependencies_closed'
 
 # --- clab server -------------------------------------------------------------------------------------
-if [ "$driver" = clab ]; then
-  info "clab server status"
-  status="$("$clab" server status)"
+# The clab of the package, from the installation, as docs/admin.md shows it.
+clab_status() { "$pkg_clab" server status "$@"; }
+info "clab server status (bin/clab-$platform)"
+if true; then
+  status="$(clab_status)"
   check "status names the installation directory" contains "$status" "$work/cadence"
   check "status reports the stack $version (VERSION)" contains "$status" "$version (VERSION)"
-  clab_version="$("$clab" server status --json | jq -r '.clab // empty')"
+  clab_version="$(clab_status --json | jq -r '.clab // empty')"
   check "status reports the version of clab (${clab_version:-none})" grep -qE "^clab: +${clab_version:-none}\$" <<<"$status"
   check "status reports an installation from the package" contains "$status" "package"
+  check "status names the clab of the package: $version" grep -qE "^clab: +$version\$" <<<"$status"
   check "status reports the services" contains "$status" "api"
   check "status names the installation: $name (.env)" grep -qE "^Name: +$name \(\.env\)\$" <<<"$status"
-  if ! "$clab" server status --help | grep -q 'the database'; then
-    info "clab $("$clab" version 2>/dev/null | head -n 1) does not report the database (v0.10.0+): not checked"
-  elif [ "$db" = external ]; then
+  if [ "$db" = external ]; then
     check "status names the external database with its sslmode" \
       [ "$(sed -nE 's/^Database: +//p' <<<"$status")" = "$ext_status" ]
     check "status --json .database" \
-      [ "$("$clab" server status --json | jq -r .database)" = "$ext_status" ]
-    check "status shows no password of the database" lacks "$status$("$clab" server status --json)" "$EXT_DB_PASSWORD_URL"
+      [ "$(clab_status --json | jq -r .database)" = "$ext_status" ]
+    check "status shows no password of the database" lacks "$status$(clab_status --json)" "$EXT_DB_PASSWORD_URL"
   else
     check "status names the bundled database" grep -qE "^Database: +bundled\$" <<<"$status"
   fi
   check "status --json reports .name $name from .env" \
-    [ "$("$clab" server status --json | jq -r '"\(.name) \(.name_from)"')" = "$name .env" ]
-  if out="$(COMPOSE_PROJECT_NAME=other "$clab" server status 2>&1)"; then
+    [ "$(clab_status --json | jq -r '"\(.name) \(.name_from)"')" = "$name .env" ]
+  if out="$(COMPOSE_PROJECT_NAME=other clab_status 2>&1)"; then
     check "status with COMPOSE_PROJECT_NAME=other warns, naming both" \
       contains "$out" "! COMPOSE_PROJECT_NAME is 'other' in the environment, but this installation is '$name'"
     check "...and still lists the services of $name" contains "$out" "api"
@@ -880,24 +865,38 @@ if [ "$driver" = clab ]; then
   fi
   mkdir -p "$work/cadence/docs/sub"
   check "status from a subdirectory finds the installation" \
-    contains "$(cd "$work/cadence/docs/sub" && "$clab" server status)" "$work/cadence"
+    contains "$(cd "$work/cadence/docs/sub" && clab_status)" "$work/cadence"
   check "status with CADENCE_DIR from / finds the installation" \
-    contains "$(cd / && CADENCE_DIR="$work/cadence" "$clab" server status)" "$work/cadence"
+    contains "$(cd / && CADENCE_DIR="$work/cadence" clab_status)" "$work/cadence"
   rmdir "$work/cadence/docs/sub"
-  if out="$(cd "$work" && "$clab" server status 2>&1)"; then
+  if out="$(cd "$work" && clab_status 2>&1)"; then
     fail "status outside an installation must fail"
   else
     check "status outside an installation fails and points at --dir" contains "$out" "--dir"
   fi
 fi
 
-# backup_cmd / restore_cmd: the scripts, or clab server (CADENCE_DRIVER).
-backup_cmd() {
-  if [ "$driver" = clab ]; then "$clab" server backup; else ./backup.sh; fi
-}
-restore_cmd() {
-  if [ "$driver" = clab ]; then "$clab" server restore "$@"; else ./restore.sh "$@"; fi
-}
+# An external clab of the same version - the clab of the tap, which the
+# package carries byte for byte - outside the installation: it serves the
+# installation the wrappers made, by --dir.
+info "an external clab: clab server --dir"
+mkdir -p "$work/ext"
+cp "$pkg_clab" "$work/ext/clab"
+ext_clab="$work/ext/clab"
+ext_clab_status="$(cd "$work" && { "$ext_clab" server status --dir "$work/cadence" 2>&1 || true; })"
+check "the external clab: status --dir names the installation and $version" contains "$ext_clab_status" "$version (VERSION)"
+dumps_before_ext="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')"
+sleep 1
+if ext_out="$(cd "$work" && PATH="$work/nogit:$PATH" "$ext_clab" server backup --dir "$work/cadence" 2>&1)"; then
+  pass "the external clab: backup --dir of the installation of the wrappers"
+else
+  fail "the external clab: backup --dir failed: $ext_out"
+fi
+check "...into its backups/" [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" -gt "$dumps_before_ext" ]
+
+# backup_cmd / restore_cmd: the scripts of the installation.
+backup_cmd() { ./backup.sh; }
+restore_cmd() { ./restore.sh "$@"; }
 
 # portable_dump FILE: no owners, privileges or extensions in the dump.
 portable_dump() {
@@ -905,7 +904,7 @@ portable_dump() {
 }
 
 # --- backup and restore ----------------------------------------------------------------------------
-info "backup ($driver)"
+info "backup"
 if [ "$db" = external ]; then
   # Every command line of the machine while the backup runs: the password of
   # the database must be in none of them (ps shows them to every user; on
@@ -934,15 +933,13 @@ check "the dump carries no owners, privileges or extensions (portable between th
   portable_dump "$dump"
 
 if [ "$db" = external ]; then
-  info "backup of an unreachable external database ($driver)"
+  info "backup of an unreachable external database"
   dumps_before="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort)"
   docker stop "$EXT_DB_NAME" >/dev/null
   sleep 1
-  if out="$(backup_cmd 2>&1)"; then
-    fail "backup of an unreachable database must fail"
-  else
-    pass "backup of an unreachable database fails"
-  fi
+  code=0
+  out="$(backup_cmd 2>&1)" || code=$?
+  check "backup of an unreachable database fails: exit 1" [ "$code" = 1 ]
   check "...and leaves no dump" [ "$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort)" = "$dumps_before" ]
   check "...and prints no password" lacks "$out" "$EXT_DB_PASSWORD"
   docker start "$EXT_DB_NAME" >/dev/null
@@ -960,16 +957,13 @@ fi
 "$clab" --host "$base" project create AFTER --name "Created after the backup" --team check >/dev/null
 check "a project created after the backup exists" contains "$("$clab" --host "$base" project list --json)" '"AFTER"'
 
-info "restore ($driver)"
-if [ "$driver" = clab ]; then
-  # stdin is /dev/null, as under cron: a character device, but not a terminal.
-  if out="$("$clab" server restore "$dump" </dev/null 2>&1)"; then
-    fail "clab server restore without a terminal and --yes must refuse"
-  else
-    check "clab server restore without a terminal and --yes refuses and asks for --yes" contains "$out" "run it in a terminal or pass --yes"
-  fi
-  check "the refusal leaves the project created after the backup" contains "$("$clab" --host "$base" project list --json)" '"AFTER"'
-fi
+info "restore"
+# stdin is /dev/null, as under cron: a character device, but not a terminal.
+code=0
+out="$(restore_cmd "$dump" </dev/null 2>&1)" || code=$?
+check "./restore.sh without a terminal and --yes refuses: exit 1" [ "$code" = 1 ]
+check "...and asks for --yes" contains "$out" "run it in a terminal or pass --yes"
+check "the refusal leaves the project created after the backup" contains "$("$clab" --host "$base" project list --json)" '"AFTER"'
 restore_cmd --yes "$dump"
 projects="$("$clab" --host "$base" project list --json)"
 check "after restore the project from before the backup is there" contains "$projects" '"CHECK"'
@@ -984,19 +978,11 @@ check "/readyz answers 200 after restore" [ "$(http_code "$base/readyz")" = 200 
 # and its refusals, fetch, and the warning of an upgrade. Needs /api
 # backup-s3 (v0.10.0+): images of VERSION from v0.10.0 on, or images of a
 # branch (a pin variable set).
-backup_with() {
-  if [ "$driver" = clab ]; then "$clab" server backup "$@"; else ./backup.sh "$@"; fi
-}
+backup_with() { ./backup.sh "$@"; }
 # shellcheck disable=SC2120 # FILE is passed through check
-verify_cmd() {
-  if [ "$driver" = clab ]; then "$clab" server backup verify "$@"; else ./backup.sh verify "$@"; fi
-}
-fetch_cmd() {
-  if [ "$driver" = clab ]; then "$clab" server backup fetch "$@"; else ./backup.sh fetch "$@"; fi
-}
-upgrade_cmd() {
-  if [ "$driver" = clab ]; then "$clab" server upgrade "$@"; else ./upgrade.sh "$@"; fi
-}
+verify_cmd() { ./backup.sh verify "$@"; }
+fetch_cmd() { ./backup.sh fetch "$@"; }
+upgrade_cmd() { ./upgrade.sh "$@"; }
 counts_sql="SELECT (SELECT count(*) FROM projects) || ' ' || (SELECT count(*) FROM tasks) || ' ' || (SELECT count(*) FROM artifacts)"
 live_counts() {
   if [ "$db" = external ]; then
@@ -1026,10 +1012,8 @@ with_ps() {
 
 if version_lt "$version" v0.10.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
   info "skipped: the images of $version have no /api backup-s3 (v0.10.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
-elif [ "$driver" = clab ] && ! "$clab" server backup --help 2>/dev/null | grep -q 'backup verify'; then
-  info "skipped: clab $("$clab" version 2>/dev/null | head -n 1) has no clab server backup verify (v0.10.0+)"
 else
-  info "off-machine copy ($driver)"
+  info "off-machine copy"
   out="$(backup_cmd 2>&1)"
   check "without BACKUP_S3_BUCKET backup says nothing about S3" lacks "$out" "s3://"
   check "...and uploads nothing" lacks "$out" "upload"
@@ -1126,7 +1110,7 @@ else
   with_ps backup_cmd >/dev/null 2>&1 || fail "backup after the refusals failed"
   check "--no-upload takes a backup without the copy" lacks "$(sleep 1; backup_with --no-upload 2>&1)" "upload"
 
-  info "verify ($driver)"
+  info "verify"
   expected="$(live_counts)"
   read -r e_projects e_tasks e_artifacts <<<"$expected"
   started_before="$(started "$work/cadence")"
@@ -1188,7 +1172,7 @@ else
   env_set BACKUP_DIR ""
   rm -rf "$work/no-backups"
 
-  info "fetch ($driver)"
+  info "fetch"
   rm -f "backups/$newest.sql.gz" "backups/$newest.blobs.tar.gz"
   if out="$(fetch_cmd "$newest" 2>&1)"; then pass "fetch $newest succeeds"; else fail "fetch failed: $out"; fi
   check "...puts the dump into backups/ as it was uploaded" [ "$(sha256_of "backups/$newest.sql.gz")" = "$(sha256_of "$work/good.sql.gz")" ]
@@ -1207,7 +1191,7 @@ else
   # the upgrade drops the pins (empty CADENCE_*_DIGEST, as for images of a
   # branch) and goes by the tag v98.0.0, which no registry has.
   if [ "$db" = bundled ]; then
-    info "the backup of an upgrade ($driver)"
+    info "the backup of an upgrade"
     up=v98.0.0
     "$repo/ci/package.sh" --version "$up" "$work/releases/download/$up" >/dev/null
     sleep 1
@@ -1220,6 +1204,7 @@ else
     check "...and the upgrade goes on" contains "$out" "the upgrade goes on: its rollback uses the local backup"
     check "...past the backup to the images of $up" contains "$out" "$up"
     check "...and stops at them with the files of $version back" [ "$(tr -d '[:space:]' <VERSION)" = "$version" ]
+    check "...with no 'older than the target' of the clab of the package, which the upgrade replaces" lacks "$out" "is older than the target"
     printf '%s\n' "$out" | grep -E '^(!|✗)' | head -n 4
     env_set BACKUP_S3_ENDPOINT "$S3_ENDPOINT"
   fi
@@ -1233,20 +1218,19 @@ fi
 # --- another installation name in the environment ------------------------------------
 # backup, restore and upgrade of this installation with COMPOSE_PROJECT_NAME
 # of another one refuse before they touch Docker: no dump, no restart.
-info "COMPOSE_PROJECT_NAME=other ($driver)"
-upgrade_cmd() {
-  if [ "$driver" = clab ]; then "$clab" server upgrade "$@"; else ./upgrade.sh "$@"; fi
-}
+info "COMPOSE_PROJECT_NAME=other"
 started_before="$(started "$work/cadence")"
 dumps_before="$(find backups -maxdepth 1 -name 'cadence-*.sql.gz' | sort)"
 for cmd in "backup_cmd" "restore_cmd --yes $dump" "upgrade_cmd $version"; do
   what="${cmd%%_cmd*}"
+  code=0
   # shellcheck disable=SC2086 # the command and its arguments
-  if out="$(COMPOSE_PROJECT_NAME=other $cmd 2>&1)"; then
+  out="$(COMPOSE_PROJECT_NAME=other $cmd 2>&1)" || code=$?
+  if [ "$code" = 0 ]; then
     fail "$what with COMPOSE_PROJECT_NAME=other must refuse"
-  elif contains "$out" "COMPOSE_PROJECT_NAME is 'other' in the environment, but the installation in $work/cadence is '$name'" &&
+  elif [ "$code" = 1 ] && contains "$out" "COMPOSE_PROJECT_NAME is 'other' in the environment, but the installation in $work/cadence is '$name'" &&
     contains "$out" "unset COMPOSE_PROJECT_NAME"; then
-    pass "$what with COMPOSE_PROJECT_NAME=other refuses, naming both and unset"
+    pass "$what with COMPOSE_PROJECT_NAME=other refuses with exit 1, naming both and unset"
   else
     fail "$what with COMPOSE_PROJECT_NAME=other refused without both names: $out"
   fi
@@ -1262,7 +1246,7 @@ check "an empty COMPOSE_PROJECT_NAME is no variable: backup works" \
 # the new version check the database before the backup, and the rollback the
 # upgrade prints restores into the external database.
 if [ "$db" = external ]; then
-  info "upgrade on the external database ($driver)"
+  info "upgrade on the external database"
   next=v99.0.0
   "$repo/ci/package.sh" --version "$next" "$work/releases/download/$next" >/dev/null
   registry="${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}"
@@ -1297,23 +1281,23 @@ if [ "$db" = external ]; then
 
   "$clab" --host "$base" project create UPG --name "Before the upgrade" --team check >/dev/null
   # compose up waits for the API to be healthy before it starts the worker,
-  # so only a zero timeout makes "not ready" certain.
-  mkdir -p "$work/clab-bin"
-  ln -sf "$clab" "$work/clab-bin/clab"
-  if out="$(PATH="$work/clab-bin:$PATH" CADENCE_VERIFY=off CADENCE_RELEASES_URL="file://$work/releases" CADENCE_READY_TIMEOUT=0 upgrade_cmd "$next" 2>&1)"; then
+  # so only a zero timeout makes "not ready" certain. No clab in PATH: the
+  # printed rollback is the scripts.
+  if out="$(PATH="$work/nogit:$PATH" CADENCE_VERIFY=off CADENCE_RELEASES_URL="file://$work/releases" CADENCE_READY_TIMEOUT=0 upgrade_cmd "$next" 2>&1)"; then
     fail "the upgrade to $next with a zero timeout must report it is not ready"
   else
     printf '%s\n' "$out" | tail -n 8
     check "it checked the external database with the images of $next before the backup" \
       [ "$(grep -nF "checking the external database $ext_label with the images of $next" <<<"$out" | cut -d: -f1)" -lt \
         "$(grep -nF "backup of $version" <<<"$out" | cut -d: -f1)" ]
-    rollback="$(grep -E '^  (tar -xpzf |\./restore\.sh --yes |clab server restore --yes )' <<<"$out" || true)"
+    rollback="$(grep -E '^  (tar -xpzf |\./restore\.sh --yes )' <<<"$out" || true)"
     if [ "$(grep -c . <<<"$rollback")" = 2 ]; then
-      pass "it prints the rollback: package files and the backup"
-      info "running the rollback as printed"
+      pass "it prints the rollback: package files and the backup, by the scripts"
+      info "running the rollback as printed, without clab in PATH"
       "$clab" --host "$base" project create LOST --name "Lost by the rollback" --team check >/dev/null 2>&1 || true
-      PATH="$work/clab-bin:$PATH" bash -euc "$rollback" >/dev/null
+      PATH="$work/nogit:$PATH" bash -euc "$rollback" >/dev/null
       check "after the rollback VERSION is $version" [ "$(tr -d '[:space:]' <VERSION)" = "$version" ]
+      check "...and bin/clab-$platform is the clab of $version again" [ "$("$pkg_clab" version 2>/dev/null | head -n 1)" = "clab $version" ]
       projects="$("$clab" --host "$base" project list --json)"
       check "after the rollback the project from before the upgrade is there" contains "$projects" '"UPG"'
       check "after the rollback the project written after the backup is gone" lacks "$projects" '"LOST"'
@@ -1336,16 +1320,25 @@ if [ "$secrets_mode" = files ]; then
 fi
 
 # --- two installations on one machine ------------------------------------------------
-if [ "$driver" = scripts ] && [ "$db" = bundled ]; then
-  info "a second installation: --name $second_name on port $second_port"
+if [ "$db" = bundled ]; then
+  info "a second installation by the external clab: clab server install --name $second_name on port $second_port"
   # The *_FILE that load_env exported from the .env of the first one are
   # paths in its secrets/, not the second one's (CHECK_SECRETS=files):
   # compose would take them over the .env of the second installation.
   first_files=()
   for v in $(compgen -e | grep '_FILE$' || true); do first_files+=(-u "$v"); done
   (cd "$work" && env ${first_files[@]+"${first_files[@]}"} PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
-    sh -s -- --dir second --name "$second_name" --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" >/dev/null)
+    "$ext_clab" server install --dir "$work/second" --name "$second_name" --mode proxy --http-addr "127.0.0.1:$second_port" --yes </dev/null >/dev/null)
   second_up=1
+  # The .env of clab server install and of the wrapper install.sh: the same
+  # keys in the same order, the same form of the lines, mode 600.
+  env_keys() { sed -E 's/=.*//' "$1"; }
+  env_form() { sed -E 's/=.+/=x/' "$1"; }
+  check "the .env of clab server install has the keys of the .env of install.sh, in order" \
+    [ "$(env_keys "$work/second/.env")" = "$(env_keys "$work/env-of-install.sh")" ]
+  check "...and the same form of every line (KEY=value, empty values alike)" \
+    [ "$(env_form "$work/second/.env")" = "$(env_form "$work/env-of-install.sh")" ]
+  check "...and mode 600" [ "$(stat -c %a "$work/second/.env" 2>/dev/null || stat -f %Lp "$work/second/.env")" = 600 ]
   check "the second installation keeps its name: COMPOSE_PROJECT_NAME=$second_name" \
     grep -qxF "COMPOSE_PROJECT_NAME=$second_name" "$work/second/.env"
   check "the second installation answers on $second_port" [ "$(http_code "http://127.0.0.1:$second_port/readyz")" = 200 ]
@@ -1370,4 +1363,4 @@ if [ "$failures" -gt 0 ]; then
   docker compose logs --tail 30 api caddy || true
   die "$failures check(s) failed"
 fi
-ok "all checks passed on $version ($driver, installed with $install_with, secrets in $secrets_mode)"
+ok "all checks passed on $version (the wrappers of bin/clab-$platform, database $db, secrets in $secrets_mode)"

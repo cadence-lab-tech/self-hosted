@@ -50,8 +50,10 @@ curl -fsSL https://github.com/cadence-lab-tech/self-hosted/releases/latest/downl
 ```
 
 `get-cadence.sh` is a POSIX `sh` script and needs `curl`, `tar`,
-`sha256sum` (or `shasum`), `bash` and Docker; git is not needed. Its own
-flags:
+`sha256sum` (or `shasum`) and Docker; git is not needed, and neither is
+`bash`, except for a release whose scripts are still bash (v0.13.0 and
+older, `--version`): then it checks for `bash` before it unpacks anything.
+Its own flags:
 
 | flag | variable | |
 |---|---|---|
@@ -83,6 +85,60 @@ Without `cosign` it warns once and installs, as before; a signature that
 does not verify stops it with nothing installed. `CADENCE_VERIFY=require`
 also refuses without `cosign`, `off` skips the check — the table of what
 happens when is in [Verifying a release](#verifying-a-release).
+
+### clab in the package
+
+From the release after v0.13.0 the package carries `clab` of its own
+version for Linux and macOS, amd64 and arm64 — `bin/clab-linux-amd64`,
+`bin/clab-linux-arm64`, `bin/clab-darwin-amd64`, `bin/clab-darwin-arm64`
+(the CLI only, not `clab-runner`) — and `install.sh`, `upgrade.sh`,
+`backup.sh` and `restore.sh` are short POSIX `sh` wrappers: each picks the
+`clab` of the machine by `uname -s` and `uname -m` and runs its
+`clab server install`, `upgrade`, `backup` or `restore` on its own
+directory with the arguments as given. One implementation serves the
+scripts and `clab server`; the machine needs Docker and no `bash`,
+`openssl` or `clab` of its own.
+
+- **Flags, variables, `.env`** are those of the scripts before — they are
+  the ones of `clab server`, which takes the same; `./install.sh --help`
+  (and `--help` of the others) prints the help of its `clab server`
+  command.
+- **Exit codes:** 0 — done; 1 — refused or failed (`.env` exists, a taken
+  name or port, a signature that does not verify, a backup of another
+  version without `--ignore-version`, ...); 2 — a wrong argument (an unknown
+  flag, a missing value). Before, `upgrade.sh`, `backup.sh` and
+  `restore.sh` exited with 1 for an unknown flag too.
+- **What they print for you to run next** is in the form of the scripts:
+  the cron lines of `install.sh` are `/path/to/cadence/backup.sh …`, the
+  rollback of a failed upgrade is `tar -xpzf backups/package-…` and
+  `./restore.sh --yes …`, and a second `./install.sh` points at
+  `./upgrade.sh`. All of it runs without `clab` in `PATH`.
+- **Upgrades replace it.** The `clab` in `bin/` is a file of the package:
+  `./upgrade.sh` puts the one of the new version in place with the rest,
+  the package copy of the old version in `backups/` keeps the old one, and
+  the rollback brings it back. It does not update the `clab` of people and
+  agents, and it never touches a `bin/clab` of yours: the names differ.
+- **The same installation with your `clab`.** `clab server … --dir
+  /path/to/cadence` of the same version (or newer) manages an installation
+  the scripts made, and the scripts one that `clab server install` made;
+  `bin/clab-<os>-<arch> server status` shows its state.
+- **A machine the package has no `clab` for** (another OS or CPU), or a
+  `clab` that does not run there (a partition mounted `noexec`): the
+  script exits with 1, names the platform, changes nothing and prints the
+  way out — install `clab` of the version in `VERSION` from the tap and run
+  it on the directory, or let the scripts run it:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=v0.14.0 sh
+  clab server backup --dir /opt/cadence
+  CADENCE_CLAB=/usr/local/bin/clab /opt/cadence/backup.sh   # the same through the script
+  ```
+
+  `CADENCE_CLAB` — the path of the `clab` the scripts run instead of the
+  one in `bin/`, of the version in `VERSION` or newer.
+- **How long.** The scripts stay, as wrappers, at least two minor releases
+  after the first one with them; dropping them later is announced in the
+  notes of a release first.
 
 **With clab.** `clab` v0.8.0 and later installs the same way with one command
 and needs neither `curl`, `tar`, `sha256sum` nor `bash` — only Docker
@@ -116,7 +172,8 @@ downloaded `checksums.txt` to check. If the images cannot
 be pulled or the stack does not become ready, `.env` is kept and the command
 prints how to start the stack. The result is the same directory as with
 `get-cadence.sh`: `clab server` and the scripts of the package both manage
-it afterwards.
+it afterwards. `install.sh` of the package is this very command, run by the
+`clab` in the package ([clab in the package](#clab-in-the-package)).
 
 By hand, the same steps:
 
@@ -1731,7 +1788,15 @@ needed. The script:
    that the CLI is older than the server. The upgrade runs the script of the
    version it starts from, so the reminder shows on upgrades from v0.6.1 on.
 
-The upgrade runs the `upgrade.sh` of the version it starts from: the first
+The upgrade runs the `upgrade.sh` of the version it starts from. The first
+upgrade from v0.13.0 or older to a release with
+[clab in the package](#clab-in-the-package) runs that old bash script: it
+puts the wrappers and `bin/clab-*` (new files of the package) in place and
+removes `lib.sh`, which the new package no longer has; its rollback brings
+the bash scripts back. From then on `./upgrade.sh` is `clab server upgrade`
+of the `clab` in `bin/`, which replaces itself with the `clab` of the new
+version and, if the new version does not become ready, prints a rollback
+that brings the old one back with the other package files. The first
 upgrade to v0.12.0, the release that brings the verification, runs the old
 script and verifies no signature (check them by hand, as in
 [Verifying a release](#verifying-a-release), or upgrade with `clab server
@@ -1761,8 +1826,10 @@ Releases are published as GitHub Releases of this repository; watch it
 
 Each release `vX.Y.Z` carries assets with names that do not change:
 `cadence-self-hosted-vX.Y.Z.tar.gz` (the package: compose files, Caddyfile,
-`.env.example`, `VERSION`, the scripts, `bundles/`, `docs/`, `README.md`,
-`LICENSE`, `SECURITY.md` and `package.sha256`), `checksums.txt`,
+`.env.example`, `VERSION`, the scripts, `bin/clab-<os>-<arch>` — from the
+release after v0.13.0, `clab` of the version, so a mirror needs nothing
+else for the scripts —, `bundles/`, `docs/`, `README.md`, `LICENSE`,
+`SECURITY.md` and `package.sha256`), `checksums.txt`,
 `get-cadence.sh` and, from v0.9.0, `checksums.txt.sigstore.json` — the
 signature of `checksums.txt` (see [Verifying a release](#verifying-a-release)). A
 machine that cannot reach GitHub takes them from a mirror:
@@ -2557,7 +2624,11 @@ trivy image --scanners vuln --vex oci ghcr.io/cadence-lab-tech/sdlc-pipeline-fro
 `clab` v0.7.0 and later manages the installation on its machine with the
 same guarantees as the scripts — `.env` is never rewritten, a downgrade is
 refused, a backup comes before an upgrade, a failed upgrade prints the
-rollback — so the same steps go without bash and its tools:
+rollback. From the release after v0.13.0 the scripts *are* `clab server`:
+wrappers of the `clab` in `bin/` of the package
+([clab in the package](#clab-in-the-package)). Your own `clab` — of the
+version of the installation or newer, from the tap — runs the same steps
+by name:
 
 ```bash
 clab server install --mode proxy --http-addr 127.0.0.1:8080   # = get-cadence.sh | sh: a new installation in ./cadence (v0.8.0+)
@@ -2610,8 +2681,10 @@ that updates it (`brew upgrade clab`, or the install script of the tap with
 warning; update `clab` right after it. `clab server install` installs
 v0.6.0 and later and never a release newer than itself: without `--version`
 it takes the latest release that `clab` can manage. On Windows `clab server`
-refuses: run the Linux `clab` inside WSL2. The scripts keep working as they
-are, and either of them manages an installation the other one made.
+refuses: run the Linux `clab` inside WSL2. The scripts and `clab server`
+manage an installation either of them made; from the release after v0.13.0
+the scripts run the `clab` of the package, and they stay at least two minor
+releases after it.
 
 ## Troubleshooting
 

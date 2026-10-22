@@ -14,6 +14,12 @@
 # Without a terminal - as above, where the script itself comes on stdin -
 # install.sh asks nothing and takes the answers from the flags.
 #
+# install.sh of a package with clab in bin/ is a POSIX sh
+# wrapper of the clab of the package, which installs into the unpacked
+# directory: the machine needs no bash, openssl or clab of its own. The
+# package of an older release (--version) has install.sh in bash: bash is
+# needed for it, and checked before anything is unpacked.
+#
 #   --version vX.Y.Z   the release to install, default the latest
 #                      (or CADENCE_INSTALL_VERSION)
 #   --dir DIR          where to unpack, default ./cadence (or
@@ -87,10 +93,10 @@ version_before() {
   }'
 }
 
-# --- signatures: the rules of lib.sh ("signatures") in POSIX sh ---------------------
-# This script runs before the package is unpacked, so it cannot source
-# lib.sh: the same rules and messages are repeated here, for the package
-# only; install.sh of the package verifies the images.
+# --- signatures: the rules of clab server (CADENCE_VERIFY) in POSIX sh -------------
+# This script runs before the package is unpacked, so it cannot run the clab
+# of the package: the same rules and messages are repeated here, for the
+# package only; install.sh of the package verifies the images.
 FIRST_SIGNED=v0.9.0
 ISSUER=https://token.actions.githubusercontent.com
 PACKAGE_IDENTITY=https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main
@@ -203,7 +209,6 @@ main() {
 
   need curl "to download the package"
   need tar "to unpack the package"
-  need bash "install.sh of the package is a bash script"
   need docker "install Docker Engine with the compose plugin: https://docs.docker.com/engine/install/"
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 ||
     die "sha256sum (coreutils) or shasum is required to verify the download"
@@ -239,6 +244,11 @@ main() {
   if [ -z "$want" ] || [ "$want" != "$have" ]; then
     die "the checksum of $name does not match checksums.txt of $version: the download is broken or altered; nothing was installed"
   fi
+  # A package without clab in bin/ is of a release before the wrappers: its
+  # install.sh is a bash script.
+  if ! tar -tzf "$tmp/$name" | grep -q '^\(\./\)\{0,1\}bin/clab-'; then
+    need bash "install.sh of $version is a bash script"
+  fi
 
   mkdir -p "$dir"
   tar -xpzf "$tmp/$name" -C "$dir"
@@ -251,10 +261,12 @@ main() {
     export CADENCE_VERIFY_NOTED
   fi
   # stdin may be this very script (curl | sh): install.sh must not read it.
+  # It runs by its own first line: sh for the wrapper, bash for an older
+  # release.
   if [ -t 0 ]; then
-    bash ./install.sh "$@"
+    ./install.sh "$@"
   else
-    bash ./install.sh "$@" </dev/null
+    ./install.sh "$@" </dev/null
   fi
   say ""
   say "The installation lives in $(pwd): run ./upgrade.sh, ./backup.sh and docker compose there."

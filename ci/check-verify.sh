@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 #
 # Checks of the signature verification of install.sh and upgrade.sh
-# (CADENCE_VERIFY, lib.sh "signatures") that need neither Docker nor the
-# network: cosign, docker and the ghcr.io probe of curl are stubs
+# (CADENCE_VERIFY) that need no Docker: cosign and docker are stubs
 # (ci/verify-stubs.sh), the releases are packages of this checkout built by
-# ci/package.sh in a scratch directory. The docker stub writes every call to
-# a log: "before .env", "before the precheck" and "before the pull" are a
-# missing file and a missing call. CI runs it in the lint job; the one-line
-# installer has its own checks (ci/check-get-cadence.sh).
+# ci/package.sh in a scratch directory. The scripts are the wrappers of
+# clab server of the package (decision 0057): what is checked here is the
+# verification of the clab of the package, through the wrappers. The docker
+# stub writes every call to a log: "before .env", "before the precheck" and
+# "before the pull" are a missing file and a missing call. CI runs it in the
+# lint job; the one-line installer has its own checks
+# (ci/check-get-cadence.sh).
+#
+# An unreachable ghcr.io is not checked here: clab server asks ghcr.io with
+# its own HTTP client, which no stub in PATH stands in for (the bash scripts
+# asked with curl). When a stub cosign rejects an image, clab server asks the
+# real ghcr.io whether it answers - the check needs the network there. The
+# warning of auto and the refusal of require for an unreachable ghcr.io are
+# checked by the tests of clab server (cmd/clab/server_verify_test.go of the
+# backend).
 #
 #   ci/check-verify.sh
 #
@@ -24,8 +34,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# shellcheck source=lib.sh
-. ./lib.sh
+# shellcheck source=ci/lib.sh
+. ./ci/lib.sh
 # shellcheck source=ci/pins.sh
 . ./ci/pins.sh
 # shellcheck source=ci/verify-stubs.sh
@@ -67,10 +77,9 @@ ci/package.sh --version "$unsigned" "$releases/download/$unsigned" >/dev/null
 export CADENCE_RELEASES_URL="file://$releases"
 
 # --- stubs -------------------------------------------------------------------------
-# $work/bin: docker and curl; $work/cosign: cosign, put into PATH or left out.
+# $work/bin: docker; $work/cosign: cosign, put into PATH or left out.
 bin="$work/bin"
 mkdir -p "$bin"
-stub_curl "$bin"
 stub_compose_images "$bin/compose-images"
 cat >"$bin/docker" <<SH
 #!/bin/sh
@@ -196,20 +205,6 @@ printf 'services:\n  api:\n    image: registry.example.com/mine/sdlc-pipeline-ba
 run "$d" install.sh -- "${install_args[@]}"
 check "auto: an image of compose.override.yml put there before the installation - 'not pinned, not verified'" \
   contains "$out" "! registry.example.com/mine/sdlc-pipeline-backend:custom is not pinned to a digest"
-
-info "install.sh: ghcr.io is unreachable"
-for mode in auto require; do
-  d="$(unpacked "$version")"
-  run "$d" install.sh CADENCE_VERIFY="$mode" FAKE_GHCR=down FAKE_COSIGN_BAD=sdlc-pipeline-backend -- "${install_args[@]}"
-  if [ "$mode" = auto ]; then
-    check "auto: cosign fails and ghcr.io does not answer - a warning, install.sh goes on" \
-      contains "$out" "! images not verified: ghcr.io is unreachable from this host"
-    check "...and goes on" installed_on "$d"
-  else
-    refused_before_env "$d" "the images cannot be verified: ghcr.io is unreachable from this host, and CADENCE_VERIFY=require needs it" \
-      "require: an unreachable ghcr.io is refused before .env"
-  fi
-done
 
 info "install.sh: cosign"
 d="$(unpacked "$version")"
