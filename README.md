@@ -49,6 +49,18 @@ and follow [docs/admin.md](docs/admin.md): a team and a project, the starter
 cycle and roles from `bundles/starter.json`, the GitHub App, single sign-on,
 the CLI and agents.
 
+From v0.14.0 the first team and project come with the installation: with
+`--team KEY --with-starter --project KEY` the installer also creates the
+project in that team, applies `bundles/starter.json` and activates its
+cycles, so tasks and invites work right away:
+
+```bash
+curl -fsSL https://github.com/cadence-lab-tech/self-hosted/releases/latest/download/get-cadence.sh | sh -s -- --domain cadence.example.com --team acme --with-starter --project ACME
+```
+
+On an installation made without it, `clab server starter --dir cadence --project ACME --team acme`
+does the same ([first cycle and roles](docs/admin.md#first-cycle-and-roles)).
+
 The same by hand, from the [releases](https://github.com/cadence-lab-tech/self-hosted/releases):
 
 ```bash
@@ -157,7 +169,7 @@ or `/docs` in the UI). When done,
 | `bin/clab-<os>-<arch>` | `clab` of the version of the package for Linux and macOS, amd64 and arm64: the four scripts above are short `sh` wrappers that run its `clab server install`, `upgrade`, `backup` and `restore` on their directory ([clab in the package](docs/admin.md#clab-in-the-package)); they make the package about 12 MB |
 | `docs/admin.md` | the administrator guide |
 | `SECURITY.md` | the security policy: reporting a vulnerability, response times, supported versions |
-| `bundles/starter.json` | a starter of roles and cycles for a new project, applied with `clab import` |
+| `bundles/starter.json` | a starter of roles and cycles for a new project, applied by `install.sh --with-starter`, `clab server starter` or `clab import` |
 | `package.sha256` | in the package only: the sha256 of each of its files, against which `upgrade.sh` finds local edits |
 | `get-cadence.sh` | the one-line installer, published next to the package (not in it) |
 | `charts/cadence` | not in the package: the Helm chart for Kubernetes, published with each release as an OCI artifact ([Kubernetes (Helm)](docs/admin.md#kubernetes-helm)) |
