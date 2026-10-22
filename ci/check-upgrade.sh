@@ -81,6 +81,18 @@
 #   - ./upgrade.sh with no version on the latest release: nothing to do
 #   - going down is refused, and restore.sh of a FROM backup refuses, each
 #     with a hint that needs no git
+#   - the move of the bundled database from PostgreSQL 17 to 18
+#     (postgres/major-upgrade.sh), when FROM runs 17 and TO 18: a move cut
+#     off after the new cluster is in place but before its mark (a directory
+#     where the mark is written) fails the upgrade with postgres not started and
+#     no mark, and the rollback as printed brings back FROM on 17; the
+#     upgrade that is not ready has moved the data (TO on 18, the volume
+#     pgdata kept) and its rollback brings back FROM on 17; a task written
+#     on FROM after that rollback is on TO after the upgrade, the counts of
+#     tasks, artifacts and embeddings are those of FROM, PostgreSQL 18 on
+#     Debian 13, no collation version mismatch in the databases or the
+#     logs; a second docker compose up -d on TO moves nothing, and a task
+#     written on TO stays
 #   - an installation from before v0.7.1 has no name in .env; started with
 #     COMPOSE_PROJECT_NAME, as this check starts it, it is refused by the
 #     scripts (after the upgrade) and by clab server with the one step that
@@ -337,6 +349,29 @@ JSON
   esac
   info "task $task_key with artifact $artifact_id on $from"
 
+  # The bundled database (docs/admin.md, "PostgreSQL 18"): FROM on 17 and TO
+  # on 18 make the upgrades below move the data.
+  dc() { CADENCE_VERSION="$(tr -d '[:space:]' <VERSION)" docker compose "$@"; }
+  pg_q() {
+    # shellcheck disable=SC2016 # expanded by the shell of the container
+    dc exec -T postgres sh -c 'psql -X -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$1"
+  }
+  pg_major() { pg_q 'SHOW server_version_num' 2>/dev/null | cut -c1-2; }
+  key_counts() {
+    pg_q "SELECT concat_ws(' ', (SELECT count(*) FROM tasks), (SELECT count(*) FROM artifacts), (SELECT count(*) FROM artifact_chunks),
+      (SELECT count(*) FROM document_chunks), (SELECT count(*) FROM embedding_cache))"
+  }
+  in_volume() { docker run --rm -v "$1:/v" alpine:3 sh -c "$2"; }
+  local moves=false new_volume="${COMPOSE_PROJECT_NAME}_postgres" old_volume="${COMPOSE_PROJECT_NAME}_pgdata"
+  if grep -qx CADENCE_DB=external .env; then
+    info "$from runs on an external database: no move of the bundled one"
+  elif [ "$(pg_major)" = 17 ] && grep -qF pgvector/pgvector:pg18 "$repo/docker-compose.yml"; then
+    moves=true
+    info "$from runs PostgreSQL 17, $to runs 18: the upgrades move the data"
+  else
+    info "$from runs PostgreSQL $(pg_major): no move to check"
+  fi
+
   # A clone takes the files of this checkout as its first upgrade would bring
   # them: committed, so the tree is clean, and without package.sha256, which
   # a git checkout does not have.
@@ -505,6 +540,59 @@ JSON
   fi
   cp "$work/compose.orig" docker-compose.yml
 
+  # --- a move cut off before its mark ------------------------------------------------------
+  # The worst moment to stop: the new cluster is in place, the mark is not
+  # written. A directory where the mark goes (postgres/major-upgrade.sh)
+  # makes it fail there, in the volume postgres made ahead with the labels of
+  # compose.
+  if [ "$moves" = true ]; then
+    info "$up_name $to with a move cut off before its mark"
+    docker volume create --label "com.docker.compose.project=$COMPOSE_PROJECT_NAME" \
+      --label com.docker.compose.volume=postgres "$new_volume" >/dev/null
+    in_volume "$new_volume" 'mkdir -p /v/cadence-upgrade/done.part/state/x'
+    if out="$(PATH="$path_nogit" upgrade_cmd "$to" 2>&1)"; then
+      fail "$up_name $to went on after the move failed"
+    elif grep -qF "docker compose up failed for $to" <<<"$out"; then
+      pass "$up_name $to fails with the move: docker compose up failed"
+    else
+      fail "$up_name $to with a failed move: $out"
+    fi
+    if in_volume "$new_volume" 'test -s /v/18/docker/PG_VERSION && test ! -e /v/cadence-upgrade/done'; then
+      pass "...the new cluster is in place but has no mark: the move is not done"
+    else
+      fail "...the new cluster is not in place, or it has a mark"
+    fi
+    if [ -z "$(dc ps -q --status running postgres)" ]; then
+      pass "...postgres did not start on it"
+    else
+      fail "...postgres runs on a move that did not finish"
+    fi
+    if dc logs --no-log-prefix pg-upgrade-load 2>&1 | grep -qF "the move failed"; then
+      pass "...pg-upgrade-load says the move failed"
+    else
+      fail "...pg-upgrade-load does not say the move failed"
+    fi
+    in_volume "$new_volume" 'rm -rf /v/cadence-upgrade/done.part'
+    rollback="$(grep -E '^  (tar -xpzf |\./restore\.sh --yes |clab server restore --yes )' <<<"$out" || true)"
+    if [ "$(grep -c . <<<"$rollback")" = 2 ]; then
+      pass "...it prints the rollback"
+    else
+      fail "...the rollback is not two commands: $rollback"
+    fi
+    info "running the rollback as printed"
+    if [ "$driver" = scripts ]; then
+      PATH="$work/noclab:$path_nogit" bash -euc "$rollback" >/dev/null
+    else
+      PATH="$path_nogit" bash -euc "$rollback" >/dev/null
+    fi
+    if [ "$(instance_version)" = "$from" ] && [ "$(pg_major)" = 17 ] &&
+      "$clab" --host "$base" project list --json | grep -qF '"UPG"'; then
+      pass "after the rollback $from runs on PostgreSQL 17 with its data"
+    else
+      fail "after the rollback of the failed move $from is not back on PostgreSQL 17 with its data"
+    fi
+  fi
+
   # --- not ready: the printed rollback -----------------------------------------------------
   # compose up waits for the API to be healthy before it starts the worker,
   # so only a zero timeout makes "not ready" certain.
@@ -530,6 +618,14 @@ JSON
     fi
   fi
   no_older "the upgrade that did not become ready" "$out"
+  if [ "$moves" = true ]; then
+    if [ "$(pg_major)" = 18 ] && dc logs --no-log-prefix pg-upgrade-dump 2>&1 | grep -qF "moving the data of PostgreSQL 17" &&
+      [ -n "$(docker volume ls -q --filter "name=^$old_volume\$")" ]; then
+      pass "...the data was moved anew: $to runs PostgreSQL 18, the volume $old_volume is kept"
+    else
+      fail "...the upgrade that did not become ready has not moved the data to PostgreSQL 18, or $old_volume is gone"
+    fi
+  fi
   info "running the rollback as printed$([ "$driver" = scripts ] && echo ", without clab in PATH")"
   if [ "$driver" = scripts ]; then
     PATH="$work/noclab:$path_nogit" bash -euc "$rollback" >/dev/null
@@ -558,6 +654,18 @@ JSON
     pass "after the rollback the project created on $from is there"
   else
     fail "after the rollback the project created on $from is gone"
+  fi
+  local after_rollback="" from_counts=""
+  if [ "$moves" = true ]; then
+    if [ "$(pg_major)" = 17 ]; then
+      pass "after the rollback $from runs on PostgreSQL 17 (the volume $old_volume)"
+    else
+      fail "after the rollback $from does not run PostgreSQL 17: $(pg_major)"
+    fi
+    # Written on FROM after the rollback: the next upgrade must move it.
+    after_rollback="$(SDLC_PROJECT=UPG "$clab" --host "$base" create --title "Written after the rollback" --json | jq -r '.key')"
+    from_counts="$(key_counts)"
+    info "task $after_rollback written on $from after the rollback; tasks, artifacts, chunks and embeddings: $from_counts"
   fi
 
   # --- the upgrade ------------------------------------------------------------------------
@@ -707,6 +815,56 @@ JSON
     pass "the content of the artifact is unchanged"
   else
     fail "the content of the artifact differs or is gone"
+  fi
+  if [ "$moves" = true ]; then
+    info "the database after the move"
+    if [ "$(pg_major)" = 18 ] && dc exec -T postgres cat /etc/debian_version | grep -q '^13\.'; then
+      pass "postgres runs PostgreSQL 18 on Debian 13"
+    else
+      fail "postgres does not run PostgreSQL 18 on Debian 13"
+    fi
+    if [ "$(key_counts)" = "$from_counts" ]; then
+      pass "tasks, artifacts, chunks and embeddings as on $from: $from_counts"
+    else
+      fail "the counts of tasks, artifacts, chunks and embeddings differ: $from $from_counts, $to $(key_counts)"
+    fi
+    if "$clab" --host "$base" show "$after_rollback" --json | jq -e '.task.title == "Written after the rollback"' >/dev/null; then
+      pass "the task $after_rollback written on $from after the rollback is there"
+    else
+      fail "the task $after_rollback written on $from after the rollback is gone"
+    fi
+    if [ -z "$(pg_q 'SELECT datname FROM pg_database WHERE datallowconn AND datcollversion IS DISTINCT FROM pg_database_collation_actual_version(oid)')" ] &&
+      ! dc logs postgres api worker 2>&1 | grep -qiF "collation version mismatch"; then
+      pass "no collation version mismatch: in the databases and in the logs of postgres, api and worker"
+    else
+      fail "a collation version mismatch after the move"
+    fi
+    if [ -n "$(docker volume ls -q --filter "name=^$old_volume\$")" ]; then
+      pass "the volume $old_volume of PostgreSQL 17 is kept"
+    else
+      fail "the volume $old_volume is gone after the move"
+    fi
+    # The move after the rollback replaced the cluster of the earlier one.
+    if in_volume "$new_volume" 'ls -d /v/cadence-upgrade/replaced-* >/dev/null 2>&1'; then
+      pass "the PostgreSQL 18 cluster of the earlier move is kept aside (cadence-upgrade/replaced-*)"
+    else
+      fail "the PostgreSQL 18 cluster of the earlier move is not kept aside"
+    fi
+    info "docker compose up -d again on $to"
+    local on_to
+    on_to="$(SDLC_PROJECT=UPG "$clab" --host "$base" create --title "Written on $to" --json | jq -r '.key')"
+    dc up -d >/dev/null 2>&1
+    if dc logs --no-log-prefix pg-upgrade-dump 2>&1 | tail -n 1 | grep -qF "nothing to do" &&
+      dc logs --no-log-prefix pg-upgrade-load 2>&1 | tail -n 1 | grep -qF "nothing to do"; then
+      pass "...moves nothing: pg-upgrade-dump and pg-upgrade-load say nothing to do"
+    else
+      fail "...the services of the move did not say nothing to do"
+    fi
+    if CADENCE_VERSION="$to" wait_ready 180 && "$clab" --host "$base" show "$on_to" --json | jq -e --arg t "Written on $to" '.task.title == $t' >/dev/null; then
+      pass "...the task $on_to written on $to stays"
+    else
+      fail "...the task $on_to written on $to is gone"
+    fi
   fi
 
   # --- after the upgrade ----------------------------------------------------------------------

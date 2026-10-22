@@ -100,7 +100,7 @@ info "release package"
 # apart from the list in ci/package.sh, so that a file dropped from the
 # package turns this check red.
 required_files="VERSION docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml compose.secrets.yml Caddyfile .env.example
-  install.sh upgrade.sh backup.sh restore.sh bundles/starter.json docs/admin.md README.md LICENSE SECURITY.md
+  install.sh upgrade.sh backup.sh restore.sh postgres/major-upgrade.sh bundles/starter.json docs/admin.md README.md LICENSE SECURITY.md
   bin/clab-linux-amd64 bin/clab-linux-arm64 bin/clab-darwin-amd64 bin/clab-darwin-arm64
   package.sha256"
 dist="$(mktemp -d)"
@@ -582,8 +582,8 @@ set_pin_frontend_roundtrip() {
 }
 check "set_pin rewrites the frontend pin of ui and caddy together and keeps the backend one" set_pin_frontend_roundtrip
 images() { env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST "$@" POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --images | sort -u | tr '\n' ' '; }
-check "no variable: api, worker, ui and caddy by tag and digest" \
-  [ "$(images)" = "$(printf '%s\n' pgvector/pgvector:pg17 \
+check "no variable: api, worker, ui and caddy by tag and digest; PostgreSQL 18 on Debian 13, and 17 for the move" \
+  [ "$(images)" = "$(printf '%s\n' pgvector/pgvector:pg17 pgvector/pgvector:pg18-trixie \
     "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$version@$backend_pin" \
     "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$frontend_pin" | sort -u | tr '\n' ' ')" ]
 check "a mirror (CADENCE_REGISTRY) keeps the digests" \
@@ -698,7 +698,9 @@ ext_config() {
 ext="$(ext_config SDLC_DATABASE_URL="$ext_url")"
 check "[external] compose takes the overlay" [ -n "$ext" ]
 check "[external] no postgres service" [ "$(jq -r '.services | has("postgres")' <<<"$ext")" = false ]
-check "[external] no pgdata volume" [ "$(jq -r '.volumes // {} | has("pgdata")' <<<"$ext")" = false ]
+check "[external] no pgdata volume, no postgres volume" [ "$(jq -r '.volumes // {} | has("pgdata") or has("postgres")' <<<"$ext")" = false ]
+check "[external] no move to PostgreSQL 18 (pg-upgrade-dump, pg-upgrade-load)" \
+  [ "$(jq -r '.services | has("pg-upgrade-dump") or has("pg-upgrade-load")' <<<"$ext")" = false ]
 check "[external] api and worker take SDLC_DATABASE_URL of .env" \
   [ "$(jq -r '[.services.api.environment.SDLC_DATABASE_URL, .services.worker.environment.SDLC_DATABASE_URL] | unique | join(" ")' <<<"$ext")" = "$ext_url" ]
 check "[external] api does not wait for postgres (depends_on.required: false)" \
@@ -706,8 +708,8 @@ check "[external] api does not wait for postgres (depends_on.required: false)" \
 check "[external] only caddy publishes ports" \
   [ "$(jq -r '[.services | to_entries[] | select(.value.ports != null) | .key] | join(" ")' <<<"$ext")" = caddy ]
 tools="$(ext_config SDLC_DATABASE_URL="$ext_url" COMPOSE_PROFILES=tools)"
-check "[external] the backup client is pgvector/pgvector:pg18 with /secrets" \
-  [ "$(jq -r '.services["db-client"] | "\(.image) \(.volumes[0].target)"' <<<"$tools")" = "pgvector/pgvector:pg18 /secrets" ]
+check "[external] the backup client is pgvector/pgvector:pg18-trixie with /secrets" \
+  [ "$(jq -r '.services["db-client"] | "\(.image) \(.volumes[0].target)"' <<<"$tools")" = "pgvector/pgvector:pg18-trixie /secrets" ]
 # The URL may come as a file (CLAB-200): compose then passes an empty URL and
 # the path, the service reads the file; with neither it refuses to start,
 # and clab server before it.
@@ -719,6 +721,28 @@ check "[bundled] the postgres service stays" [ "$(jq -r '.services | has("postgr
 check "[bundled] SDLC_DATABASE_URL is the postgres container" \
   contains "$(jq -r .services.api.environment.SDLC_DATABASE_URL <<<"$bundled")" "@postgres:5432/"
 check "[bundled] no backup client service" [ "$(jq -r '.services | has("db-client")' <<<"$bundled")" = false ]
+# PostgreSQL 18 on Debian 13 in the layout of its image: the volume postgres
+# at /var/lib/postgresql, nothing at /var/lib/postgresql/data - the image
+# refuses to start with a mount there. Before postgres the two one-off
+# services move the data of PostgreSQL 17 from the volume pgdata
+# (postgres/major-upgrade.sh): postgres waits for them, they never restart.
+mounts_of() { jq -r --arg s "$1" '[.services[$s].volumes[] | "\(.type):\(.source | sub(".*/"; "")):\(.target)\(if .read_only then ":ro" else "" end)"] | join(" ")' <<<"$bundled"; }
+check "[bundled] postgres is pgvector/pgvector:pg18-trixie" [ "$(jq -r .services.postgres.image <<<"$bundled")" = pgvector/pgvector:pg18-trixie ]
+check "[bundled] postgres keeps its data in the volume postgres at /var/lib/postgresql" \
+  [ "$(mounts_of postgres)" = "volume:postgres:/var/lib/postgresql" ]
+check "[bundled] pg-upgrade-dump: PostgreSQL 17 on pgdata at /var/lib/postgresql/data, postgres at /target" \
+  [ "$(jq -r '.services["pg-upgrade-dump"] | "\(.image) \(.entrypoint | join(" "))"' <<<"$bundled") $(mounts_of pg-upgrade-dump)" = \
+    "pgvector/pgvector:pg17 bash /cadence/major-upgrade.sh dump volume:pgdata:/var/lib/postgresql/data volume:postgres:/target bind:major-upgrade.sh:/cadence/major-upgrade.sh:ro" ]
+check "[bundled] pg-upgrade-load: PostgreSQL 18 on postgres at /var/lib/postgresql" \
+  [ "$(jq -r '.services["pg-upgrade-load"] | "\(.image) \(.entrypoint | join(" "))"' <<<"$bundled") $(mounts_of pg-upgrade-load)" = \
+    "pgvector/pgvector:pg18-trixie bash /cadence/major-upgrade.sh load volume:postgres:/var/lib/postgresql bind:major-upgrade.sh:/cadence/major-upgrade.sh:ro" ]
+check "[bundled] postgres waits for pg-upgrade-load, and it for pg-upgrade-dump, to complete successfully" \
+  [ "$(jq -r '[.services.postgres.depends_on["pg-upgrade-load"].condition, .services["pg-upgrade-load"].depends_on["pg-upgrade-dump"].condition] | join(" ")' <<<"$bundled")" = \
+    "service_completed_successfully service_completed_successfully" ]
+check "[bundled] the one-off services do not restart" \
+  [ "$(jq -r '[.services["pg-upgrade-dump"].restart, .services["pg-upgrade-load"].restart] | map(. // "no") | join(" ")' <<<"$bundled")" = "no no" ]
+check "[bundled] the script of the move is in the package, bash" \
+  [ "$(head -n 1 postgres/major-upgrade.sh)" = "#!/usr/bin/env bash" ]
 pool="$(POSTGRES_PASSWORD=x CADENCE_VERSION="$version" COMPOSE_FILE=docker-compose.yml:compose.proxy.yml SDLC_DB_MAX_CONNS=7 SDLC_DB_CONNECT_TIMEOUT=45s docker compose config --format json)"
 check "SDLC_DB_MAX_CONNS and SDLC_DB_CONNECT_TIMEOUT of .env reach api and worker" \
   [ "$(jq -r '[.services.api.environment, .services.worker.environment] | map("\(.SDLC_DB_MAX_CONNS)/\(.SDLC_DB_CONNECT_TIMEOUT)") | unique | join(" ")' <<<"$pool")" = "7/45s" ]

@@ -365,6 +365,35 @@ done
 load_env
 
 # --- the database of the installation ------------------------------------------------
+pg_sql() { docker compose exec -T postgres psql -X -At -U "${POSTGRES_USER:-sdlc}" -d "${POSTGRES_DB:-sdlc}" -c "$1"; }
+# exited_with SERVICE CODE TEXT: the one-off SERVICE exited with CODE and its
+# log has TEXT.
+exited_with() {
+  local c
+  c="$(container_of "$1")"
+  [ -n "$c" ] && [ "$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$c")" = "exited $2" ] &&
+    docker compose logs --no-log-prefix "$1" 2>&1 | tail -n 1 | grep -qF -- "$3"
+}
+# bundled_db_checks WHEN: the bundled database is PostgreSQL 18 on Debian 13
+# with its data in the volume postgres, and nothing was moved
+# (postgres/major-upgrade.sh, docs/admin.md "PostgreSQL 18").
+bundled_db_checks() {
+  local pg mounts
+  pg="$(container_of postgres)"
+  check "$1: postgres runs pgvector/pgvector:pg18-trixie" \
+    [ "$(docker inspect -f '{{.Config.Image}}' "$pg")" = pgvector/pgvector:pg18-trixie ]
+  check "...PostgreSQL 18 (SHOW server_version)" grep -q '^18\.' <<<"$(pg_sql 'SHOW server_version')"
+  check "...on Debian 13" grep -q '^13\.' <<<"$(docker compose exec -T postgres cat /etc/debian_version)"
+  # Volumes only: with secrets in files a Docker secret is a bind mount too.
+  mounts="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Type}} {{.Name}} {{.Destination}}{{println}}{{end}}{{end}}' "$pg" | grep . || true)"
+  check "...one volume, ${name}_postgres at /var/lib/postgresql: no anonymous volume" \
+    [ "$mounts" = "volume ${name}_postgres /var/lib/postgresql" ]
+  check "...its data directory is /var/lib/postgresql/18/docker" [ "$(pg_sql 'SHOW data_directory')" = /var/lib/postgresql/18/docker ]
+  check "...no database with a collation version mismatch" \
+    [ -z "$(pg_sql 'SELECT datname FROM pg_database WHERE datallowconn AND datcollversion IS DISTINCT FROM pg_database_collation_actual_version(oid)')" ]
+  check "pg-upgrade-dump exited 0: nothing to move" exited_with pg-upgrade-dump 0 "nothing to move"
+  check "pg-upgrade-load exited 0: nothing to do" exited_with pg-upgrade-load 0 "nothing to do"
+}
 dbline() { grep -E '^(Database|  Database):' <<<"$1" | head -n 1; }
 if [ "$db" = external ]; then
   info "external database"
@@ -379,7 +408,10 @@ if [ "$db" = external ]; then
   check "the CA is secrets/db-ca.pem (644), the one given by a relative path" \
     [ "$(stat -c %a secrets/db-ca.pem 2>/dev/null || stat -f %Lp secrets/db-ca.pem) $(sha256_of secrets/db-ca.pem)" = "644 $(sha256_of "$work/ca.pem")" ]
   check "no postgres container" [ -z "$(docker compose ps -a -q postgres 2>/dev/null)" ]
-  check "no pgdata volume" [ -z "$(docker volume ls -q --filter "name=^${name}_pgdata\$")" ]
+  check "no container of the move to PostgreSQL 18 (pg-upgrade-dump, pg-upgrade-load)" \
+    [ -z "$(docker compose ps -a -q pg-upgrade-dump 2>/dev/null)$(docker compose ps -a -q pg-upgrade-load 2>/dev/null)" ]
+  check "no pgdata volume, no postgres volume" \
+    [ -z "$(docker volume ls -q --filter "name=^${name}_pgdata\$")$(docker volume ls -q --filter "name=^${name}_postgres\$")" ]
   check "the service applied the schema in the external database (schema_migrations)" \
     [ "$(ext_db_query cadence 'SELECT count(*) > 0 FROM schema_migrations')" = t ]
   check "the API reads the CA as uid 65532: /api dbcheck in the api container passes" \
@@ -388,6 +420,7 @@ if [ "$db" = external ]; then
     contains "$(docker compose exec -T api /api dbcheck --json)" '"schema": "cadence"'
 else
   check ".env: the bundled database (CADENCE_DB=bundled)" grep -qxF "CADENCE_DB=bundled" .env
+  bundled_db_checks "a fresh installation"
 fi
 
 # env_set KEY VALUE: KEY=VALUE in .env of the installation.
@@ -846,6 +879,16 @@ check "clab create a second task" "$clab" --host "$base" create --project CHECK 
 check "clab relate CHECK-1 blocks CHECK-3" env SDLC_PROJECT=CHECK "$clab" --host "$base" relate CHECK-1 --to CHECK-3 --rel blocks
 blocked="$(env SDLC_PROJECT=CHECK "$clab" --host "$base" transition CHECK-3 --to start 2>&1 || true)"
 check "the start of a blocked task is held by dependencies_closed" contains "$blocked" 'dependencies_closed'
+
+if [ "$db" = bundled ]; then
+  info "docker compose down and up -d, without -v"
+  # The data stays in the named volume postgres: no anonymous volume to lose.
+  docker compose down >/dev/null 2>&1
+  docker compose up -d >/dev/null 2>&1
+  check "the stack is ready again" wait_ready 180
+  check "...with the tasks created before" contains "$(env SDLC_PROJECT=CHECK "$clab" --host "$base" show CHECK-3 --json 2>/dev/null)" '"Second task"'
+  bundled_db_checks "after down and up"
+fi
 
 # --- clab server -------------------------------------------------------------------------------------
 # The clab of the package, from the installation, as docs/admin.md shows it.

@@ -80,7 +80,7 @@ jobs:
           version: v3.19.0
       - name: shellcheck
         run: |
-          shellcheck *.sh ci/*.sh
+          shellcheck *.sh ci/*.sh postgres/*.sh
           # curl | sh runs it under dash on Debian and Ubuntu: no bashisms.
           shellcheck -s sh get-cadence.sh
       - name: compose, Caddyfile, layout, release package
