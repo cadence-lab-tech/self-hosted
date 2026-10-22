@@ -93,10 +93,10 @@ version_before() {
   }'
 }
 
-# --- signatures: the rules of lib.sh ("signatures") in POSIX sh ---------------------
-# This script runs before the package is unpacked, so it cannot source
-# lib.sh: the same rules and messages are repeated here, for the package
-# only; install.sh of the package verifies the images.
+# --- signatures: the rules of clab server (CADENCE_VERIFY) in POSIX sh -------------
+# This script runs before the package is unpacked, so it cannot run the clab
+# of the package: the same rules and messages are repeated here, for the
+# package only; install.sh of the package verifies the images.
 FIRST_SIGNED=v0.9.0
 ISSUER=https://token.actions.githubusercontent.com
 PACKAGE_IDENTITY=https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main
