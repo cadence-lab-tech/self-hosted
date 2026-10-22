@@ -499,6 +499,26 @@ if [ "$secrets_mode" = files ]; then
     [ "$(docker inspect -f '{{.State.Health.Status}}' "$(container_of api)" 2>/dev/null)" != healthy ]
   env_set SDLC_ADMIN_TOKEN_FILE ""
   env_set SDLC_ADMIN_TOKEN "$admin_token"
+  # The headers of the exporter of traces are a secret too (CLAB-235, since
+  # v0.13.0), read and checked on start with tracing off as well: a
+  # malformed pair in the file stops the API, naming the variable and the
+  # pair, never the key or the value. The stack below then runs with a good
+  # file of headers, and its value joins "no secret in the logs".
+  otlp_value="otlp$(openssl rand -hex 12)"
+  otlp_file() {
+    rm -f secrets/otlp-headers
+    (umask 077 && printf '%s\n' "$1" >secrets/otlp-headers)
+    docker run --rm -v "$PWD/secrets:/s" alpine:3 sh -c 'chown 65532:65532 /s/otlp-headers && chmod 400 /s/otlp-headers'
+  }
+  otlp_file "api-key: $otlp_value"
+  env_set OTEL_EXPORTER_OTLP_HEADERS ""
+  env_set OTEL_EXPORTER_OTLP_HEADERS_FILE /secrets/otlp-headers
+  load_env
+  docker compose up -d --no-deps api >/dev/null 2>&1 || true
+  check "a malformed pair in OTEL_EXPORTER_OTLP_HEADERS_FILE stops the API, naming the variable and the pair" \
+    api_log_has "OTEL_EXPORTER_OTLP_HEADERS_FILE: pair 1 has no '='"
+  check "...and the log of api holds no part of the headers" lacks "$(docker compose logs api 2>&1)" "$otlp_value"
+  otlp_file "x-cadence-check=$otlp_value"
 
   # Step 1: the values of .env into files of secrets/, handed over.
   # shellcheck source=/dev/null
@@ -545,6 +565,11 @@ if [ "$secrets_mode" = files ]; then
       "SDLC_ADMIN_TOKEN= SDLC_ADMIN_TOKEN_FILE=/run/secrets/admin_token " ]
   check "no container of the stack has a secret in its environment" \
     lacks "$(docker compose ps -q | xargs docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}')" "$admin_token"
+  check "api reads the headers of traces from OTEL_EXPORTER_OTLP_HEADERS_FILE" \
+    [ "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(container_of api)" | grep -E '^OTEL_EXPORTER_OTLP_HEADERS(_FILE)?=' | sort | tr '\n' ' ')" = \
+      "OTEL_EXPORTER_OTLP_HEADERS= OTEL_EXPORTER_OTLP_HEADERS_FILE=/secrets/otlp-headers " ]
+  check "...and no container has the headers in its environment" \
+    lacks "$(docker compose ps -q | xargs docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}')" "$otlp_value"
   if [ "$db" = bundled ]; then
     check "postgres reads POSTGRES_PASSWORD_FILE" \
       contains "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(container_of postgres)")" "POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password"
@@ -1284,7 +1309,7 @@ if [ "$secrets_mode" = files ]; then
   info "no secret in the logs"
   logs="$(docker compose logs api worker 2>&1)"
   out="$(backup_cmd 2>&1)"
-  for secret in "$admin_token" ${pg_password:+"$pg_password"} ${EXT_DB_PASSWORD:+"$EXT_DB_PASSWORD"} ${S3_SECRET:+"$S3_SECRET"}; do
+  for secret in "$admin_token" ${pg_password:+"$pg_password"} ${EXT_DB_PASSWORD:+"$EXT_DB_PASSWORD"} ${S3_SECRET:+"$S3_SECRET"} "$otlp_value"; do
     check "the logs of api and worker hold no value of a secret (${#secret} characters)" lacks "$logs" "$secret"
     check "...nor the output of a backup" lacks "$out" "$secret"
   done
@@ -1293,7 +1318,12 @@ fi
 # --- two installations on one machine ------------------------------------------------
 if [ "$driver" = scripts ] && [ "$db" = bundled ]; then
   info "a second installation: --name $second_name on port $second_port"
-  (cd "$work" && PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
+  # The *_FILE that load_env exported from the .env of the first one are
+  # paths in its secrets/, not the second one's (CHECK_SECRETS=files):
+  # compose would take them over the .env of the second installation.
+  first_files=()
+  for v in $(compgen -e | grep '_FILE$' || true); do first_files+=(-u "$v"); done
+  (cd "$work" && env ${first_files[@]+"${first_files[@]}"} PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
     sh -s -- --dir second --name "$second_name" --mode proxy --http-addr "127.0.0.1:$second_port" --yes <"$repo/get-cadence.sh" >/dev/null)
   second_up=1
   check "the second installation keeps its name: COMPOSE_PROJECT_NAME=$second_name" \

@@ -601,9 +601,10 @@ check "SDLC_AUDIT_RETENTION_DAYS of .env reaches the worker" [ "$(retention SDLC
 # Traces of the API over OTLP/HTTP (since v0.12.0): the standard OTEL_* go to
 # the API only - the worker is not traced - and are empty by default, so an
 # installation exports nothing until .env sets an endpoint. .env.example
-# has each of them only commented out, docs/admin.md describes each.
+# has each of them only commented out, docs/admin.md describes each. The
+# headers are a secret (CLAB-235): their file form goes with them.
 info "traces (OTEL_*)"
-otel_vars="OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_HEADERS OTEL_RESOURCE_ATTRIBUTES OTEL_SERVICE_NAME OTEL_TRACES_EXPORTER OTEL_TRACES_SAMPLER OTEL_TRACES_SAMPLER_ARG"
+otel_vars="OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_HEADERS OTEL_EXPORTER_OTLP_HEADERS_FILE OTEL_RESOURCE_ATTRIBUTES OTEL_SERVICE_NAME OTEL_TRACES_EXPORTER OTEL_TRACES_SAMPLER OTEL_TRACES_SAMPLER_ARG"
 otel_config() {
   local unset=()
   for v in $otel_vars; do unset+=(-u "$v"); done
@@ -886,6 +887,10 @@ for k in SDLC_BLOB_S3_ACCESS_KEY_ID SDLC_BLOB_S3_SECRET_ACCESS_KEY SDLC_ADMIN_TO
 done
 check "an unknown key of secrets.keys: refused" refused "secrets.keys.SDLC_NO_SUCH: no such secret" --set secrets.keys.SDLC_NO_SUCH=x
 check "a secret as a value of config: refused" refused "SDLC_GITHUB_TOKEN is a secret" --set config.shared.SDLC_GITHUB_TOKEN=x
+check "the headers of traces as a value of config.api: refused" refused "OTEL_EXPORTER_OTLP_HEADERS is a secret" \
+  --set config.api.OTEL_EXPORTER_OTLP_HEADERS=x
+check "the per-signal headers of traces in extraEnv: refused" refused "extraEnv: OTEL_EXPORTER_OTLP_TRACES_HEADERS is a variable of the chart or a secret" \
+  --set 'extraEnv[0].name=OTEL_EXPORTER_OTLP_TRACES_HEADERS' --set 'extraEnv[0].value=x'
 check "a value fixed by the chart in config: refused" refused "SDLC_TENANCY is set by the chart" --set config.api.SDLC_TENANCY=shared
 
 # A section left null in the values (`database:` with nothing under it, or
@@ -1037,13 +1042,15 @@ EOF
 all_keys=(--set secrets.keys.SDLC_GITHUB_TOKEN=gh --set secrets.keys.SDLC_GITHUB_APP_KEY_FILE=app-key
   --set secrets.keys.SDLC_GITHUB_APP_CLIENT_SECRET=app-secret --set secrets.keys.SDLC_GITHUB_WEBHOOK_SECRET=other/hook
   --set secrets.keys.SDLC_EMBEDDINGS_API_KEY=emb --set secrets.keys.SDLC_VOYAGE_API_KEY=voyage
-  --set secrets.keys.SDLC_BLOB_S3_SESSION_TOKEN=s3-session)
+  --set secrets.keys.SDLC_BLOB_S3_SESSION_TOKEN=s3-session
+  --set secrets.keys.OTEL_EXPORTER_OTLP_HEADERS=otlp-headers --set secrets.keys.OTEL_EXPORTER_OTLP_TRACES_HEADERS=otlp-traces-headers)
 all_json="$(render_json -f "$dist/min-values.yaml" "${all_keys[@]}")"
 pw_json="$(render_json -f "$dist/min-values.yaml" --set secrets.keys.SDLC_DATABASE_URL= \
   --set database.url=postgres://cadence@db/cadence --set secrets.keys.SDLC_DATABASE_PASSWORD=db-password)"
 for svc in api worker; do
   c_files="$(compose_env "$svc" | jq -r 'keys[] | select(endswith("_FILE"))' | grep -vx SDLC_DATABASE_PASSWORD_FILE | sort | tr '\n' ' ')"
-  h_files="$(chart_env "$all_json" "$svc" | jq -r 'keys[] | select(endswith("_FILE"))' | grep -vx SDLC_BLOB_S3_SESSION_TOKEN_FILE | sort | tr '\n' ' ')"
+  h_files="$(chart_env "$all_json" "$svc" | jq -r 'keys[] | select(endswith("_FILE"))' |
+    grep -vx -e SDLC_BLOB_S3_SESSION_TOKEN_FILE -e OTEL_EXPORTER_OTLP_TRACES_HEADERS_FILE | sort | tr '\n' ' ')"
   check "[$svc] with every key set the chart passes the X_FILE of docker-compose.yml: $h_files" [ "$c_files" = "$h_files" ]
   check "[$svc] ...plus SDLC_BLOB_S3_SESSION_TOKEN_FILE (compose.override.yml in compose)" \
     [ "$(chart_env "$all_json" "$svc" | jq -r .SDLC_BLOB_S3_SESSION_TOKEN_FILE)" = /secrets/cadence/s3-session ]
@@ -1055,6 +1062,10 @@ check "every X_FILE is a path under /secrets/<secret>/<key>, a key of another Se
 check "...other/hook is the key hook of the Secret other" [ "$(chart_env "$all_json" api | jq -r .SDLC_GITHUB_WEBHOOK_SECRET_FILE)" = /secrets/other/hook ]
 check "the worker gets no sign-in or webhook secret" \
   [ "$(chart_env "$all_json" worker | jq -r '[keys[] | select(test("ADMIN_TOKEN|APP_CLIENT_SECRET|WEBHOOK_SECRET"))] | length')" = 0 ]
+check "the headers of traces: api gets both files (the per-signal one by compose.override.yml in compose)" \
+  [ "$(chart_env "$all_json" api | jq -r '"\(.OTEL_EXPORTER_OTLP_HEADERS_FILE) \(.OTEL_EXPORTER_OTLP_TRACES_HEADERS_FILE)"')" = "/secrets/cadence/otlp-headers /secrets/cadence/otlp-traces-headers" ]
+check "...the worker none" \
+  [ "$(chart_env "$all_json" worker | jq -r '[keys[] | select(startswith("OTEL_"))] | length')" = 0 ]
 check "SDLC_DATABASE_URL of database.url carries no password" \
   [ "$(jq -r '[.[] | .. | objects | select(.name? == "SDLC_DATABASE_URL") | .value] | unique | join(" ")' <<<"$pw_json")" = "postgres://cadence@db/cadence" ]
 for name in $secret_values_of_table; do
