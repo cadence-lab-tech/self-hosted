@@ -25,10 +25,20 @@
 # wrappers (status, backup), and the second installation it installs with
 # clab server install has the .env of the first one, key for key.
 #
+# The starter project (CLAB-199, bundled database): a third installation by
+# clab server install --team starter --with-starter --project START (of
+# CLAB_BIN, else of the clab of the package) ends with the project in its
+# team, the starter roles and both cycles active and a task and an epic
+# created; clab server starter repeats it with nothing changed, and on the
+# first installation finds the project CHECK, set up by hand, unchanged. A
+# clab without --with-starter skips this with a note before VERSION v0.14.0
+# and fails from it.
+#
 #   ci/check-stack.sh
 #
 #   CHECK_HTTP_PORT       host port of the stack, default 8080; a second
-#                         installation takes the next port
+#                         installation takes the next port, the installation
+#                         of the starter project the port 3 above it
 #   COMPOSE_PROJECT_NAME  name of the installation (its compose project),
 #                         default cadence-check, never cadence; the second
 #                         one is NAME-2
@@ -142,6 +152,9 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-cadence-check}"
 name="$COMPOSE_PROJECT_NAME"
 second_name="$name-2"
 second_port=$((port + 1))
+# The installation of the starter project (bundled database only).
+starter_name="$name-3"
+starter_port=$((port + 3))
 # The stacks are torn down with their volumes: never the default name of a
 # real installation.
 [ "$name" != cadence ] || die "COMPOSE_PROJECT_NAME=cadence is the name of a real installation; the check tears its stacks down - give it a name of its own"
@@ -177,13 +190,13 @@ fresh() {
 }
 
 cleanup() {
-  [ "${CHECK_KEEP:-}" != 1 ] || { info "kept: $work/cadence${second_up:+ and $work/second}"; return; }
+  [ "${CHECK_KEEP:-}" != 1 ] || { info "kept: $work/cadence${second_up:+ and $work/second}${starter_up:+ and $work/starter}"; return; }
   # The stand-in bucket sits in the network of the installation: it goes
   # first, or compose could not remove that network.
   if declare -F s3_down >/dev/null; then s3_down; fi
   # By the names this check gave, never by what a .env says.
   local d n
-  for d in cadence:"$name" second:"$second_name"; do
+  for d in cadence:"$name" second:"$second_name" starter:"$starter_name"; do
     n="${d#*:}"
     d="$work/${d%%:*}"
     if [ -f "$d/.env" ]; then
@@ -1356,6 +1369,60 @@ if [ "$db" = bundled ]; then
   check "...and nothing into the backups/ of the second" \
     [ "$(find "$work/second/backups" -maxdepth 1 -name 'cadence-*.sql.gz' | wc -l | tr -d ' ')" = 1 ]
   check "the first installation still answers on $port" [ "$(http_code "$base/readyz")" = 200 ]
+fi
+
+# --- the starter project in one command (docs/admin.md, "First cycle and roles") ----
+if [ "$db" = bundled ]; then
+  starter_clab="${CLAB_BIN:-$pkg_clab}"
+  if ! "$starter_clab" server install --help 2>/dev/null | grep -qF -- --with-starter; then
+    if version_lt "$version" v0.14.0; then
+      info "skipped the starter project: $("$starter_clab" version 2>/dev/null | head -n 1) has no install --with-starter (v0.14.0+); CLAB_BIN=<clab with it> checks it"
+    else
+      fail "clab server install of $version has no --with-starter"
+    fi
+  else
+    info "the starter project: clab server install --team starter --with-starter --project START on port $starter_port"
+    sbase="http://127.0.0.1:$starter_port"
+    config_before="$(find "$CLAB_CONFIG_DIR" -type f -exec cksum {} + 2>/dev/null | sort || true)"
+    starter_out="$(cd "$work" && env ${first_files[@]+"${first_files[@]}"} PATH="$work/nogit:$PATH" CADENCE_RELEASES_URL="file://$work/releases" \
+      SDLC_ADMIN_TOKEN="$admin_token" "$starter_clab" server install --dir "$work/starter" --name "$starter_name" --mode proxy \
+      --http-addr "127.0.0.1:$starter_port" --team starter --with-starter --project START --project-name "Starter check" --yes </dev/null 2>&1)" &&
+      code=0 || code=$?
+    starter_up=1
+    printf '%s\n' "$starter_out"
+    check "install --with-starter exits with 0" [ "$code" = 0 ]
+    check "...creates the project START in the team starter" contains "$starter_out" "project START created in team starter"
+    check "...activates both cycles" [ "$(grep -o 'created, activated' <<<"$starter_out" | wc -l | tr -d ' ')" = 2 ]
+    check "...prints the address of the project" contains "$starter_out" "$sbase/p/START"
+    check "...and the invite of a team lead" contains "$starter_out" "clab invite create --team starter --role lead"
+    check "...and does not print a supplied token" lacks "$starter_out" "$admin_token"
+    project="$(curl -sf "${auth[@]}" "$sbase/v1/projects/START" || true)"
+    check "START belongs to the team starter" [ "$(jq -r '.project.owner_team_key' <<<"$project" 2>/dev/null)" = starter ]
+    workflows_of() { curl -sf "${auth[@]}" "$sbase/v1/projects/START/workflows"; }
+    flows="$(workflows_of || true)"
+    check "its active cycles cover task and epic" \
+      [ "$(jq -r '[.workflows[] | select(.state == "active") | .task_types[]] | sort | join(" ")' <<<"$flows" 2>/dev/null)" = "epic task" ]
+    check "...and no draft is left" [ "$(jq -r '[.workflows[] | select(.state == "draft")] | length' <<<"$flows" 2>/dev/null)" = 0 ]
+    sclab=(env SDLC_API_URL="$sbase" SDLC_TOKEN="$admin_token" SDLC_PROJECT=START "$clab")
+    check "the project has the analyst role" contains "$("${sclab[@]}" role show analyst --json 2>/dev/null || true)" '"analyst"'
+    check "a task is created in it" "${sclab[@]}" create --title "First task"
+    check "an epic is created in it" "${sclab[@]}" create --title "First epic" --type epic
+
+    again="$(cd "$work" && PATH="$work/nogit:$PATH" "$starter_clab" server starter --dir "$work/starter" --project START 2>&1)" && code=0 || code=$?
+    [ "$code" = 0 ] || printf '%s\n' "$again" >&2
+    check "clab server starter again exits with 0" [ "$code" = 0 ]
+    check "...finds the project" contains "$again" "project START already exists (team starter)"
+    check "...leaves the roles and cycles unchanged and active" \
+      [ "$(grep -o 'unchanged, already active' <<<"$again" | wc -l | tr -d ' ')" = 2 ]
+    check "...and makes no new version of a cycle" [ "$(workflows_of | jq '.workflows | length')" = "$(jq '.workflows | length' <<<"$flows")" ]
+
+    first="$(cd "$work" && PATH="$work/nogit:$PATH" "$starter_clab" server starter --dir "$work/cadence" --team check --project CHECK 2>&1)" && code=0 || code=$?
+    [ "$code" = 0 ] || printf '%s\n' "$first" >&2
+    check "clab server starter on CHECK, set up by hand on the first installation, exits with 0" [ "$code" = 0 ]
+    check "...and changes nothing there" [ "$(grep -o 'unchanged, already active' <<<"$first" | wc -l | tr -d ' ')" = 2 ]
+    check "the starter project steps write nothing into the configuration of clab" \
+      [ "$(find "$CLAB_CONFIG_DIR" -type f -exec cksum {} + 2>/dev/null | sort || true)" = "$config_before" ]
+  fi
 fi
 
 if [ "$failures" -gt 0 ]; then

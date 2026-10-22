@@ -9,7 +9,8 @@
 # checksum, unpacks the package into a new directory and runs install.sh of
 # the package there with the other flags (--mode, --domain, --email,
 # --http-addr, --team, --team-name, --name, --external-db, --external-db-ca,
-# --yes; see docs/admin.md, "Install"). A second installation on the same machine needs its own --dir
+# --with-starter, --project, --project-name, --yes; see docs/admin.md,
+# "Install"). A second installation on the same machine needs its own --dir
 # and its own --name (docs/admin.md, "Several installations on one machine").
 # Without a terminal - as above, where the script itself comes on stdin -
 # install.sh asks nothing and takes the answers from the flags.
@@ -66,7 +67,10 @@ get-cadence.sh [--version vX.Y.Z] [--dir DIR] [flags of install.sh]
                      (default cadence), a second one needs its own;
                      --external-db URL and --external-db-ca FILE put the data
                      into your own PostgreSQL (docs/admin.md, "External
-                     PostgreSQL")
+                     PostgreSQL"); --with-starter --project KEY
+                     [--project-name NAME] with --team also creates the
+                     first project with the starter roles and cycles
+                     (v0.14.0+)
 
   CADENCE_RELEASES_URL   a mirror of the releases instead of GitHub
   CADENCE_VERIFY         auto (default): verify the signatures with cosign

@@ -28,7 +28,10 @@
 #             for this machine (bin/clab-<os>-<arch>). Without CLAB_BIN a
 #             documented command that the clab of VERSION does not have yet
 #             (documented ahead of the release that brings it) is skipped
-#             with a note; with CLAB_BIN it fails. An unknown flag of an
+#             with a note; with CLAB_BIN it fails. So is a flag of the list
+#             ahead_flags (documented ahead of the release in its line),
+#             for the scripts and the one-line installer too, whose flags
+#             CLAB_BIN then also checks. Any other unknown flag of an
 #             existing command fails either way. The same clab checks the
 #             line docs/admin.md quotes for clab without a host.
 set -euo pipefail
@@ -294,10 +297,27 @@ done
 info "documented flags"
 # The scripts pass their arguments to clab server <command> of the clab of
 # the package (decision 0057): the flags they take are those its help lists.
+# With CLAB_BIN its help is the reference instead: the clab of the branch
+# that brings a flag.
 # flags_of COMMAND: the flags of clab server COMMAND --help.
 flags_of() {
-  { printf '%s\n' -h --help; clab_of "$pkg_clab" server "$1" --help 2>/dev/null; } |
+  { printf '%s\n' -h --help; clab_of "${CLAB_BIN:-$pkg_clab}" server "$1" --help 2>/dev/null; } |
     grep -oE -- '(^|[ ,[])-{1,2}[a-z][a-z-]*' | grep -oE -- '-{1,2}[a-z][a-z-]*' | sort -u
+}
+# Flags documented ahead of the release that brings them, "FLAG SINCE": while
+# VERSION is older than SINCE and there is no CLAB_BIN, such a flag that the
+# clab of the package does not take is skipped with a note, as a command
+# documented ahead is; with CLAB_BIN, or once VERSION catches up, it is
+# checked. A flag outside this list that no help lists fails.
+ahead_flags='--with-starter v0.14.0
+--project v0.14.0
+--project-name v0.14.0'
+# ahead FLAG: documented ahead of its release, not checked yet.
+ahead() {
+  local since
+  [ -z "${CLAB_BIN:-}" ] || return 1
+  since="$(awk -v f="$1" '$1 == f { print $2 }' <<<"$ahead_flags")"
+  [ -n "$since" ] && version_lt "$version" "$since"
 }
 install_flags="$(flags_of install)"
 if [ -n "$install_flags" ]; then
@@ -317,6 +337,8 @@ for script in install upgrade backup restore; do
         documented=$((documented + 1))
         if grep -qxF -- "$flag" <<<"$script_flags"; then
           pass "$f:$line: $script.sh takes $flag"
+        elif ahead "$flag"; then
+          info "skipped $f:$line: $script.sh of clab $version has no $flag yet; CLAB_BIN=<clab with it> checks it"
         else
           fail "$f:$line: $script.sh (clab server $script) has no flag $flag"
         fi
@@ -343,6 +365,8 @@ for f in README.md docs/admin.md; do
       documented=$((documented + 1))
       if grep -qxF -- "$flag" <<<"$get_flags"$'\n'"$install_flags"; then
         pass "$f:$line: the one-line installer takes $flag"
+      elif ahead "$flag"; then
+        info "skipped $f:$line: install.sh of clab $version has no $flag yet; CLAB_BIN=<clab with it> checks it"
       else
         fail "$f:$line: neither get-cadence.sh nor install.sh has the flag $flag"
       fi
@@ -391,6 +415,8 @@ else
         documented=$((documented + 1))
         if grep -qxF -- "$flag" <<<"$sub_flags"; then
           pass "$f:$line: clab server ${words[*]} takes $flag"
+        elif ahead "$flag"; then
+          info "skipped $f:$line: clab server ${words[*]} of clab $version has no $flag yet; CLAB_BIN=<clab with it> checks it"
         else
           fail "$f:$line: clab server ${words[*]} has no flag $flag"
         fi

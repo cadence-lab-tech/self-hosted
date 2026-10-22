@@ -210,11 +210,35 @@ Flags and environment variables for an unattended run:
 | `--email` | `ACME_EMAIL` | `tls` mode: Let's Encrypt notices |
 | `--http-addr` | `CADENCE_HTTP_ADDR` | `proxy` mode: where Caddy listens, default `127.0.0.1:8080` |
 | `--team`, `--team-name` | `SDLC_BOOTSTRAP_TEAM`, `SDLC_BOOTSTRAP_TEAM_NAME` | optional first team |
+| `--with-starter` | | from v0.14.0: once the stack is up, create the starter project in the first team (`--team` is required), apply `bundles/starter.json` and activate its cycles; see [First cycle and roles](#first-cycle-and-roles) |
+| `--project KEY` | | with `--with-starter`: the key of the project, 2-16 characters `A-Z`, `0-9` and `_` starting with a letter (asked in a terminal) |
+| `--project-name NAME` | | with `--with-starter`: its display name, default the key |
 | `--name` | `COMPOSE_PROJECT_NAME` | installation name on this machine, default `cadence`; see below |
 | `--external-db URL` | `CADENCE_EXTERNAL_DB` | keep the data in your own PostgreSQL instead of the container; see [External PostgreSQL](#external-postgresql) |
 | `--external-db-ca FILE` | `CADENCE_EXTERNAL_DB_CA` | the CA of that server: copied to `secrets/db-ca.pem`, `sslmode=verify-full` |
 | `--yes` | | ask nothing (also when there is no terminal) |
 | | `SDLC_ADMIN_TOKEN` | use this administrator token instead of generating one |
+
+**A first project in the same command.** With `--with-starter` the
+installation ends with a working project instead of an empty instance:
+
+```bash
+./install.sh --mode proxy --http-addr 127.0.0.1:8080 --team acme --with-starter --project ACME --yes
+```
+
+The team, the key and `bundles/starter.json` of the package are checked
+before `.env` is written. Once the stack is up, the installer creates the
+project `ACME` in the team `acme` with the administrator token, applies the
+starter bundle and activates both cycles, then prints the address of the
+project and the next steps: signing in, inviting a lead and people
+(`clab invite create`), giving the team access (`clab team grant`) and the
+first task. It talks only to the API of this installation, through its
+Caddy on this machine (`proxy`: `CADENCE_HTTP_ADDR`; `tls`: `127.0.0.1:443`
+with the certificate of your domain checked as usual, waiting up to
+`CADENCE_READY_TIMEOUT` for Let's Encrypt), and stores the token nowhere
+new. If this step fails, the stack keeps running and `.env` is kept; the
+installer prints the command that finishes it, `clab server starter` with
+the same team and key (see [First cycle and roles](#first-cycle-and-roles)).
 
 `install.sh` runs once. With an existing `.env` it stops and changes nothing:
 a new database password would no longer open the existing database volume.
@@ -998,6 +1022,11 @@ clab team update platform --can-create-projects        # its leads may create pr
 clab project create PLAT --name "Platform" --team platform
 ```
 
+`install.sh --team platform --with-starter --project PLAT` creates the team
+and the project with its roles and cycles in one go, and
+`clab server starter` adds such a project on an installation that already
+runs: see [First cycle and roles](#first-cycle-and-roles).
+
 People get in by invite: the command prints a link to send; whoever opens it
 and signs in joins.
 
@@ -1031,7 +1060,38 @@ who has already signed in can be added directly, without an invite:
 A new project is empty: no cycle, no roles. Tasks cannot be created and
 agents cannot be given a role until a maintainer sets them up. The package
 ships a starter: `bundles/starter.json`, a bundle of five roles and two
-cycles that `clab import` applies to a project.
+cycles.
+
+**One command (from v0.14.0).** The installer sets the starter up for you
+with `--with-starter` (see [Install](#install)):
+
+```bash
+./install.sh --mode proxy --http-addr 127.0.0.1:8080 --team acme --with-starter --project ACME --yes
+```
+
+On a machine where Cadence Lab already runs - installed without the flag,
+or after the step failed - `clab server starter` does the same on the
+installation directory, with the administrator token of the installation
+(`SDLC_ADMIN_TOKEN` in `.env`, or the file of `SDLC_ADMIN_TOKEN_FILE` in
+`secrets/`, also when [compose.secrets.yml](#composesecretsyml) sets it) and the team of
+`SDLC_BOOTSTRAP_TEAM` unless `--team` names another:
+
+```bash
+clab server starter --dir /opt/cadence --project PLAT --team platform --project-name Platform
+```
+
+It creates the project if there is none, applies the bundle and activates
+its cycles, and needs no sign-in. Running it again changes nothing: the
+project exists, roles and cycles report `unchanged`, active cycles stay
+active, and drafts the bundle left behind are activated. It never overwrites
+rules of your own: if the project already has another instruction of a
+starter role, or another active cycle for tasks or epics, it stops with
+nothing changed and points at the manual path below
+(`clab import --project PLAT --file bundles/starter.json --dry-run` shows
+the difference). Teams' access to the project, invites and tokens stay
+yours to give; it prints the commands.
+
+**By hand.** `clab import` applies the bundle to a project:
 
 ```bash
 export SDLC_PROJECT=PLAT
@@ -2842,6 +2902,7 @@ clab server backup fetch                 # = ./backup.sh fetch: the newest backu
 clab server restore backups/cadence-v0.7.0-20261008-030000.sql.gz   # = ./restore.sh (asks; --yes skips)
 clab server upgrade                      # = ./upgrade.sh: the latest release
 clab server upgrade --force v0.7.1       # = ./upgrade.sh --force v0.7.1
+clab server starter --project PLAT       # the starter project in the team of SDLC_BOOTSTRAP_TEAM (v0.14.0+)
 clab server images list --dir .          # the images of the version (from the release after v0.13.0)
 clab server images save --version v0.14.0 --output cadence-v0.14.0-airgap.tar   # one archive for a closed network
 clab server images load cadence-v0.14.0-airgap.tar   # load it there, verified offline
@@ -2852,7 +2913,11 @@ the package (`bin/clab-<os>-<arch> server images …`) or your own; see
 [Air-gapped installation](#air-gapped-installation).
 
 `clab server` needs no sign-in: it works with the files of the installation
-and Docker (`docker compose`) on this machine, not with the API. It finds
+and Docker (`docker compose`) on this machine. Only the starter project
+(`starter` and `install --with-starter`, v0.14.0+) goes to the API, and only
+to the API of this installation, through its Caddy on this machine with the
+administrator token of the installation; the configuration of `clab` and its
+sign-ins are not used. It finds
 the installation in `--dir DIR`, else in `CADENCE_DIR`, else in the current
 directory or the nearest one above it with `VERSION` and `package.sha256`;
 `clab server install` creates it in `--dir DIR`, else `CADENCE_DIR`, else
