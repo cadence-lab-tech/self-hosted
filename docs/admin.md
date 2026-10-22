@@ -734,10 +734,16 @@ no Caddy and no volumes.
 - **The certificate of the host**: a Secret of type `kubernetes.io/tls`
   (cert-manager or yours) named in `ingress.tls.secretName`, or TLS that
   ends before the Ingress.
-- **Pod Security `baseline`** for the namespace. The API, the worker and the
-  precheck meet `restricted`; the UI does not: its image runs Caddy as root
-  on port 80 (with only `NET_BIND_SERVICE`), and a namespace that enforces
-  `restricted` refuses its pod.
+- **Pod Security `restricted`** for the namespace, from the chart 0.14.0:
+  every pod meets it — the API, the worker, the precheck and the UI. The
+  frontend image runs Caddy as uid 65532, and the chart has it listen on
+  port 8080 only; its one added capability is `NET_BIND_SERVICE`, the one
+  `restricted` allows (the Caddy binary carries it as a file capability).
+  The chart 0.13.0 needs `baseline`: its UI image runs as root.
+- **The images of the version of the chart.** The chart runs the UI as
+  uid 65532 on port 8080, which the frontend image does from v0.14.0;
+  `image.tag` pointing at an older frontend image (root, port 80 only)
+  leaves the UI pod not ready.
 
 ### The chart
 
@@ -801,7 +807,7 @@ that no value is on a command line:
 
 ```bash
 kubectl create namespace cadence
-kubectl label namespace cadence pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/warn=restricted
+kubectl label namespace cadence pod-security.kubernetes.io/enforce=restricted
 openssl rand -hex 32 | sed 's/^/sdlc_/' >admin-token
 kubectl -n cadence create secret generic cadence \
   --from-file=admin-token --from-file=db-password --from-file=db-ca.pem \
@@ -918,6 +924,16 @@ helm upgrade cadence oci://ghcr.io/cadence-lab-tech/charts/cadence --version 0.1
   the schema must not run on it.
 - Changing only the values (`--set config.shared.SDLC_LOG_LEVEL=debug`,
   the replicas) on the same version recreates the pods; the data stays.
+- **From the chart 0.13.0 to 0.14.0 or newer, Pod Security.** A namespace
+  of the chart 0.13.0 enforces `baseline`. Upgrade first, then tighten the
+  namespace: the pods of 0.13.0 would be refused under `restricted` as soon
+  as they restart, those of the new chart meet it. No warning from the dry
+  run means every running pod meets it:
+
+  ```bash
+  kubectl label --dry-run=server --overwrite namespace cadence pod-security.kubernetes.io/enforce=restricted
+  kubectl label --overwrite namespace cadence pod-security.kubernetes.io/enforce=restricted
+  ```
 
 ### Backups
 
@@ -951,8 +967,7 @@ their headers, a secret, by `secrets.keys.OTEL_EXPORTER_OTLP_HEADERS`.
 
 The chart brings no PostgreSQL, no autoscaling (`api.replicas` and
 `worker.replicas` are numbers), no PodDisruptionBudget, NetworkPolicy,
-ServiceMonitor or PrometheusRule, and no backups of its own. The UI needs
-Pod Security `baseline`.
+ServiceMonitor or PrometheusRule, and no backups of its own.
 
 ## First sign-in with the administrator token
 
@@ -2223,6 +2238,13 @@ vulnerability, response times, disclosure and CVE.
 - **After a fix.** Upgrade to the fixing release as described in
   [Upgrades and rollback](#upgrades-and-rollback); the advisory names the
   affected and fixed versions and any step beyond the upgrade.
+- **Users of the containers.** The API and the worker run as uid 65532;
+  the UI too, from v0.14.0 (before, its image ran as root). The entry
+  point `caddy` runs the same frontend image as root, by `user: "0:0"` in
+  `docker-compose.yml`: it binds 80 and 443, and the certificates in its
+  volume `caddy_data` belong to root. In Kubernetes every pod of the chart
+  runs as uid 65532 under Pod Security `restricted`
+  ([Kubernetes (Helm)](#kubernetes-helm)).
 - **Is it ours?** Releases from v0.9.0 are signed; how to check the
   package, the images, the CLI, their SBOM and provenance, and which scanner
   findings are known not to apply — [Verifying a release](#verifying-a-release).

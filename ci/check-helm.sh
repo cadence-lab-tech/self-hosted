@@ -8,7 +8,7 @@
 # Docker network of kind under names of the cluster (<cluster>-extdb,
 # <cluster>-s3stand); the secrets are Secrets of the namespace, made
 # with kubectl before the installation. The namespace enforces Pod Security
-# "baseline" and warns on "restricted".
+# "restricted" for every pod, ui included (CLAB-236).
 #
 # Scenarios: the precheck of the database refuses a database without vector
 # (helm install fails, no Deployment); the install with three replicas of the
@@ -50,8 +50,9 @@
 #     CHECK_CLUSTER=check-<name> CHECK_HTTP_PORT=<port> ci/check-helm.sh
 #
 # Needs Docker, kind, helm, kubectl, jq, curl and openssl. The images must
-# read *_FILE (v0.13.0 or newer): check.yml skips the job for an older
-# VERSION.
+# read *_FILE (v0.13.0 or newer) and the frontend image must run as uid 65532
+# on :8080 (v0.14.0 or newer, CLAB-236): check.yml skips the job for an
+# older VERSION.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -183,9 +184,9 @@ localhost:* | 127.0.0.1:*)
 esac
 
 # --- the namespace, the secrets, the values ------------------------------------------------
-info "namespace $ns (Pod Security: enforce baseline, warn restricted) and its secrets"
+info "namespace $ns (Pod Security: enforce, warn and audit restricted) and its secrets"
 kubectl create namespace "$ns" >/dev/null
-kubectl label namespace "$ns" pod-security.kubernetes.io/enforce=baseline \
+kubectl label namespace "$ns" pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/audit=restricted >/dev/null
 admin_token="sdlc_$(openssl rand -hex 24)"
 sec="$work/secrets"
@@ -301,18 +302,27 @@ check "the worker log has no missing table" lacks "$worker_log" "does not exist"
 
 # --- Pod Security ---------------------------------------------------------------------------
 info "Pod Security"
+# The namespace enforces restricted since the install, so every pod above
+# was admitted under it; the dry run asks the API server once more about the
+# running pods: no warning means none of them violates restricted.
+check "the namespace enforces restricted" \
+  [ "$(kubectl get namespace "$ns" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')" = restricted ]
 psa="$(kubectl label --dry-run=server --overwrite namespace "$ns" pod-security.kubernetes.io/enforce=restricted 2>&1 >/dev/null || true)"
-violators="$(sed -nE 's/^Warning: ([a-z0-9-]+): .*/\1/p' <<<"$psa" | sort -u)"
-check "under restricted only the ui pod is refused ($(tr '\n' ' ' <<<"$violators"))" \
-  [ -n "$violators" -a -z "$(grep -v "^$release-ui-" <<<"$violators" || true)" ]
+check "under restricted no pod is refused ($(printf '%s' "${psa:-no warnings}" | tr '\n' ' '))" lacks "$psa" "Warning"
 spec_of() { k get pods -l "app.kubernetes.io/component=$1" -o json | jq -c '.items[0].spec'; }
-for c in api worker; do
+for c in api worker ui; do
   spec="$(spec_of "$c")"
-  check "$c: runAsNonRoot, uid 65532, read-only root, no escalation, no capabilities, RuntimeDefault" \
+  check "$c: runAsNonRoot, uid 65532, read-only root, no escalation, drop ALL, RuntimeDefault" \
     [ "$(jq -r '[.securityContext.runAsNonRoot, .securityContext.runAsUser, .securityContext.seccompProfile.type,
       ([.containers[], (.initContainers // [])[]] | map(.securityContext | "\(.readOnlyRootFilesystem) \(.allowPrivilegeEscalation) \(.capabilities.drop | join(","))") | unique | join("|"))] | join(" ")' <<<"$spec")" = \
       "true 65532 RuntimeDefault true false ALL" ]
 done
+check "api and worker add no capability, ui only NET_BIND_SERVICE" \
+  [ "$(for c in api worker ui; do spec_of "$c" | jq -r --arg c "$c" '[.containers[], (.initContainers // [])[]] | map("\($c):\(.securityContext.capabilities.add // [] | join(","))") | join(" ")'; done | tr '\n' ' ')" = \
+    "api: worker: worker: ui:NET_BIND_SERVICE " ]
+# shellcheck disable=SC2016 # the program of awk
+ui_uid="$(k exec "deploy/$release-ui" -- awk '/^Uid:/ { print $2 }' /proc/1/status 2>/dev/null || true)"
+check "the Caddy of ui runs as uid 65532 ($ui_uid)" [ "$ui_uid" = 65532 ]
 
 # --- through the Ingress --------------------------------------------------------------------
 info "the Ingress"

@@ -1,8 +1,10 @@
 {{- include "cadence.sections" . -}}
 # The UI: static files served by Caddy inside the frontend image. The image
-# runs as root and listens on :80, so the pod meets Pod Security "baseline",
-# not "restricted" (docs/admin.md, "Kubernetes (Helm)"); everything else is
-# taken away from it.
+# runs as uid 65532 and the pod meets Pod Security "restricted", as api and
+# worker do (docs/admin.md, "Kubernetes (Helm)"): Caddy listens on :8080
+# only (CADENCE_UI_ADDRESS), the Service keeps port 80. It needs the frontend
+# image of the same version (v0.14.0 or newer): an older one is root, on
+# :80 and never answers on :8080.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,13 +35,20 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
-        seccompProfile:
-          type: RuntimeDefault
+        {{- include "cadence.podSecurityContext" . | nindent 8 }}
       containers:
         - name: ui
           image: {{ include "cadence.image" (list . "frontend") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The Caddy binary of the image carries the file capability
+          # cap_net_bind_service (:80 without root); with the capability
+          # missing from the bounding set its exec fails with EPERM.
+          # NET_BIND_SERVICE is the one capability "restricted" lets a
+          # container add.
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -47,9 +56,12 @@ spec:
               add: [NET_BIND_SERVICE]
             seccompProfile:
               type: RuntimeDefault
+          env:
+            - name: CADENCE_UI_ADDRESS
+              value: ":8080"
           ports:
             - name: http
-              containerPort: 80
+              containerPort: 8080
           readinessProbe:
             httpGet:
               path: /
@@ -64,7 +76,7 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          # Caddy keeps its state under /data and /config.
+          # Caddy keeps its state under /data and /config (fsGroup 65532).
           volumeMounts:
             - name: data
               mountPath: /data
