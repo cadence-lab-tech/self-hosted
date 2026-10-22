@@ -10,6 +10,7 @@
 #   ./install.sh --mode proxy --http-addr 127.0.0.1:8080 --yes
 #   ./install.sh --name cadence-stage --mode proxy --http-addr 127.0.0.1:8081
 #   ./install.sh --external-db URL --external-db-ca FILE --yes
+#   ./install.sh --mode proxy --team acme --with-starter --project ACME --yes
 #
 # A wrapper: it runs clab server install of the clab in bin/
 # of this package - bin/clab-<os>-<arch> of this machine - on this directory,
