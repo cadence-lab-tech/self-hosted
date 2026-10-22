@@ -372,7 +372,13 @@ else
   for f in README.md docs/admin.md; do
     while IFS=: read -r line command; do
       sub="$(awk '{print $3}' <<<"$command")"
-      if ! sub_help="$(clab_of "$clab_server" server "$sub" --help 2>/dev/null)"; then
+      # Two levels: clab server images list|save|load has a help of each.
+      words=("$sub")
+      second="$(awk '{print $4}' <<<"$command")"
+      if [ "$sub" = images ] && [[ "$second" =~ ^(list|save|load)$ ]]; then
+        words+=("$second")
+      fi
+      if ! sub_help="$(clab_of "$clab_server" server "${words[@]}" --help 2>/dev/null)"; then
         if [ -z "${CLAB_BIN:-}" ] && ! grep -qE "^  $sub " <<<"$server_help"; then
           info "skipped $f:$line: clab $version has no 'clab server $sub'; CLAB_BIN=<clab with it> checks it"
         else
@@ -384,9 +390,9 @@ else
       for flag in $(grep -oE -- ' -{1,2}[a-z][a-z-]*' <<<"$command" | tr -d ' ' || true); do
         documented=$((documented + 1))
         if grep -qxF -- "$flag" <<<"$sub_flags"; then
-          pass "$f:$line: clab server $sub takes $flag"
+          pass "$f:$line: clab server ${words[*]} takes $flag"
         else
-          fail "$f:$line: clab server $sub has no flag $flag"
+          fail "$f:$line: clab server ${words[*]} has no flag $flag"
         fi
       done
     done < <(grep -noE -- 'clab server [a-z]+[^`#]*' "$f" || true)

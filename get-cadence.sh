@@ -30,7 +30,10 @@
 #                         a mirror or a directory (file:///path) with the
 #                         layout download/vX.Y.Z/<asset>, latest/download/<asset>
 #   CADENCE_VERIFY        auto (default), require or off: the signatures of
-#                         the release (docs/admin.md, "Verifying a release")
+#                         the release (docs/admin.md, "Verifying a release");
+#                         in a closed network they are verified with
+#                         download/vX.Y.Z/trusted_root.json of the mirror
+#                         (docs/admin.md, "Air-gapped installation")
 #
 # The checksum protects against a broken or altered download, not against a
 # release replaced at its source; the signature does. With cosign 3.x in
@@ -101,6 +104,8 @@ FIRST_SIGNED=v0.9.0
 ISSUER=https://token.actions.githubusercontent.com
 PACKAGE_IDENTITY=https://github.com/cadence-lab-tech/self-hosted/.github/workflows/release.yml@refs/heads/main
 BUNDLE=checksums.txt.sigstore.json
+TRUSTED_ROOT=trusted_root.json
+SIGSTORE_TUF=https://tuf-repo-cdn.sigstore.dev/
 NOTHING="Nothing was installed."
 
 # verify_init: CADENCE_VERIFY and cosign, before anything is downloaded.
@@ -156,6 +161,16 @@ verify_package() {
   Copy $BUNDLE of the release to the mirror, or set CADENCE_VERIFY=off. $NOTHING"
   if ! out="$(cosign verify-blob --bundle "$3/$BUNDLE" --certificate-identity "$PACKAGE_IDENTITY" \
     --certificate-oidc-issuer "$ISSUER" "$3/checksums.txt" 2>&1)"; then
+    # A closed network: Sigstore does not answer, and the mirror of the
+    # releases carries trusted_root.json of Sigstore (clab server images
+    # load puts it there) - verify offline with it, as clab server does.
+    if ! curl -sS -m 15 -o /dev/null "$SIGSTORE_TUF" 2>/dev/null &&
+      fetch "$2/$TRUSTED_ROOT" "$3/$TRUSTED_ROOT" 2>/dev/null &&
+      out="$(cosign verify-blob --bundle "$3/$BUNDLE" --certificate-identity "$PACKAGE_IDENTITY" \
+        --certificate-oidc-issuer "$ISSUER" --trusted-root "$3/$TRUSTED_ROOT" "$3/checksums.txt" 2>&1)"; then
+      ok "the signature of checksums.txt of $1 verified offline with $TRUSTED_ROOT of the mirror: signed by $PACKAGE_IDENTITY"
+      return 0
+    fi
     printf '%s\n' "$out" | tail -n 5 >&2
     die "the signature of checksums.txt of $1 did not verify for $PACKAGE_IDENTITY: the release is altered or not ours.
   Do not use it and report it privately (SECURITY.md). $NOTHING"

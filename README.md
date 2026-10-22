@@ -98,9 +98,15 @@ images by digest. With [cosign](https://docs.sigstore.dev/cosign/system_config/i
 3.x on the machine the installer, `./upgrade.sh` and `clab server` verify
 the signatures of the package and of both images before they change
 anything; `CADENCE_VERIFY` says what they do without it (`auto` warns,
-`require` refuses, `off` skips the check — for a closed network). The
+`require` refuses, `off` skips the check). The
 commands that check all of it by hand are in
 [docs/admin.md](docs/admin.md#verifying-a-release).
+
+A machine without internet access installs from a registry mirror of your
+network or from one archive of the version that `clab server images save`
+builds and `clab server images load` loads there, with the signatures
+verified offline:
+[docs/admin.md](docs/admin.md#air-gapped-installation).
 
 ## Requirements
 
