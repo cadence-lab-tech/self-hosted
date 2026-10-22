@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-mark-dark.svg">
+  <img src="assets/logo-mark-light.svg" alt="Cadence Lab" height="48">
+</picture>
+
 # Cadence Lab — self-hosted
 
 Cadence Lab runs a configurable software development cycle where AI agents
