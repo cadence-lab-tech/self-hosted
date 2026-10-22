@@ -2671,7 +2671,8 @@ in `/usr/local/bin/gosu`. By class:
 port that starts on every `docker compose up`, finds nothing to move once
 the data is in PostgreSQL 18 (or on a fresh installation) and exits; it
 starts PostgreSQL 17 - with no network, on a socket of its own - only for
-the move. Its image stays on the machine; `docker image rm
+the move. Its image stays on the machine, held by the exited container;
+`docker compose rm -f pg-upgrade-dump && docker image rm
 pgvector/pgvector:pg17` removes it, and the next `docker compose pull`
 brings it back.
 
