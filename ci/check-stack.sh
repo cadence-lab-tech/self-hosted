@@ -671,6 +671,26 @@ for image in backend frontend; do
   fi
 done
 
+# --- users ---------------------------------------------------------------------------
+# CLAB-236: the frontend image runs as uid 65532 from v0.14.0, ui runs as the
+# user of its image and caddy as root (user "0:0" in compose: its volumes
+# hold the certificates of existing installations, owned by root). The uid
+# is that of the process, PID 1 of the container.
+info "users"
+uid_of() { docker exec "$(docker compose ps -q "$1")" awk '/^Uid:/ { print $2 }' /proc/1/status 2>/dev/null; }
+ui_uid="$(uid_of ui)"
+ui_image_user="$(docker image inspect --format '{{.Config.User}}' "$(docker compose images -q ui)")"
+ui_image_uid="${ui_image_user%%:*}"
+check "ui runs as the user of its image (uid ${ui_uid:-?}, image user '${ui_image_user}')" [ -n "$ui_uid" -a "$ui_uid" = "${ui_image_uid:-0}" ]
+check "caddy runs as root (uid $(uid_of caddy))" [ "$(uid_of caddy)" = 0 ]
+if version_lt "$version" v0.14.0; then
+  info "VERSION is $version: the frontend image runs as root before v0.14.0, the non-root ui is not checked"
+else
+  check "ui is no root: uid 65532 ($ui_uid)" [ "$ui_uid" = 65532 ]
+fi
+check "no permission denied in the logs of ui and caddy" \
+  lacks "$(docker compose logs ui caddy 2>&1 | tr '[:upper:]' '[:lower:]')" "permission denied"
+
 # --- proxy mode and routing ----------------------------------------------------------
 info "proxy mode"
 check "/readyz answers 200" [ "$(http_code "$base/readyz")" = 200 ]

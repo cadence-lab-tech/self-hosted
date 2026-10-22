@@ -219,7 +219,9 @@ services:
       - blobs:/blobs
       - ./secrets:/secrets:ro
 
-  # The UI: static files served by Caddy inside the image.
+  # The UI: static files served by Caddy inside the image, as the user of
+  # the image (uid 65532 from v0.14.0), on :80 and :8080; the Caddyfile goes
+  # to ui:80.
   ui:
     <<: *image-frontend
     restart: unless-stopped
@@ -231,6 +233,10 @@ services:
   caddy:
     <<: *image-frontend
     restart: unless-stopped
+    # The frontend image runs as uid 65532 (from v0.14.0); the entry point
+    # stays root: the certificates and ACME keys in caddy_data of existing
+    # installations belong to root, and it binds 80 and 443.
+    user: "0:0"
     environment:
       CADENCE_MODE: ${CADENCE_MODE:-tls}
       SDLC_DOMAIN: ${SDLC_DOMAIN:-}

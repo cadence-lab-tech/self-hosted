@@ -566,6 +566,11 @@ for mode in tls proxy; do
   check "[$mode] caddy runs the frontend image of ui" \
     [ "$(jq -r '.services.caddy.image' <<<"$config")" = "ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:$version@$frontend_pin" ]
   check "[$mode] no service runs caddy:2-alpine" lacks "$(jq -r '.services[].image' <<<"$config")" "caddy:2-alpine"
+  # The frontend image runs as uid 65532 (CLAB-236); caddy stays root: its
+  # volumes hold the certificates of existing installations, owned by root.
+  # ui runs as the user of its image.
+  check "[$mode] caddy runs as root (user 0:0), ui as the user of its image" \
+    [ "$(jq -r '"\(.services.caddy.user) \(.services.ui.user)"' <<<"$config")" = "0:0 null" ]
   # The images are multi-arch since v0.5.3: a platform pin would put arm64
   # machines back under emulation.
   check "[$mode] compose pins no platform" lacks "$config" '"platform"'
@@ -1085,11 +1090,30 @@ check "the example: secrets.keys are key names" \
 check "the example has no other field of a password, token or secret key" \
   [ -z "$(jq -r 'paths(scalars) | map(tostring) | join(".") | select(test("password|token|secret"; "i")) | select(startswith("secrets.") or . == "ingress.tls.secretName" | not)' <<<"$example_values_json")" ]
 
-# Pod Security: api, worker, their init container and the hook - restricted.
-sc="$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | select(.metadata.name != "cadence-ui") | .spec.template.spec as $p |
+# Pod Security: every pod - restricted, ui included since CLAB-236 (the
+# frontend image runs as uid 65532 from v0.14.0).
+sc="$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | .spec.template.spec as $p |
   ($p.containers + ($p.initContainers // []))[] | "\($p.securityContext.runAsNonRoot) \($p.securityContext.runAsUser) \(.securityContext.runAsNonRoot) \(.securityContext.runAsUser) \(.securityContext.readOnlyRootFilesystem) \(.securityContext.allowPrivilegeEscalation) \(.securityContext.capabilities.drop | join(",")) \(.securityContext.seccompProfile.type)"] | unique | join("|")' <<<"$min_json")"
-check "api, worker, wait-for-api and dbcheck: non-root 65532, read-only root, no escalation, drop ALL, RuntimeDefault" \
+check "api, worker, wait-for-api, dbcheck and ui: non-root 65532, read-only root, no escalation, drop ALL, RuntimeDefault" \
   [ "$sc" = "true 65532 true 65532 true false ALL RuntimeDefault" ]
+check "every pod has seccomp RuntimeDefault and fsGroup 65532" \
+  [ "$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | .spec.template.spec.securityContext | "\(.seccompProfile.type) \(.fsGroup)"] | unique | join("|")' <<<"$min_json")" = "RuntimeDefault 65532" ]
+# The one capability restricted lets a container add: NET_BIND_SERVICE, and
+# only ui has it (the file capability of its Caddy binary needs it in the
+# bounding set, or exec fails).
+check "added capabilities: NET_BIND_SERVICE of ui and nothing else" \
+  [ "$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | .metadata.name as $n | .spec.template.spec as $p |
+    ($p.containers + ($p.initContainers // []))[] | (.securityContext.capabilities.add // [])[] | "\($n):\(.)"] | join(",")' <<<"$min_json")" = "cadence-ui:NET_BIND_SERVICE" ]
+ui_spec="$(jq -c '.[] | select(.kind == "Deployment" and .metadata.name == "cadence-ui") | .spec.template.spec' <<<"$min_json")"
+check "ui: Caddy on :8080 only (CADENCE_UI_ADDRESS), the port http is 8080" \
+  [ "$(jq -r '.containers[0] | "\([.env[] | select(.name == "CADENCE_UI_ADDRESS") | .value] | join(",")) \([.ports[] | "\(.name)=\(.containerPort)"] | join(","))"' <<<"$ui_spec")" = ":8080 http=8080" ]
+check "ui: readiness and liveness on the port http" \
+  [ "$(jq -r '.containers[0] | "\(.readinessProbe.httpGet.port) \(.livenessProbe.httpGet.port)"' <<<"$ui_spec")" = "http http" ]
+check "ui: emptyDir on /data and /config" \
+  [ "$(jq -r '. as $s | [.containers[0].volumeMounts[] | .name as $v | "\(.mountPath):\([$s.volumes[] | select(.name == $v) | has("emptyDir")] | first)"] | join(",")' <<<"$ui_spec")" = "/data:true,/config:true" ]
+check "Service cadence-ui: port 80 to the port http" \
+  [ "$(jq -r '.[] | select(.kind == "Service" and .metadata.name == "cadence-ui") | [.spec.ports[] | "\(.port)->\(.targetPort)"] | join(",")' <<<"$min_json")" = "80->http" ]
+check "templates/ui.yaml no longer says the image runs as root" lacks "$(cat charts/cadence/templates/ui.yaml)" "runs as root"
 check "every pod mounts no service account token" \
   [ "$(jq -r '[.[] | .spec.template.spec // empty | .automountServiceAccountToken] | unique | join(",")' <<<"$min_json")" = false ]
 check "api and worker are Recreate" \
@@ -1114,6 +1138,10 @@ while read -r key; do
   check "docs/admin.md names $key: a key of values.yaml" grep -qxF -- "$key" <<<"$value_paths"
 done < <(grep -oE '`(image|imagePullSecrets|ingress|database|blobs|secrets|config|extraEnv|metrics|api|worker|ui|dbcheck|serviceAccount)(\.[A-Za-z0-9_]+)+`' <<<"$k8s_doc" | tr -d '`' | sort -u)
 check "docs/admin.md names keys of values.yaml" [ "$documented" -gt 0 ]
+# CLAB-236: the namespace enforces restricted, the UI included.
+check "docs/admin.md labels the namespace enforce=restricted" contains "$k8s_doc" "kubectl label namespace cadence pod-security.kubernetes.io/enforce=restricted"
+check "docs/admin.md no longer labels it enforce=baseline" lacks "$k8s_doc" "enforce=baseline"
+check "docs/admin.md no longer says the UI needs baseline" lacks "$k8s_doc" "The UI needs"
 check "docs/admin.md no longer says the chart is coming" lacks "$(cat docs/admin.md)" "coming in a later"
 check "README.md names the Helm chart" grep -qF "charts/cadence" README.md
 
