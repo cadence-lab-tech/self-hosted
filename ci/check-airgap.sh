@@ -78,7 +78,7 @@ arm64 | aarch64) arch=arm64 ;;
 *) die "Docker of this machine runs $(docker version --format '{{.Server.Arch}}'): the check knows amd64 and arm64" ;;
 esac
 
-work="$(mktemp -d)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/check-airgap.XXXXXX")"
 c="$name-c"
 o="$name-o"
 cleanup() {
@@ -218,7 +218,7 @@ if [ -n "$from" ]; then
   info "upgrade $from -> $version without network"
   out="$(on "$c" "cd /share && clab server images load cadence-$version-airgap.tar" 2>&1)" ||
     { printf '%s\n' "$out" | tail -n 20 >&2; die "clab server images load of $version failed"; }
-  out="$(on "$c" "cd /root/cadence && CADENCE_VERIFY=require clab server upgrade --yes $version" "$mirror" 2>&1)" ||
+  out="$(on "$c" "cd /root/cadence && CADENCE_VERIFY=require clab server upgrade $version" "$mirror" 2>&1)" ||
     { printf '%s\n' "$out" | tail -n 30 >&2; die "the upgrade to $version without network failed"; }
   check "upgrade: the version is $version" [ "$(docker exec "$c" cat /root/cadence/VERSION)" = "$version" ]
   check "upgrade: /readyz answers 200" docker exec "$c" wget -q -O /dev/null http://127.0.0.1:8080/readyz
