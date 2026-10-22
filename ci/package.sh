@@ -132,7 +132,7 @@ chmod 644 "$stage/VERSION"
 # against checksums.txt of the release (and its signature with
 # --verify-clab).
 clab_from_tap() {
-  local v="$1" into="$2" base cache p archive want have
+  local v="$1" into="$2" base cache p archive want have out
   base="$(tap_releases_url)/download/$v"
   cache="${CADENCE_CLAB_CACHE:-$(pwd)/.cache/clab}/$v"
   mkdir -p "$cache"
@@ -143,9 +143,11 @@ clab_from_tap() {
     command -v cosign >/dev/null 2>&1 || die "--verify-clab needs cosign 3.x in PATH"
     fetch "$base/$VERIFY_BUNDLE" "$cache/$VERIFY_BUNDLE" ||
       die "the release $v of the tap has no $VERIFY_BUNDLE: the signature of its checksums.txt cannot be verified"
-    cosign verify-blob --bundle "$cache/$VERIFY_BUNDLE" --certificate-identity "$(verify_identity sdlc-pipeline-backend "$v")" \
-      --certificate-oidc-issuer "$VERIFY_ISSUER" "$cache/checksums.txt" >/dev/null 2>&1 ||
+    if ! out="$(cosign verify-blob --bundle "$cache/$VERIFY_BUNDLE" --certificate-identity "$(verify_identity sdlc-pipeline-backend "$v")" \
+      --certificate-oidc-issuer "$VERIFY_ISSUER" "$cache/checksums.txt" 2>&1)"; then
+      printf '%s\n' "$out" | tail -n 5 >&2
       die "the signature of checksums.txt of clab $v did not verify for $(verify_identity sdlc-pipeline-backend "$v"): no package is built"
+    fi
     ok "the signature of checksums.txt of clab $v verified: signed by $(verify_identity sdlc-pipeline-backend "$v")"
   fi
   for p in $CLAB_PLATFORMS; do
