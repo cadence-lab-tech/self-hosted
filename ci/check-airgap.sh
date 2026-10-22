@@ -177,6 +177,7 @@ out="$(on "$c" "cd /share && clab server images load cadence-$first-airgap.tar" 
   { printf '%s\n' "$out" | tail -n 20 >&2; die "clab server images load of $first failed"; }
 check "load $first verifies checksums.txt offline" contains "$out" "verified offline with trusted_root.json of the archive"
 check "load $first verifies sdlc-pipeline-backend offline" contains "$out" "sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/$first (verified offline"
+check "load $first verifies the OpenVEX of sdlc-pipeline-backend offline" contains "$out" "the OpenVEX of 127.0.0.1:"
 check "load $first leaves no temporary registry" [ -z "$(docker exec "$c" docker ps -aq --filter label=cadence.images-load)" ]
 for img in $(on "$c" "tar -xOf /share/cadence-$first-airgap.tar cadence-images.json" | grep -o '"ref": "[^"]*"' | cut -d'"' -f4); do
   check "the compose reference $img is in Docker" docker exec "$c" docker image inspect "$img"

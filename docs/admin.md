@@ -2096,8 +2096,13 @@ checksum of the package and the signature of `checksums.txt` with the
 `trusted_root.json` of the archive, then the signatures of both images in a
 temporary registry on `127.0.0.1` that it runs from the archive and removes
 in any outcome, `Ctrl-C` included. The digests it checks are the pins of the
-signed package, not of the archive. A signature that does not verify stops
-it: `✗ … did not verify …`, nothing loaded. Then:
+signed package, not of the archive. Every Sigstore bundle attached to our
+images must verify for the identity of the release — a bundle altered or
+slipped in next to a genuine one is not carried on — and the OpenVEX of
+both images is verified as an attestation too (`cosign verify-attestation
+--offline --type openvex`), so a scanner that reads it from your registry
+reads ours. A signature or an OpenVEX that does not verify stops it:
+`✗ … did not verify …`, nothing loaded. Then:
 
 - **without `--registry`** the images are pulled from the temporary registry
   into Docker of this machine and tagged as the compose files name them;
@@ -2144,8 +2149,11 @@ by digest; without a registry it takes an image that is in Docker of this
 machine exactly by the reference of the compose files, pin included, as
 verified — `load` verified its signature, and its digest is the pin of the
 signed package: `✓ … verified when loaded: same digest as the pin of the
-signed package`. `CADENCE_VERIFY=require` passes either way. The images that
-are already on the machine are not pulled; `.env` keeps `CADENCE_REGISTRY`.
+signed package`. `CADENCE_VERIFY=require` passes either way. Our images
+that are already on the machine by their pin are not pulled; the others
+(`pgvector`) are pulled whenever their registry answers, as on a machine with
+internet access, and stay as they are when it does not (one `!` line);
+`.env` keeps `CADENCE_REGISTRY`.
 
 `./backup.sh`, `./restore.sh`, `clab server backup verify` and
 `clab server status` need no network after `load`, cron included.
