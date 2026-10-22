@@ -110,16 +110,52 @@ x-shared-env: &shared-env
   SDLC_METRICS_ADDR: ${SDLC_METRICS_ADDR-:9090}
 
 services:
-  postgres:
-    # The schema needs pgvector.
+  # PostgreSQL 18 on Debian 13. An installation made by an earlier release,
+  # on PostgreSQL 17, keeps its data in the volume pgdata;
+  # the two one-off services below move it into the volume postgres on the
+  # first `docker compose up` of this version - whichever script or clab runs
+  # the upgrade - and postgres starts when they are done
+  # (postgres/major-upgrade.sh; docs/admin.md, "PostgreSQL 18"). On a fresh
+  # installation, and once the data is moved, they exit at once doing
+  # nothing. The volume pgdata is only read and stays for a rollback until
+  # you remove it.
+  pg-upgrade-dump:
+    # PostgreSQL 17 - the image that wrote the old volume - dumps it.
     image: pgvector/pgvector:pg17
+    entrypoint: ["bash", "/cadence/major-upgrade.sh", "dump"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sdlc}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - postgres:/target
+      - ./postgres/major-upgrade.sh:/cadence/major-upgrade.sh:ro
+
+  pg-upgrade-load:
+    # PostgreSQL 18 loads the dump into a new cluster in the volume postgres.
+    image: pgvector/pgvector:pg18-trixie
+    entrypoint: ["bash", "/cadence/major-upgrade.sh", "load"]
+    depends_on:
+      pg-upgrade-dump:
+        condition: service_completed_successfully
+    volumes:
+      - postgres:/var/lib/postgresql
+      - ./postgres/major-upgrade.sh:/cadence/major-upgrade.sh:ro
+
+  postgres:
+    # The schema needs pgvector. The data lives in /var/lib/postgresql/18/docker
+    # of the volume postgres - the layout of the images of PostgreSQL 18 and
+    # newer, mounted at /var/lib/postgresql.
+    image: pgvector/pgvector:pg18-trixie
     restart: unless-stopped
+    depends_on:
+      pg-upgrade-load:
+        condition: service_completed_successfully
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-sdlc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       POSTGRES_DB: ${POSTGRES_DB:-sdlc}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -251,6 +287,10 @@ services:
     depends_on: [api, ui]
 
 volumes:
+  # The database: PostgreSQL 18 and newer.
+  postgres:
+  # The database of the earlier releases, on PostgreSQL 17: read once by
+  # pg-upgrade-dump, kept for a rollback. Empty on a fresh installation.
   pgdata:
   # Artifact content when SDLC_BLOB_S3_BUCKET is empty; shared by the API and
   # the worker.

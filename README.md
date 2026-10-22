@@ -111,7 +111,7 @@ commands that check all of it by hand are in
 | RAM | 4 GB | 8 GB |
 | Disk | 20 GB SSD | 50 GB SSD; code indexes and backups grow with repositories |
 | Software | Docker Engine 24+ with the compose v2 plugin; curl and tar for the one-line installer | [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x: the installer and the upgrades [verify the release](docs/admin.md#verifying-a-release) with it (recommended; `CADENCE_VERIFY=require` makes it required) |
-| Database | none: the stack runs PostgreSQL 17 with pgvector | your own PostgreSQL 15-18 with pgvector 0.5+ and pgcrypto, and Docker Compose 2.20+ ([external PostgreSQL](docs/admin.md#external-postgresql)) |
+| Database | none: the stack runs PostgreSQL 18 with pgvector (an installation on PostgreSQL 17 [moves](docs/admin.md#postgresql-18) on its upgrade) | your own PostgreSQL 15-18 with pgvector 0.5+ and pgcrypto, and Docker Compose 2.20+ ([external PostgreSQL](docs/admin.md#external-postgresql)) |
 | Network | `tls`: ports 80 and 443 from the internet; `proxy`: one port for your proxy | outbound HTTPS to `ghcr.io`, GitHub and your embeddings provider, if any |
 
 GitHub has to reach `https://<host>/webhooks/github` if you connect a GitHub
@@ -144,7 +144,7 @@ or `/docs` in the UI). When done,
 | | |
 |---|---|
 | `VERSION` | the version of Cadence Lab this package runs; both images use it |
-| `docker-compose.yml` | Postgres with pgvector, the API, the worker, the UI and Caddy; only Caddy publishes ports, and it runs the frontend image of the release (our Caddy, built from source), so the entry point is pinned and signed with the release; the API and the worker serve Prometheus metrics inside the network ([monitoring](docs/admin.md#monitoring)) |
+| `docker-compose.yml` | PostgreSQL 18 with pgvector, the API, the worker, the UI and Caddy; only Caddy publishes ports, and it runs the frontend image of the release (our Caddy, built from source), so the entry point is pinned and signed with the release; the API and the worker serve Prometheus metrics inside the network ([monitoring](docs/admin.md#monitoring)) |
 | `compose.tls.yml`, `compose.proxy.yml` | the published ports of each mode, picked by `COMPOSE_FILE` in `.env` |
 | `compose.external-db.yml` | your own PostgreSQL instead of the container (`CADENCE_DB=external`): no `postgres`, the backup client `db-client` |
 | `compose.override.yml` | not in the package: your local compose changes, created by `install.sh` and listed in `COMPOSE_FILE` |
@@ -153,6 +153,7 @@ or `/docs` in the UI). When done,
 | `install.sh` | first installation: checks, secrets, `.env`, start |
 | `upgrade.sh` | backup, package files of the new release, new images, start, readiness check |
 | `backup.sh`, `restore.sh` | database dump and the artifact volume, the bundled or an external database, and an off-machine copy in an S3 bucket; `backup.sh verify` checks that a backup restores; restore with a version check |
+| `postgres/major-upgrade.sh` | not run by hand: `docker-compose.yml` runs it before `postgres` to move the data of PostgreSQL 17 into PostgreSQL 18 on the first upgrade from a release on 17, and it does nothing after that ([PostgreSQL 18](docs/admin.md#postgresql-18)) |
 | `bin/clab-<os>-<arch>` | `clab` of the version of the package for Linux and macOS, amd64 and arm64: the four scripts above are short `sh` wrappers that run its `clab server install`, `upgrade`, `backup` and `restore` on their directory ([clab in the package](docs/admin.md#clab-in-the-package)); they make the package about 12 MB |
 | `docs/admin.md` | the administrator guide |
 | `SECURITY.md` | the security policy: reporting a vulnerability, response times, supported versions |

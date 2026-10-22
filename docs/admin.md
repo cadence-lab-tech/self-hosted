@@ -222,7 +222,7 @@ changed.
 
 **Installation name.** `--name` names this installation *on the machine*: it
 is the Docker Compose project of the installation — the prefix of its
-containers, volumes and network (`cadence-postgres-1`, `cadence_pgdata`).
+containers, volumes and network (`cadence-postgres-1`, `cadence_postgres`).
 It is not related to projects inside Cadence Lab: teams, projects and tasks
 are created in the UI, as many as you need, inside one installation. Most
 machines run one installation and keep the default `cadence`. `install.sh`
@@ -320,7 +320,7 @@ Sign-in redirects are built from the address in the browser, so nothing in
 ## External PostgreSQL
 
 By default the data lives in the `postgres` container of the stack and its
-`pgdata` volume. A company that runs its databases itself — Amazon RDS,
+`postgres` volume. A company that runs its databases itself — Amazon RDS,
 Google Cloud SQL, Azure Database for PostgreSQL, its own cluster — can keep
 the data there instead. The stack then has no `postgres` container; the API
 applies the schema to your database on start, as it does to its own.
@@ -370,7 +370,7 @@ The URL can live in a file of `secrets/` instead of `.env`
 ### Server, extensions and the role
 
 - **PostgreSQL 15, 16, 17 or 18.** The backup client is PostgreSQL 18
-  (`pgvector/pgvector:pg18`), whose `pg_dump` reads all of them.
+  (`pgvector/pgvector:pg18-trixie`), whose `pg_dump` reads all of them.
 - **Extensions `vector` (pgvector 0.5.0 or newer) and `pgcrypto`.** On a
   managed server only an administrative role may create `vector`; do it once,
   connected to the database of Cadence Lab:
@@ -504,8 +504,10 @@ downtime of both:
    container, which `down` removed):
    `docker compose create && ./restore.sh --yes backups/cadence-<version>-<date>.sql.gz`
    — it starts the stack on the external database.
-6. When everything is in place, remove the old volume:
-   `docker volume rm <name>_pgdata`.
+6. When everything is in place, remove the old volumes:
+   `docker volume rm <name>_postgres <name>_pgdata` (`<name>_pgdata` holds
+   the data of PostgreSQL 17 on an installation moved from it, see
+   [PostgreSQL 18](#postgresql-18), and is empty otherwise).
 
 A dump of a PostgreSQL 17 server names `transaction_timeout`, which servers
 15 and 16 do not know; the restore drops that line, so moving to an older
@@ -1630,7 +1632,7 @@ this version, counts the rows and reads the blobs archive through:
 
 ```
 ▸ verifying cadence-v0.10.0-20261020-030000.sql.gz (1.2M) from s3://acme-cadence-backups/cadence/
-▸ loading it into a throwaway PostgreSQL (pgvector/pgvector:pg17); the stack keeps running
+▸ loading it into a throwaway PostgreSQL (pgvector/pgvector:pg18-trixie); the stack keeps running
 ✓ loaded in 3s
 ✓ schema 51: the schema of the images of v0.10.0
 ✓ blobs archive cadence-v0.10.0-20261020-030000.blobs.tar.gz: 214 files
@@ -1822,6 +1824,93 @@ Releases are published as GitHub Releases of this repository; watch it
 (Releases and Security alerts) to hear about them and about security fixes
 (see [Security](#security)).
 
+### PostgreSQL 18
+
+The bundled database is PostgreSQL 18 on Debian 13
+(`pgvector/pgvector:pg18-trixie`), its data in the volume `postgres`
+(`<name>_postgres`), mounted at `/var/lib/postgresql` as the images of
+PostgreSQL 18 and newer expect it. Earlier releases ran PostgreSQL 17 on
+Debian 12 (`pgvector/pgvector:pg17`) with the data in the volume `pgdata`.
+A new major version of PostgreSQL does not read the files of the old one,
+so the first upgrade from a release on PostgreSQL 17 moves the data, without
+a step of yours:
+
+1. `docker compose up -d` of the new version - whichever `upgrade.sh` or
+   `clab server upgrade` runs it, also the bash `upgrade.sh` of v0.13.0 -
+   starts the one-off service `pg-upgrade-dump`: PostgreSQL 17 starts on the
+   volume `pgdata` with no network, every database and role is dumped
+   (`pg_dumpall`, compressed) into the volume `postgres`, and it stops;
+2. then `pg-upgrade-load`: a new PostgreSQL 18 cluster is created next to
+   its data directory, the dump is loaded into it, and only a complete
+   cluster takes the place of the data directory; a mark of the move is
+   written last;
+3. then `postgres` starts on PostgreSQL 18, and the API and the worker on
+   it. The cluster is new on Debian 13, so there is no
+   `collation version mismatch` and nothing to `REINDEX`.
+
+The upgrade waits for the move whatever its length - `up -d` returns when it
+is done, and `CADENCE_READY_TIMEOUT` counts only after it. It takes about as
+long as a backup and a restore of the database: minutes for a few gigabytes.
+The free disk it needs is about the size of the database (the new cluster)
+plus the compressed dump, which is removed after the load; the volume
+`pgdata` stays as it was. Check before the upgrade:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres -At -c "SELECT pg_size_pretty(sum(pg_database_size(oid))) FROM pg_database"'
+df -h "$(docker info -f '{{.DockerRootDir}}')"
+```
+
+`clab server upgrade` (and `./upgrade.sh` of a release with
+[clab in the package](#clab-in-the-package)) says before the backup that
+the upgrade moves the data, with the size of the database, and refuses with
+nothing changed when the disk of the volumes has less free space than that;
+the bash `upgrade.sh` of v0.13.0 checks nothing - check by hand as above.
+What the move does is in the logs:
+
+```bash
+docker compose logs pg-upgrade-dump pg-upgrade-load
+```
+
+The settings of the old cluster that are not data: its `pg_hba.conf` is
+carried over, `postgresql.conf` and `ALTER SYSTEM` (`postgresql.auto.conf`)
+are not - the cluster starts with the settings of the image, and a setting
+of yours goes into `compose.override.yml` as `command: postgres -c …`. A
+`compose.override.yml` that mounts something at `/var/lib/postgresql/data`
+of `postgres` stops it: the images of PostgreSQL 18 refuse to start with a
+mount there. Mount it at `/var/lib/postgresql` instead.
+
+**When the move fails** - no free space, the machine stops - `docker compose
+up` fails, the upgrade prints the rollback, and `postgres` does not start on
+a half-loaded cluster: without the mark the move is not done, and the next
+`docker compose up -d` (or `./upgrade.sh`) starts it over. The volume
+`pgdata` is not changed. Free the space and upgrade again, or run the
+rollback as printed.
+
+**The rollback** as the upgrade prints it - the package files of the
+previous version and `./restore.sh --yes` of its backup - starts PostgreSQL
+17 on the volume `pgdata` with the data of the backup. Upgrading again later
+moves the data again: the old cluster changed after the move, so the data
+written on the previous version since the rollback comes along, and the
+PostgreSQL 18 cluster of the earlier move is replaced (what was written on
+the new version before the rollback is gone, as with any restore of a
+backup). Without a change of the old cluster, `docker compose up -d` on the
+new version moves nothing: both services log `nothing to do` and exit.
+
+**Removing the old volume.** Once the new version runs and you will not
+roll back to a release on PostgreSQL 17, the volume `pgdata` only takes
+disk. Remove it with the stopped container that holds it, in the directory
+of the installation:
+
+```bash
+docker compose rm -f pg-upgrade-dump
+docker volume rm "$(grep '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2 | grep . || echo cadence)_pgdata"
+```
+
+The next `docker compose up -d` creates it again empty, and
+`pg-upgrade-dump` finds nothing to move. A rollback after that is a restore
+of a backup on an empty volume - the `./restore.sh` of the previous version
+creates the database and loads it as on a new machine.
+
 ### Releases and mirrors
 
 Each release `vX.Y.Z` carries assets with names that do not change:
@@ -1855,7 +1944,11 @@ re-pushes single-platform images has other digests, and the pull fails.
 Signatures are checked against `ghcr.io` by the same digest. From the
 release after v0.12.0 the `caddy` service runs the frontend image too, so
 the mirror needs no `caddy:2-alpine`; `pgvector/pgvector` still comes from
-Docker Hub (or your Docker Hub mirror).
+Docker Hub (or your Docker Hub mirror), two tags of it: `pg18-trixie` (the
+database, and the backup client of an external database) and `pg17` (the
+move from PostgreSQL 17, see [PostgreSQL 18](#postgresql-18)); the upgrade
+pulls both, and a mirror without one of them fails the pull with the stack
+untouched.
 
 A mirror of the releases must keep `checksums.txt.sigstore.json` of every
 release from v0.9.0 on: with `cosign` on the machine, a release without it
@@ -2544,43 +2637,51 @@ has its own TLS and HTTP/2, and Caddy links no C library; `curl` and
 (`http://ui/` on start, the metrics in its checks) with URLs of its own.
 They go away with the base image once Alpine ships the fixes.
 
-**Third-party images: `postgres` and `db-client`.** `pgvector/pgvector:pg17`
-(the `postgres` service) and `pgvector/pgvector:pg18` (the backup client
-`db-client` with an [external database](#external-postgresql)) are used by
-tag, as their maintainers publish them; both are Debian 12 (bookworm). On
-2026-10-21 Trivy reports in each 466 findings in Debian packages (15
-CRITICAL) and 61 in `/usr/local/bin/gosu`. By class:
+**Third-party images: `postgres`, `db-client` and the move to
+PostgreSQL 18.** `pgvector/pgvector:pg18-trixie` (the `postgres` service,
+and the backup client `db-client` with an
+[external database](#external-postgresql)) and `pgvector/pgvector:pg17`
+(`pg-upgrade-dump`, which reads the data of PostgreSQL 17 once, see
+[PostgreSQL 18](#postgresql-18)) are used by tag, as their maintainers
+publish them. `pg18-trixie` is Debian 13 (trixie), `pg17` Debian 12
+(bookworm). On 2026-10-22 Trivy reports in `pg18-trixie` 318 findings in
+Debian packages (1 CRITICAL) and in `pg17` 466 (15 CRITICAL); each has 61
+in `/usr/local/bin/gosu`. By class:
 
-| class | findings on 2026-10-21 | what it means here |
-|---|---|---|
-| fixed in Debian (`fixed`): perl, tzdata, pcre2 | 54 | the image upstream was built before the fix; `docker compose pull` (and `./upgrade.sh`, which pulls) brings a rebuilt image without a release of ours |
-| no fix in Debian (`affected`, `fix_deferred`, `will_not_fix`): glibc, util-linux, perl, libxml2, sqlite, OpenSSL, GnuTLS, Kerberos, LDAP and others | 412 | not reachable in the stack: `postgres` publishes no port, only the API and the worker connect to it, with a password over the compose network; the schema has no `xml` columns and only the `pgcrypto`, `plpgsql` and `vector` extensions; the image has no PL/Perl or PL/Python; over the network clients sign in with `scram-sha-256` (`trust` is only for connections inside the container), no GSSAPI, LDAP or certificates; sqlite is there only for `gpg`, which the database does not run |
-| `gosu` (Go 1.24.6) | 61, all fixed in newer Go | `gosu` runs once, when the container starts: it drops root and executes `postgres`; no network, TLS or HTTP is on its path |
+| class | `pg18-trixie` on 2026-10-22 | `pg17` on 2026-10-22 | what it means here |
+|---|---|---|---|
+| fixed in Debian (`fixed`) | 5: xz-utils, pcre2 | 54: perl, tzdata, pcre2 | the image upstream was built before the fix; `docker compose pull` (and `./upgrade.sh`, which pulls) brings a rebuilt image without a release of ours |
+| no fix in Debian (`affected`, `fix_deferred`, `will_not_fix`): glibc, util-linux, perl, libxml2, sqlite, OpenSSL, GnuTLS, Kerberos, LDAP and others | 313 (the CRITICAL one: libxml2) | 412 | not reachable in the stack: `postgres` publishes no port, only the API and the worker connect to it, with a password over the compose network; the schema has no `xml` columns and only the `pgcrypto`, `plpgsql` and `vector` extensions; the image has no PL/Perl or PL/Python; over the network clients sign in with `scram-sha-256` (`trust` is only for connections inside the container), no GSSAPI, LDAP or certificates; sqlite is there only for `gpg`, which the database does not run |
+| `gosu` (Go 1.24.6) | 61, all fixed in newer Go | 61 | `gosu` runs once, when the container starts: it drops root and executes `postgres`; no network, TLS or HTTP is on its path |
+
+`pgvector/pgvector:pg17` runs only as `pg-upgrade-dump`: a container with no
+port that starts on every `docker compose up`, finds nothing to move once
+the data is in PostgreSQL 18 (or on a fresh installation) and exits; it
+starts PostgreSQL 17 - with no network, on a socket of its own - only for
+the move. Its image stays on the machine; `docker image rm
+pgvector/pgvector:pg17` removes it, and the next `docker compose pull`
+brings it back.
 
 With a policy that allows no image with an open CRITICAL, use your own
 managed PostgreSQL ([external PostgreSQL](#external-postgresql),
-`CADENCE_DB=external`): the stack then runs no `postgres`, and
-`pgvector/pgvector:pg18` remains only as `db-client`, a container that runs
-`pg_dump` and `psql` against your database for backups and exits.
+`CADENCE_DB=external`): the stack then runs no `postgres` and no move, and
+`pgvector/pgvector:pg18-trixie` remains only as `db-client`, a container
+that runs `pg_dump` and `psql` against your database for backups and exits.
 
-Why no VEX and why not Debian 13 now: an OpenVEX statement must be checkable
-against the image, and these images are not ours — they change with every
-rebuild upstream, hundreds of statements at a time. `pg17-trixie` (Debian
-13) reports fewer findings, but a database initialised on bookworm warns of
-a `collation version mismatch` (glibc 2.36 against 2.41) on every connection
-and needs a `REINDEX` — Cadence Lab moves to Debian 13 together with
-PostgreSQL 18, where a dump and restore rebuilds the collation anyway.
+Why no VEX: an OpenVEX statement must be checkable against the image, and
+these images are not ours — they change with every rebuild upstream,
+hundreds of statements at a time.
 
 ```bash
 # the findings of the third-party images by status
-for image in pgvector/pgvector:pg17 pgvector/pgvector:pg18; do
+for image in pgvector/pgvector:pg18-trixie pgvector/pgvector:pg17; do
   trivy image -q --scanners vuln --format json "$image" |
     jq -r --arg image "$image" '.Results[] | "\($image) \(.Type): " +
       ([(.Vulnerabilities // [])[].Status] | group_by(.) | map("\(.[0]) \(length)") | join(", "))'
 done
 
 # no PL/Perl or PL/Python in the image: 0
-docker run --rm pgvector/pgvector:pg17 sh -c 'dpkg -l | grep -cE "plperl|plpython" || true'
+docker run --rm pgvector/pgvector:pg18-trixie sh -c 'dpkg -l | grep -cE "plperl|plpython" || true'
 
 # in the directory of the installation: postgres publishes no port (null),
 # the extensions and the xml columns of the database, how clients sign in
@@ -2609,8 +2710,8 @@ How base images are kept up to date:
   own;
 - a new line of a base image (Go, Node, Caddy, Debian) is a separate change,
   never an automatic one;
-- the third-party images of the stack, `pgvector/pgvector:pg17` and
-  `pgvector/pgvector:pg18`, are used by tag: `docker compose pull` brings
+- the third-party images of the stack, `pgvector/pgvector:pg18-trixie` and
+  `pgvector/pgvector:pg17`, are used by tag: `docker compose pull` brings
   their fixes, see the classes above.
 
 ```bash

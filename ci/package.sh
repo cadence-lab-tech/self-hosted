@@ -75,6 +75,7 @@ PACKAGE_FILES=(
   VERSION
   docker-compose.yml compose.tls.yml compose.proxy.yml compose.external-db.yml compose.secrets.yml Caddyfile .env.example
   install.sh upgrade.sh backup.sh restore.sh
+  postgres/major-upgrade.sh
   README.md LICENSE SECURITY.md
 )
 # Directories that go in whole.
