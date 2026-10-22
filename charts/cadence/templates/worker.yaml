@@ -1,3 +1,4 @@
+{{- include "cadence.sections" . -}}
 {{- $metrics := ne (toString .Values.metrics.enabled) "false" }}
 # Background jobs: leases, indexing with drift detection, pull request state,
 # embeddings, the blob collector. Same image, another entrypoint; no

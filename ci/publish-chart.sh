@@ -18,6 +18,17 @@
 # registry is never pushed again: the run reports "already published" and
 # only signs it when its signature is missing - the chart already
 # published, not the one packaged here.
+#
+# The run asks the registry for the version first (helm pull) and pushes
+# only when the answer is "not found" - no such tag, or no such package yet
+# (the first release of the chart): to a client that is signed in, GHCR
+# answers 404 for both, and helm prints "<ref>:<version>: not found". Any
+# other answer - the network, 401 or 403 (a broken or missing login: GHCR
+# refuses an anonymous client even for a package that does not exist), 5xx,
+# an output it cannot read - stops the run with the output of helm, before
+# helm package and helm push: a version is never overwritten because the
+# registry could not be asked. Checked on a stand-in helm by
+# ci/check-publish-chart.sh.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -48,11 +59,25 @@ trap 'rm -rf "$out"' EXIT
 
 # digest_of OUTPUT: the digest helm printed for a push or a pull.
 digest_of() { awk '$1 == "Digest:" { print $2; exit }' <<<"$1"; }
+# not_found OUTPUT: helm pull said the version is not there, and nothing
+# else: "Error: failed to perform "FetchReference" on source:
+# <ref>:<version>: not found" (a 404 of the registry).
+not_found() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" == "Error: "*" $ref:${version#v}: not found" ]] && return 0
+  done <<<"$1"
+  return 1
+}
 
 if pulled="$(helm pull "oci://$ref" --version "${version#v}" --destination "$out" ${plain[@]+"${plain[@]}"} 2>&1)"; then
   digest="$(digest_of "$pulled")"
   ok "chart ${version#v} already published: oci://$ref@$digest"
+elif ! not_found "$pulled"; then
+  printf '%s\n' "$pulled" >&2
+  die "the registry did not say whether the chart ${version#v} is published (oci://$ref:${version#v}): not pushed - only \"not found\" lets a version go out; fix the cause (network, helm registry login, the registry) and run again"
 else
+  info "chart ${version#v} is not in oci://$ref yet"
   helm package charts/cadence --destination "$out" >/dev/null
   pkg="$out/cadence-${version#v}.tgz"
   [ -f "$pkg" ] || die "helm package wrote no $pkg"

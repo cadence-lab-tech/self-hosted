@@ -6,10 +6,11 @@
 #
 # The Versity S3 Gateway (an S3 server over a directory, Apache 2.0; MinIO
 # no longer publishes images) in the network of the installation under the
-# name s3stand, and on 127.0.0.1:PORT of the host for the checks. Its keys
-# come from its environment, and curl of the checks reads them from a file:
-# no command line of the machine carries the secret, so the check of ps
-# stays meaningful.
+# name S3_ALIAS (default s3stand; ci/check-helm.sh names it after its
+# cluster, the network kind being shared), and on 127.0.0.1:PORT of the host
+# for the checks. Its keys come from its environment, and curl of the
+# checks reads them from a file: no command line of the machine carries the
+# secret, so the check of ps stays meaningful.
 #
 #   s3_up NAME PORT NETWORK   start it, create the bucket S3_BUCKET
 #   s3_keys PREFIX            the keys under PREFIX, one per line
@@ -18,7 +19,7 @@
 
 S3_IMAGE="${S3_IMAGE:-versity/versitygw:v1.0.16}"
 S3_BUCKET=cadence-check-backups
-S3_ALIAS=s3stand
+S3_ALIAS="${S3_ALIAS:-s3stand}"
 
 s3_up() {
   local name="$1" port="$2" network="$3" i

@@ -872,7 +872,7 @@ refused() {
   local want="$1" out
   shift
   if out="$(helm_run template cadence "$chart" -f "$dist/min-values.yaml" "$@" 2>&1)"; then return 1; fi
-  grep -qF -- "$want" <<<"$out"
+  grep -qF -- "$want" <<<"$out" && ! grep -qF 'nil pointer' <<<"$out"
 }
 check "no host: refused, naming ingress.host" refused "ingress.host is required" --set ingress.host=
 check "no database: refused, naming secrets.keys.SDLC_DATABASE_URL and database.url" refused \
@@ -892,6 +892,37 @@ check "the headers of traces as a value of config.api: refused" refused "OTEL_EX
 check "the per-signal headers of traces in extraEnv: refused" refused "extraEnv: OTEL_EXPORTER_OTLP_TRACES_HEADERS is a variable of the chart or a secret" \
   --set 'extraEnv[0].name=OTEL_EXPORTER_OTLP_TRACES_HEADERS' --set 'extraEnv[0].value=x'
 check "a value fixed by the chart in config: refused" refused "SDLC_TENANCY is set by the chart" --set config.api.SDLC_TENANCY=shared
+
+# A section left null in the values (`database:` with nothing under it, or
+# --set database=null) drops its defaults: what it lacks is refused by the
+# name of the key, never a nil pointer, and what it may lack renders.
+printf 'database:\n' >"$dist/null-database.yaml"
+no_db_url=(--set secrets.keys.SDLC_DATABASE_URL=)
+check "database: null and no URL in secrets.keys: refused, naming both keys" refused \
+  "secrets.keys.SDLC_DATABASE_URL (the key of the Secret with the URL), or database.url" --set database=null "${no_db_url[@]}"
+check "...the same with database: empty in a values file" refused \
+  "secrets.keys.SDLC_DATABASE_URL (the key of the Secret with the URL), or database.url" -f "$dist/null-database.yaml" "${no_db_url[@]}"
+check "ingress: null: refused, naming ingress.host" refused "ingress.host is required" --set ingress=null
+check "blobs: null: refused, naming blobs.s3.bucket" refused "blobs.s3.bucket is required" --set blobs=null
+check "blobs.s3: null: refused, naming blobs.s3.bucket" refused "blobs.s3.bucket is required" --set blobs.s3=null
+check "secrets: null: refused, naming secrets.keys.SDLC_DATABASE_URL" refused "the database is required: secrets.keys.SDLC_DATABASE_URL" --set secrets=null
+check "secrets.keys: null: refused, naming secrets.keys.SDLC_DATABASE_URL" refused "the database is required: secrets.keys.SDLC_DATABASE_URL" --set secrets.keys=null
+check "image: null: refused, naming image.registry" refused "image.registry is required" --set image=null
+for side in backend frontend; do
+  check "image.$side: null: refused, naming image.$side.repository" refused "image.$side.repository is required" --set "image.$side=null"
+done
+# api and worker: the URL by its file, SDLC_DATABASE_URL empty; the precheck the same.
+db_from_secret() {
+  local json
+  json="$(render_json -f "$dist/min-values.yaml" "$@")" || return 1
+  [ "$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | .spec.template.spec.containers[0].env // [] | map({(.name): .value}) | add // {}
+    | select(has("SDLC_DATABASE_URL")) | "\(.SDLC_DATABASE_URL)|\(.SDLC_DATABASE_URL_FILE)"] | unique | join(" ")' <<<"$json")" = "|/secrets/cadence/db-url" ]
+}
+check "database: null with the URL in secrets.keys.SDLC_DATABASE_URL renders: SDLC_DATABASE_URL_FILE, SDLC_DATABASE_URL empty" \
+  db_from_secret --set database=null
+check "...the same with database: empty in a values file" db_from_secret -f "$dist/null-database.yaml"
+check "ingress.tls: null renders, the Ingress without TLS" \
+  [ "$(render_json -f "$dist/min-values.yaml" --set ingress.tls=null | jq -r '.[] | select(.kind == "Ingress") | "\(.spec.rules[0].host) \(.spec.tls)"')" = "cadence.example.com null" ]
 
 # What the chart installs: three Deployments, their Services, one Ingress,
 # the hook of the precheck; no database, no Caddy, no volume claims.

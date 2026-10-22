@@ -15,7 +15,8 @@
 #   EXT_DB_NETWORK  set: the container in that Docker network under the name
 #                   EXT_DB_ALIAS (default extdb), nothing published - for
 #                   the pods of a kind cluster (ci/check-helm.sh, the network
-#                   "kind")
+#                   "kind" that every cluster shares: it gives EXT_DB_ALIAS
+#                   of its cluster)
 #
 # The superuser works on it with docker exec psql -h 127.0.0.1: TCP, so the
 # wait sees the real server, not the one initdb runs on the socket, and
