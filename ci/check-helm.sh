@@ -308,7 +308,7 @@ info "Pod Security"
 check "the namespace enforces restricted" \
   [ "$(kubectl get namespace "$ns" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')" = restricted ]
 psa="$(kubectl label --dry-run=server --overwrite namespace "$ns" pod-security.kubernetes.io/enforce=restricted 2>&1 >/dev/null || true)"
-check "under restricted no pod is refused ($(tr '\n' ' ' <<<"${psa:-no warnings}"))" lacks "$psa" "Warning"
+check "under restricted no pod is refused ($(printf '%s' "${psa:-no warnings}" | tr '\n' ' '))" lacks "$psa" "Warning"
 spec_of() { k get pods -l "app.kubernetes.io/component=$1" -o json | jq -c '.items[0].spec'; }
 for c in api worker ui; do
   spec="$(spec_of "$c")"
