@@ -27,6 +27,13 @@ release, verifies its checksum, unpacks it into `./cadence` and runs
 curl -fsSL https://github.com/cadence-lab-tech/self-hosted/releases/latest/download/get-cadence.sh | sh -s -- --domain cadence.example.com
 ```
 
+The scripts of the package — `install.sh`, `upgrade.sh`, `backup.sh` and
+`restore.sh` — run `clab server` of the `clab` the package carries for the
+machine, of the same version as the stack (`bin/clab-<os>-<arch>`: Linux and
+macOS, amd64 and arm64), with the same flags: the machine needs Docker, and
+`curl` and `tar` for the one-line installer — no `bash`, `openssl` or CLI of
+its own ([clab in the package](docs/admin.md#clab-in-the-package)).
+
 With the CLI installed (`brew install cadence-lab-tech/tap/clab`, v0.8.0+),
 the same is `clab server install --domain cadence.example.com --email ops@example.com`:
 no `curl`, `tar` or `bash` needed, only Docker
@@ -98,7 +105,7 @@ commands that check all of it by hand are in
 | CPU | 2 vCPU | 4 vCPU |
 | RAM | 4 GB | 8 GB |
 | Disk | 20 GB SSD | 50 GB SSD; code indexes and backups grow with repositories |
-| Software | Docker Engine 24+ with the compose v2 plugin, curl, tar, openssl | [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x: the installer and the upgrades [verify the release](docs/admin.md#verifying-a-release) with it (recommended; `CADENCE_VERIFY=require` makes it required) |
+| Software | Docker Engine 24+ with the compose v2 plugin; curl and tar for the one-line installer | [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3.x: the installer and the upgrades [verify the release](docs/admin.md#verifying-a-release) with it (recommended; `CADENCE_VERIFY=require` makes it required) |
 | Database | none: the stack runs PostgreSQL 17 with pgvector | your own PostgreSQL 15-18 with pgvector 0.5+ and pgcrypto, and Docker Compose 2.20+ ([external PostgreSQL](docs/admin.md#external-postgresql)) |
 | Network | `tls`: ports 80 and 443 from the internet; `proxy`: one port for your proxy | outbound HTTPS to `ghcr.io`, GitHub and your embeddings provider, if any |
 
@@ -141,14 +148,14 @@ or `/docs` in the UI). When done,
 | `install.sh` | first installation: checks, secrets, `.env`, start |
 | `upgrade.sh` | backup, package files of the new release, new images, start, readiness check |
 | `backup.sh`, `restore.sh` | database dump and the artifact volume, the bundled or an external database, and an off-machine copy in an S3 bucket; `backup.sh verify` checks that a backup restores; restore with a version check |
-| `lib.sh` | helpers the scripts share |
+| `bin/clab-<os>-<arch>` | `clab` of the version of the package for Linux and macOS, amd64 and arm64: the four scripts above are short `sh` wrappers that run its `clab server install`, `upgrade`, `backup` and `restore` on their directory ([clab in the package](docs/admin.md#clab-in-the-package)); they make the package about 12 MB |
 | `docs/admin.md` | the administrator guide |
 | `SECURITY.md` | the security policy: reporting a vulnerability, response times, supported versions |
 | `bundles/starter.json` | a starter of roles and cycles for a new project, applied with `clab import` |
 | `package.sha256` | in the package only: the sha256 of each of its files, against which `upgrade.sh` finds local edits |
 | `get-cadence.sh` | the one-line installer, published next to the package (not in it) |
 | `charts/cadence` | not in the package: the Helm chart for Kubernetes, published with each release as an OCI artifact ([Kubernetes (Helm)](docs/admin.md#kubernetes-helm)) |
-| `ci/` | not in the package: building it (`ci/package.sh`) and the checks CI runs on the published images |
+| `ci/` | not in the package: building it (`ci/package.sh`, with `clab` from the release of the same version in the [tap](https://github.com/cadence-lab-tech/homebrew-tap)) and the checks CI runs on the published images |
 
 ## Upgrading
 
@@ -163,6 +170,8 @@ commands if the new version does not come up. It never touches `.env`,
 `compose.override.yml`, `backups/` or `secrets/`, and stops if a package
 file was edited here. Installations from before v0.6.0 move over with
 their first upgrade ([docs/admin.md](docs/admin.md#moving-a-git-installation-to-release-packages)).
+The `clab` in `bin/` is part of the package: the upgrade replaces it with
+the one of the new version, and the rollback brings the previous one back.
 After the upgrade, update `clab` on the machines of people and agents to
 the same version (`brew upgrade clab`); upgrades from v0.6.1 on remind of
 it.
@@ -172,7 +181,9 @@ Details: [docs/admin.md](docs/admin.md#upgrades-and-rollback).
 
 Each Cadence Lab release is a version `vX.Y.Z` shared by the backend, the
 frontend and the CLI. A release opens a pull request here that changes only
-`VERSION`; CI brings the stack up on the new images, and after the merge the
+`VERSION` — once the images are signed and the archives of `clab` of the
+version are in the release of the tap, which the package carries; CI brings
+the stack up on the new images, and after the merge the
 commit is tagged `vX.Y.Z` and the GitHub Release `vX.Y.Z` is published with
 three assets:
 

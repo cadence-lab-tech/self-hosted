@@ -5,12 +5,20 @@
 #                 request "VERSION -> vX.Y.Z" (ci/release-pr.sh): VERSION, the
 #                 digests of both images in docker-compose.yml and in the
 #                 values of the Helm chart, and the version of the chart,
-#                 once the signatures of both images verify. The event may arrive
-#                 twice; the second run finds the open pull request.
+#                 once the signatures of both images verify and the archives
+#                 of clab of the version are in the release of the tap (the
+#                 package carries them, decision 0057; release.yml of the
+#                 backend publishes them in a job of its own, and the event
+#                 may come first: the run fails then and is run again by
+#                 hand). The event may arrive twice; the second run finds
+#                 the open pull request.
 #   tag           when VERSION changes on main, tags that commit vX.Y.Z and
 #                 publishes the GitHub Release vX.Y.Z with the package
-#                 (ci/package.sh): cadence-self-hosted-vX.Y.Z.tar.gz,
-#                 checksums.txt and get-cadence.sh, plus
+#                 (ci/package.sh): cadence-self-hosted-vX.Y.Z.tar.gz - with
+#                 clab of the version from the tap, whose checksums.txt is
+#                 verified against its signature by release.yml of the
+#                 backend on the tag (--verify-clab) -, checksums.txt and
+#                 get-cadence.sh, plus
 #                 checksums.txt.sigstore.json - the signature of
 #                 checksums.txt by this workflow (cosign keyless, identity
 #                 .../self-hosted/.github/workflows/release.yml@refs/heads/main).
@@ -127,7 +135,9 @@ jobs:
             echo "::error::tag $v is on $tagged, not on $GITHUB_SHA: the package of this commit is not the version $v"
             exit 1
           fi
-          ci/package.sh dist
+          # clab of the version from the tap, its checksums.txt verified by
+          # its signature (release.yml of the backend on the tag vX.Y.Z).
+          ci/package.sh --verify-clab dist
           sign() { cosign sign-blob --yes --bundle dist/checksums.txt.sigstore.json dist/checksums.txt; }
           if ! gh release view "$v" >/dev/null 2>&1; then
             sign

@@ -11,7 +11,30 @@
 # VERSION = FROM, committed, as if a tag with the new scripts were checked
 # out. TO is the package of this checkout built by ci/package.sh with VERSION
 # = TO and served from a local copy of the releases (CADENCE_RELEASES_URL), so
-# the images of TO must be published, or be in CADENCE_REGISTRY.
+# the images of TO must be published, or be in CADENCE_REGISTRY, and clab of
+# TO in the tap (the package carries it in bin/, decision 0057) - or in
+# CHECK_TO_CLAB.
+#
+# The scripts of the package are wrappers of the clab in it (decision 0057).
+# FROM of a release up to LAST_BASH_RELEASE (ci/lib.sh) has the bash
+# scripts: its own bash upgrade.sh brings the wrappers and bin/clab-* (new
+# files of the package, 755), and the rollback it prints brings the bash
+# scripts back. CHECK_FROM=checkout installs FROM as the package of this
+# checkout with VERSION = FROM and clab of FROM from the tap: an upgrade
+# between two versions on the wrappers, whose rollback brings back the clab
+# of FROM too. Before a release after VERSION exists, TO is made up - its
+# images in a local registry, the backend built with --build-arg VERSION=TO,
+# and clab of TO built from the backend with -X main.version=TO
+# (ci/package.sh, --clab) - for example, with VERSION v0.13.0:
+#
+#   CHECK_FROM=checkout CHECK_TO_CLAB=/tmp/clab-v99 CADENCE_REGISTRY=localhost:5050/<name> \
+#     CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= CADENCE_VERIFY=off \
+#     ci/check-upgrade.sh v0.13.0 v99.0.0
+#
+# with localhost:5050/<name>/sdlc-pipeline-{backend,frontend} of both versions.
+# After the upgrade the wrappers of TO work (./backup.sh,
+# ./backup.sh verify), and no run prints "older than the target": the clab
+# of the package is replaced with the package.
 #
 # docker-compose.yml pins the images of the VERSION of this checkout by
 # digest (ci/pins.sh). TO = that VERSION upgrades to exactly those bytes, and
@@ -28,7 +51,7 @@
 # their signatures are not ours to check (with auto they are "not pinned,
 # not verified", require refuses them).
 #
-# Signatures (CADENCE_VERIFY, lib.sh "signatures"): the package of TO is
+# Signatures (CADENCE_VERIFY, docs/admin.md "Verifying a release"): the package of TO is
 # this checkout, not signed; it gets a stand-in bundle (ci/package.sh
 # --bundle), and with a real cosign 3.x in PATH a wrapper accepts its
 # verify-blob and hands the images to the real cosign (ci/verify-stubs.sh).
@@ -71,18 +94,34 @@
 #
 #   CHECK_HTTP_PORT       host port of the stack, default 8080
 #   COMPOSE_PROJECT_NAME  compose project of the stack, default cadence-check
-#   CLAB_BIN              clab to use; default: the CLI of FROM from the public tap
+#   CLAB_BIN              clab of the people for the data of the check, and of
+#                         CADENCE_DRIVER=clab; default: the CLI of FROM from the
+#                         public tap
+#   CHECK_FROM            release (default) - FROM from the package of its
+#                         release; checkout - FROM as the package of this
+#                         checkout with clab of FROM from the tap: FROM is
+#                         v0.13.0 or later, a clab that knows the wrappers
+#                         (CADENCE_WRAPPER). The pins of docker-compose.yml
+#                         name the images of VERSION: give CADENCE_*_DIGEST=
+#                         when FROM is another version
+#   CHECK_TO_CLAB         a directory with clab-<os>-<arch> of the four
+#                         platforms for the package of TO (ci/package.sh
+#                         --clab), when the tap has no clab of TO
 #   CADENCE_DRIVER        scripts (default) - upgrade and restore with
-#                         upgrade.sh and restore.sh of the installation; clab -
-#                         with clab server upgrade and restore of CLAB_BIN
-#                         (clab server appeared in v0.7.0; it manages
+#                         upgrade.sh and restore.sh of the installation, the
+#                         wrappers of clab server once FROM has them; clab -
+#                         with clab server upgrade and restore of CLAB_BIN, an
+#                         external clab (outside bin/): it proves that a clab
+#                         of the people manages an installation of the
+#                         package by --dir as the wrappers do, with its own
+#                         hints (clab server ...). clab server manages
 #                         installations from v0.6.0 on, so FROM is v0.6.0 or
-#                         later). The same scenarios in both prove parity.
+#                         later.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# shellcheck source=lib.sh
-. ./lib.sh
+# shellcheck source=ci/lib.sh
+. ./ci/lib.sh
 
 # Globals: the EXIT trap runs after main() has returned.
 work=""
@@ -115,6 +154,11 @@ main() {
   *) die "CADENCE_DRIVER is '$driver', expected scripts or clab" ;;
   esac
 
+  local from_mode="${CHECK_FROM:-release}"
+  case "$from_mode" in
+  release | checkout) ;;
+  *) die "CHECK_FROM is '$from_mode', expected release or checkout" ;;
+  esac
   local repo port base failures=0 clab admin_token
   repo="$(pwd)"
   port="${CHECK_HTTP_PORT:-8080}"
@@ -147,8 +191,18 @@ main() {
     info "docker-compose.yml pins the images of $checkout_version, not of $to: the upgrade goes by the tag $to"
     export CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST=""
   fi
+  if [ "$from_mode" = checkout ]; then
+    version_lt "$from" v0.13.0 &&
+      die "CHECK_FROM=checkout: the wrappers need clab v0.13.0 or newer, which knows them (CADENCE_WRAPPER); $from is older"
+    if [ "$from" != "$checkout_version" ] && [ -z "${CADENCE_BACKEND_DIGEST+set}${CADENCE_FRONTEND_DIGEST+set}" ]; then
+      info "FROM is this checkout as $from: its pins name the images of $checkout_version, the images go by their tags"
+      export CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST=""
+    fi
+  fi
   info "package of this checkout as $to"
-  ci/package.sh --bundle --version "$to" "$releases/download/$to" >/dev/null
+  local to_clab=(--clab-version "$to")
+  [ -z "${CHECK_TO_CLAB:-}" ] || to_clab=(--clab "$CHECK_TO_CLAB")
+  ci/package.sh --bundle --version "$to" "${to_clab[@]}" "$releases/download/$to" >/dev/null
   mkdir -p "$releases/latest"
   cp -R "$releases/download/$to" "$releases/latest/download"
 
@@ -156,7 +210,12 @@ main() {
   admin_token="sdlc_$(openssl rand -hex 24)"
   if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$admin_token"; fi
   local clone=false
-  if curl -fsIL -o /dev/null "$CADENCE_RELEASES_DEFAULT/download/$from/$(package_name "$from")"; then
+  if [ "$from_mode" = checkout ]; then
+    info "installing $from as the package of this checkout, with clab $from of the tap"
+    ci/package.sh --bundle --version "$from" --clab-version "$from" "$releases/download/$from" >/dev/null
+    (cd "$work" && CADENCE_RELEASES_URL="file://$releases" SDLC_ADMIN_TOKEN="$admin_token" sh "$repo/get-cadence.sh" --version "$from" \
+      --mode proxy --http-addr "127.0.0.1:$port" --yes </dev/null)
+  elif curl -fsIL -o /dev/null "$CADENCE_RELEASES_DEFAULT/download/$from/$(package_name "$from")"; then
     info "installing $from from the package of its release"
     (cd "$work" && SDLC_ADMIN_TOKEN="$admin_token" sh "$repo/get-cadence.sh" --version "$from" \
       --mode proxy --http-addr "127.0.0.1:$port" --yes </dev/null)
@@ -169,6 +228,13 @@ main() {
   fi
   [ -f "$dir/.env" ] || die "$from is not installed"
   cd "$dir"
+  # The scripts of FROM: wrappers of the clab in its package, or bash.
+  local from_wrappers=false
+  if grep -qxF CADENCE_WRAPPER=1 upgrade.sh; then from_wrappers=true; fi
+  info "$from has $([ "$from_wrappers" = true ] && echo "the wrappers of clab server" || echo "the bash scripts")"
+  # FROM's files of the package with their sums, for the rollback.
+  local from_manifest="$work/from-installed.manifest"
+  cp "$PACKAGE_MANIFEST" "$from_manifest" 2>/dev/null || : >"$from_manifest"
   export CADENCE_RELEASES_URL="file://$releases"
   # shellcheck source=ci/verify-stubs.sh
   . "$repo/ci/verify-stubs.sh"
@@ -288,7 +354,7 @@ JSON
   local reminder="Update clab to $to on the machines of people and agents"
   local reminds=false
   # shellcheck disable=SC2016 # the text of the script, not an expansion
-  if [ "$driver" = clab ] || grep -qF 'Update clab to $target_version' upgrade.sh; then reminds=true; fi
+  if [ "$driver" = clab ] || [ "$from_wrappers" = true ] || grep -qF 'Update clab to $target_version' upgrade.sh; then reminds=true; fi
   # no_reminder WHAT OUTPUT: a run that did not upgrade must not remind.
   no_reminder() {
     if grep -qF "Update clab" <<<"$2"; then
@@ -384,9 +450,31 @@ JSON
   cp "$work/compose.orig" docker-compose.yml
 
   # --- from here on without git ------------------------------------------------------------
-  mkdir -p "$work/nogit"
+  mkdir -p "$work/nogit" "$work/noclab"
   printf '#!/bin/sh\necho "git $*" >>"%s/git-calls"\nexit 1\n' "$work" >"$work/nogit/git"
-  chmod 755 "$work/nogit/git"
+  printf '#!/bin/sh\necho "clab $*" >>"%s/clab-calls"\nexit 1\n' "$work" >"$work/noclab/clab"
+  chmod 755 "$work/nogit/git" "$work/noclab/clab"
+  # no_older WHAT OUTPUT: no "older than the target" - the clab of the
+  # package is replaced with the package, and an older upgrade.sh has no such
+  # warning.
+  no_older() {
+    if [ "$driver" = scripts ] && grep -qF "older than the target" <<<"$2"; then
+      fail "$1 warns that clab is older than the target: $2"
+    elif [ "$driver" = scripts ]; then
+      pass "$1: no 'older than the target'"
+    fi
+  }
+  # same_files_as MANIFEST PREFIX: every file of MANIFEST under PREFIX is
+  # here with its sum (PREFIX empty: every file).
+  same_files_as() {
+    local sum f n=0
+    while read -r sum f; do
+      case "$f" in "$2"*) ;; *) continue ;; esac
+      [ -f "$f" ] && [ "$(sha256_of "$f")" = "$sum" ] || return 1
+      n=$((n + 1))
+    done <"$1"
+    [ "$n" -gt 0 ]
+  }
   local path_nogit="$work/nogit:$work/clab-bin:$PATH"
   if [ "$clone" = true ]; then
     mv .git .git.off
@@ -434,12 +522,37 @@ JSON
   else
     fail "the rollback is not two commands without git: $rollback"
   fi
-  info "running the rollback as printed"
-  PATH="$path_nogit" bash -euc "$rollback" >/dev/null
+  if [ "$driver" = scripts ]; then
+    if [ "$(grep -c '^  \./restore\.sh --yes ' <<<"$rollback")" = 1 ]; then
+      pass "...the backup by ./restore.sh, no clab"
+    else
+      fail "the rollback does not restore by ./restore.sh: $rollback"
+    fi
+  fi
+  no_older "the upgrade that did not become ready" "$out"
+  info "running the rollback as printed$([ "$driver" = scripts ] && echo ", without clab in PATH")"
+  if [ "$driver" = scripts ]; then
+    PATH="$work/noclab:$path_nogit" bash -euc "$rollback" >/dev/null
+  else
+    PATH="$path_nogit" bash -euc "$rollback" >/dev/null
+  fi
   if [ "$(tr -d '[:space:]' <VERSION)" = "$from" ] && [ "$(instance_version)" = "$from" ]; then
     pass "after the rollback VERSION and /v1/instance are $from"
   else
     fail "after the rollback the installation is not on $from"
+  fi
+  if [ "$from_wrappers" = true ]; then
+    if same_files_as "$from_manifest" bin/; then
+      pass "after the rollback bin/clab-* are those of $from (package.sha256 of $from)"
+    else
+      fail "after the rollback bin/clab-* are not those of $from"
+    fi
+  else
+    if [ "$(head -n 1 upgrade.sh)" = "#!/usr/bin/env bash" ] && [ -f lib.sh ] && same_files_as "$from_manifest" ""; then
+      pass "after the rollback the bash scripts of $from and lib.sh are back, as package.sha256 of $from has them"
+    else
+      fail "after the rollback the scripts are not those of $from"
+    fi
   fi
   if "$clab" --host "$base" project list --json | grep -qF '"UPG"'; then
     pass "after the rollback the project created on $from is there"
@@ -508,6 +621,39 @@ JSON
     pass "$PACKAGE_MANIFEST is the one of $to"
   else
     fail "$PACKAGE_MANIFEST is not the one of $to"
+  fi
+  no_older "the upgrade" "$out"
+  # The wrappers of TO and the clab of every platform, 755, as package.sha256 says.
+  local p bins_ok=true
+  for p in $CLAB_PLATFORMS; do
+    [ "$(stat -c %a "bin/clab-$p" 2>/dev/null || stat -f %Lp "bin/clab-$p" 2>/dev/null)" = 755 ] || bins_ok=false
+  done
+  if [ "$bins_ok" = true ] && same_files_as "$PACKAGE_MANIFEST" bin/; then
+    pass "bin/clab-* of $to are there, 755, with the sums of $PACKAGE_MANIFEST"
+  else
+    fail "bin/clab-* of $to are missing, not 755 or not of $PACKAGE_MANIFEST"
+  fi
+  if grep -qxF CADENCE_WRAPPER=1 upgrade.sh && [ ! -e lib.sh ]; then
+    pass "the scripts are the wrappers of $to; lib.sh, no longer in the package, is gone"
+  else
+    fail "the scripts of $to are not the wrappers, or lib.sh is still there"
+  fi
+  if [ "$driver" = scripts ]; then
+    info "the wrappers of $to: ./backup.sh and ./backup.sh verify, without clab in PATH"
+    local wrapped_dumps
+    wrapped_dumps="$(find backups -maxdepth 1 -name "cadence-$to-*.sql.gz" | wc -l | tr -d ' ')"
+    sleep 1
+    if out="$(PATH="$work/noclab:$path_nogit" ./backup.sh 2>&1)" &&
+      [ "$(find backups -maxdepth 1 -name "cadence-$to-*.sql.gz" | wc -l | tr -d ' ')" -gt "$wrapped_dumps" ]; then
+      pass "./backup.sh of $to writes backups/cadence-$to-*.sql.gz"
+    else
+      fail "./backup.sh of $to: $out"
+    fi
+    if out="$(PATH="$work/noclab:$path_nogit" ./backup.sh verify 2>&1)" && grep -qF "the schema of the images of $to" <<<"$out"; then
+      pass "./backup.sh verify of $to: the backup restores"
+    else
+      fail "./backup.sh verify of $to: $out"
+    fi
   fi
   # shellcheck disable=SC2086 # a list of names
   if [ "$(for f in $kept; do printf '%s %s\n' "$(sha256_of "$f")" "$f"; done)" = "$kept_before" ]; then
@@ -626,6 +772,11 @@ JSON
     fail "git was called: $(tr '\n' ';' <"$work/git-calls")"
   else
     pass "git was never called after .git was moved away"
+  fi
+  if [ -s "$work/clab-calls" ]; then
+    fail "a clab of PATH was called: $(tr '\n' ';' <"$work/clab-calls")"
+  elif [ "$driver" = scripts ]; then
+    pass "no clab of PATH was called by the scripts"
   fi
 
   if [ "$clone" = true ]; then

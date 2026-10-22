@@ -4,9 +4,17 @@
 # images: get-cadence.sh runs the way the documentation shows it - piped
 # into sh (dash where there is one, the sh of Debian and Ubuntu) - against
 # releases built by ci/package.sh in a scratch directory. A stub stands in
-# for docker: install.sh of the package gets as far as writing .env and stops
-# at pulling the images. Another stub stands in for git and records any call:
-# the installer must not need it. CI runs it next to ci/check-config.sh.
+# for docker: install.sh of the package - the wrapper of clab server install
+# of the clab in the package (decision 0057) - gets as far as writing .env
+# and stops at pulling the images. Another stub stands in for git and
+# records any call: the installer must not need it. CI runs it next to
+# ci/check-config.sh.
+#
+# The older release (--version) is a package of the last release with bash
+# scripts (LAST_BASH_RELEASE, built by its own ci/package.sh from its tag):
+# it installs as before, with its bash install.sh. Without bash on the
+# machine the package with the wrappers installs, and the older one is
+# refused before anything is unpacked.
 #
 # The signature of the package (CADENCE_VERIFY, lib.sh "signatures"): a stub
 # cosign (ci/verify-stubs.sh) is called with the bundle of the release before
@@ -14,14 +22,16 @@
 # version with require and a release without the bundle are refused before
 # the directory exists; auto without cosign warns once and installs; off
 # calls no cosign. The scenarios without these words run with no cosign in
-# PATH, even on a machine that has one.
+# PATH, even on a machine that has one. The notice of the mode (auto without
+# cosign, off) is said by the installer and once more by clab server
+# install: clab server does not read CADENCE_VERIFY_NOTED.
 #
 #   ci/check-get-cadence.sh
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# shellcheck source=lib.sh
-. ./lib.sh
+# shellcheck source=ci/lib.sh
+. ./ci/lib.sh
 # shellcheck source=ci/verify-stubs.sh
 . ./ci/verify-stubs.sh
 
@@ -44,7 +54,7 @@ trap 'rm -rf "$work"' EXIT
 
 # Releases: an older one and the current one, which is the latest.
 releases="$work/releases"
-ci/package.sh --version "$older" "$releases/download/$older" >/dev/null
+bash_package --version "$older" "$releases/download/$older" || die "could not build the package of $LAST_BASH_RELEASE (its tag in git) as $older"
 ci/package.sh --bundle "$releases/download/$version" >/dev/null
 mkdir -p "$releases/latest"
 cp -R "$releases/download/$version" "$releases/latest/download"
@@ -140,6 +150,12 @@ if [ "$(tr -d '[:space:]' <"$work/flag/there/VERSION" 2>/dev/null)" = "$older" ]
 else
   fail "--version $older --dir there: $out"
 fi
+if [ "$(head -n 1 "$work/flag/there/install.sh" 2>/dev/null)" = "#!/usr/bin/env bash" ] && [ -f "$work/flag/there/lib.sh" ] &&
+  grep -qxF 'CADENCE_MODE=proxy' "$work/flag/there/.env" 2>/dev/null; then
+  pass "...with its bash install.sh, which wrote .env from the flags"
+else
+  fail "...$older did not run its bash install.sh: $out"
+fi
 mkdir -p "$work/env"
 if ! out="$(cd "$work/env" && PATH="$stubs:$nocosign_path" CADENCE_RELEASES_URL="file://$releases" \
   CADENCE_INSTALL_VERSION="$older" CADENCE_INSTALL_DIR=viaenv "$shell" -s -- --mode proxy --http-addr 127.0.0.1:1 --yes \
@@ -167,6 +183,39 @@ else
   else
     fail "--domain alone did not write the tls .env: $out"
   fi
+fi
+
+info "without bash"
+# A machine without bash: the tools get-cadence.sh needs, and the stubs.
+nobash="$work/nobash"
+mkdir -p "$nobash"
+for tool in awk cat chmod cp curl cut date dirname expr find grep gzip head id ls mkdir mktemp mv rm sed sha256sum shasum sort tail tar tr uname wc; do
+  if command -v "$tool" >/dev/null 2>&1; then ln -sf "$(command -v "$tool")" "$nobash/$tool"; fi
+done
+shell_path="$(command -v "$shell")"
+# get_nobash DIR ARGS...: get without bash in PATH.
+get_nobash() {
+  local dir="$1"
+  shift
+  mkdir -p "$dir"
+  (cd "$dir" && PATH="$stubs:$nobash" CADENCE_RELEASES_URL="file://$releases" "$shell_path" -s -- "$@" <"$OLDPWD/get-cadence.sh" 2>&1)
+}
+check_nobash() { ! PATH="$stubs:$nobash" command -v bash >/dev/null 2>&1; }
+if check_nobash; then
+  out="$(get_nobash "$work/nobash-new" --mode proxy --http-addr 127.0.0.1:1 --yes || true)"
+  if contains "$out" "could not pull the images of $version" && [ -f "$work/nobash-new/cadence/.env" ]; then
+    pass "without bash the package of $version installs: its install.sh is sh"
+  else
+    fail "without bash the package of $version did not install: $out"
+  fi
+  out="$(get_nobash "$work/nobash-old" --version "$older" --mode proxy --http-addr 127.0.0.1:1 --yes)" && status=0 || status=$?
+  if [ "$status" != 0 ] && contains "$out" "bash is required: install.sh of $older is a bash script" && [ ! -e "$work/nobash-old/cadence/VERSION" ]; then
+    pass "without bash the package of $older (bash scripts) is refused, nothing unpacked"
+  else
+    fail "without bash, $older: status $status, $out"
+  fi
+else
+  fail "could not make a PATH without bash for the check"
 fi
 
 info "installation name"
@@ -311,17 +360,17 @@ else
   fail "require without cosign: status $status, $out"
 fi
 out="$(get "$work/sig-none-auto" "${proxy_args[@]}" || true)"
-if [ "$(grep -c '^! .*cosign' <<<"$out")" = 1 ] && contains "$out" "! cosign 3.x is not installed: the signatures of the release are not verified (CADENCE_VERIFY=auto)" &&
+if contains "$(grep -m 1 '^! .*cosign' <<<"$out")" "! cosign 3.x is not installed: the signatures of the release are not verified (CADENCE_VERIFY=auto)" &&
   contains "$out" "could not pull the images of $version"; then
-  pass "auto without cosign: one warning, for the installer and install.sh together, and the installation goes on"
+  pass "auto without cosign: the installer warns before the download, and the installation goes on"
 else
   fail "auto without cosign: $out"
 fi
 : >"$work/cosign.log"
 out="$(CADENCE_VERIFY=off COSIGN_PATH="$cosign_dir" get "$work/sig-off" "${proxy_args[@]}" || true)"
-if [ ! -s "$work/cosign.log" ] && [ "$(grep -c '^▸ signature verification is off (CADENCE_VERIFY=off)$' <<<"$out")" = 1 ] &&
+if [ ! -s "$work/cosign.log" ] && [ "$(grep -m 1 '^▸ signature' <<<"$out")" = "▸ signature verification is off (CADENCE_VERIFY=off)" ] &&
   lacks "$out" "! " && contains "$out" "could not pull the images of $version"; then
-  pass "off: no cosign call, one line '▸ signature verification is off', no warning, installed"
+  pass "off: no cosign call, the line '▸ signature verification is off' first, no warning, installed"
 else
   fail "off: $(cat "$work/cosign.log") $out"
 fi

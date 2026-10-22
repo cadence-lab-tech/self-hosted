@@ -16,17 +16,27 @@
 # An image without such a signature, or whose tag points at another digest
 # than the release event names, fails the run: no pull request.
 #
+# The package of the version carries clab of the same version (decision
+# 0057), which ci/package.sh takes from the release vX.Y.Z of the tap: the
+# archives clab_vX.Y.Z_<os>_<arch>.tar.gz of the four platforms and
+# checksums.txt with its signature must be there before the pull request -
+# release.yml of the backend publishes them in a job of its own, and the
+# event of the images may come first. Not there yet: the run fails, naming
+# what is missing and the command that runs it again; no pull request.
+#
 #   VERSION         the released version, vX.Y.Z
 #   GH_TOKEN        token that pushes the branch and opens the pull request;
 #                   not GITHUB_TOKEN, whose pull requests start no workflows
 #   BACKEND_IMAGE   the images of the release event, ...:vX.Y.Z@sha256:...;
 #   FRONTEND_IMAGE  optional (a run by hand has none), compared with the
 #                   registry when given
+#   CADENCE_TAP_RELEASES_URL  the releases of the tap (ci/lib.sh), for the
+#                   checks
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# shellcheck source=lib.sh
-. ./lib.sh
+# shellcheck source=ci/lib.sh
+. ./ci/lib.sh
 # shellcheck source=ci/pins.sh
 . ./ci/pins.sh
 
@@ -50,6 +60,30 @@ if [ -n "$open" ]; then
   ok "pull request #$open for $version is already open"
   exit 0
 fi
+
+# clab of the version in the tap, before anything is verified or written.
+tap="$(tap_releases_url)/download/$version"
+missing=""
+for asset in checksums.txt "$VERIFY_BUNDLE"; do
+  curl -fsIL -o /dev/null "$tap/$asset" || missing="$missing $asset"
+done
+if [ -z "$missing" ]; then
+  tmp="$(mktemp)"
+  fetch "$tap/checksums.txt" "$tmp" || missing=" checksums.txt"
+  for p in $CLAB_PLATFORMS; do
+    asset="$(clab_archive "$version" "$p")"
+    if ! grep -qE "^[0-9a-f]{64}  $asset\$" "$tmp" || ! curl -fsIL -o /dev/null "$tap/$asset"; then
+      missing="$missing $asset"
+    fi
+  done
+  rm -f "$tmp"
+fi
+if [ -n "$missing" ]; then
+  die "the archives of clab $version are not published in the tap yet ($tap): no${missing}.
+  The package of $version carries them; release.yml of the backend publishes them. No pull request.
+  Run it again once they are there: gh workflow run release.yml --repo cadence-lab-tech/self-hosted -f version=$version"
+fi
+ok "clab $version is in the tap: $tap"
 
 # The digest of each image of the version, checked against the event and
 # the signature, before anything is written.

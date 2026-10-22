@@ -11,8 +11,9 @@
 #          docker-compose.yml pins against the tag of VERSION in the registry
 #          (ci/check-pins.sh: a moved tag fails it), secret scan
 #   stack  the stack on the published images of VERSION, in proxy mode,
-#          installed from the package of this commit with the one-line
-#          installer: sign-in, clab, MCP, backup and restore, the
+#          installed from the package of this commit - with clab of VERSION
+#          from the tap in bin/, which its scripts run (decision 0057) - with
+#          the one-line installer: sign-in, clab, MCP, backup and restore, the
 #          off-machine copy to a stand-in S3 bucket and backup.sh verify
 #          (ci/s3.sh; on images of v0.10.0 or newer, /api backup-s3)
 #          (ci/check-stack.sh); with cosign, so the installer verifies the
@@ -115,7 +116,7 @@ jobs:
       - id: images
         name: images of VERSION exist for this runner
         run: |
-          . ./lib.sh
+          . ./ci/lib.sh
           v="$(tr -d '[:space:]' <VERSION)"
           case "$(uname -m)" in
           x86_64) platform=linux/amd64 ;;
@@ -164,7 +165,7 @@ jobs:
       - id: images
         name: images of VERSION have /api dbcheck
         run: |
-          . ./lib.sh
+          . ./ci/lib.sh
           v="$(tr -d '[:space:]' <VERSION)"
           if version_lt "$v" v0.10.0; then
             echo "::notice::VERSION is $v: its backend image has no /api dbcheck (v0.10.0+), the external database check is skipped"
@@ -192,7 +193,7 @@ jobs:
       - id: images
         name: images of VERSION read *_FILE
         run: |
-          . ./lib.sh
+          . ./ci/lib.sh
           v="$(tr -d '[:space:]' <VERSION)"
           if version_lt "$v" v0.13.0; then
             echo "::notice::VERSION is $v: its backend image reads no *_FILE (v0.13.0+), the check of secrets in files is skipped"
@@ -226,7 +227,7 @@ jobs:
       - id: images
         name: images of VERSION read *_FILE
         run: |
-          . ./lib.sh
+          . ./ci/lib.sh
           v="$(tr -d '[:space:]' <VERSION)"
           if version_lt "$v" v0.13.0; then
             echo "::notice::VERSION is $v: its backend image reads no *_FILE (v0.13.0+), the check of the Helm chart is skipped"
