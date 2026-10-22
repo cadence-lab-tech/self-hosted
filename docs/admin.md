@@ -2002,8 +2002,8 @@ clab server images list --dir /opt/cadence    # the version of an installation, 
 
 It prints one line per image: every image of the compose files of the
 package in every profile (the bundled PostgreSQL, the client of an external
-one), and `alpine:3`, which `clab server` runs itself for backups and
-restores. Our two images come with their tag and digest, the others by tag:
+one), and `alpine:3`, which `clab server` runs itself for backups, restores
+and reading a file of `secrets/` it cannot read as your user. Our two images come with their tag and digest, the others by tag:
 
 ```
 alpine:3
@@ -2103,19 +2103,45 @@ bin/clab-linux-amd64 server images load cadence-v0.14.0-airgap.tar --registry re
 checksum of the package and the signature of `checksums.txt` with the
 `trusted_root.json` of the archive, then the signatures of both images in a
 temporary registry on `127.0.0.1` that it runs from the archive and removes
-in any outcome, `Ctrl-C` included. The digests it checks are the pins of the
+in any outcome, `Ctrl-C` included (an interrupted `load` says only
+`✗ interrupted. Nothing was loaded.`; with `--registry`, once our images
+have reached your registry, it names them instead). The digests it checks are the pins of the
 signed package, not of the archive. Every Sigstore bundle attached to our
 images must verify for the identity of the release — a bundle altered or
 slipped in next to a genuine one is not carried on — and the OpenVEX of
 both images is verified as an attestation too (`cosign verify-attestation
 --offline --type openvex`), so a scanner that reads it from your registry
 reads ours. A signature or an OpenVEX that does not verify stops it:
-`✗ … did not verify …`, nothing loaded. Then:
+`✗ … did not verify …`, nothing loaded.
+
+**Only what is verified leaves the archive.** `load` copies each image
+without its referrers, then — one by one — the Sigstore bundles it has just
+verified: the signature and the OpenVEX of our two images. Any other
+referrer in the archive goes neither to the temporary registry nor to
+yours: an unsigned OpenVEX (as `oras attach` puts it), an in-toto statement,
+anything attached to a platform manifest rather than to the index, and every
+bundle when signatures are not verified (`CADENCE_VERIFY=off`, `auto`
+without `cosign`, an archive without `trusted_root.json`). One line names
+what was left out, and it does not change the outcome:
+
+```
+! not carried from the archive, not a verified Sigstore bundle of the release: application/vnd.openvex+json of sdlc-pipeline-backend
+```
+
+A genuine archive prints no such line. The attestations of BuildKit (SBOM
+and provenance) are manifests inside the index of the image, under its
+signed digest: they travel as part of the image, and `regctl` lists them as
+referrers of the platform manifests in any registry it copies the image to.
+Load with the same `CADENCE_VERIFY` you install with: loaded without
+verification, your registry has no signatures, and an installation that
+verifies against it refuses.
+
+Then:
 
 - **without `--registry`** the images are pulled from the temporary registry
   into Docker of this machine and tagged as the compose files name them;
 - **with `--registry HOST[/PATH]`** our two images go to your registry with
-  the same digests, signatures and OpenVEX (the credentials are those of
+  the same digests and their verified signature and OpenVEX (the credentials are those of
   `docker login`, TLS settings those of your `regctl`), the others into
   Docker of this machine. It prints the `CADENCE_REGISTRY` to use.
 

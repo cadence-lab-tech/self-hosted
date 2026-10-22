@@ -64,6 +64,7 @@ check() {
   if "$@" >/dev/null 2>&1; then pass "$what"; else fail "$what"; fi
 }
 contains() { grep -qF -- "$2" <<<"$1"; }
+lacks() { ! grep -qF -- "$2" <<<"$1"; }
 
 load_version
 version="$CADENCE_VERSION"
@@ -183,8 +184,28 @@ for img in $(on "$c" "tar -xOf /share/cadence-$first-airgap.tar cadence-images.j
   check "the compose reference $img is in Docker" docker exec "$c" docker image inspect "$img"
 done
 before="$(docker exec "$c" docker image ls -q | sort | tr '\n' ' ')"
+check "load $first drops nothing of a genuine archive (no \"not carried\")" lacks "$out" "not carried"
 check "load again: done" on "$c" "cd /share && clab server images load cadence-$first-airgap.tar"
 check "...and nothing new in Docker" [ "$(docker exec "$c" docker image ls -q | sort | tr '\n' ' ')" = "$before" ]
+
+# Into a registry of the closed network (--registry): the registry is the
+# image of the temporary registry of the archive. Only the image and its
+# verified Sigstore bundles - the signature and the OpenVEX - reach it.
+regtar="$(on "$c" "tar -xOf /share/cadence-$first-airgap.tar cadence-images.json" | grep -o "\"linux/$arch\": \"[^\"]*\"" | cut -d'"' -f4)"
+on "$c" "tar -xOf /share/cadence-$first-airgap.tar $regtar | docker load -q" >/dev/null || die "could not load the registry image of the archive"
+regimg="$(on "$c" "tar -xOf /share/cadence-$first-airgap.tar cadence-images.json" | grep -o '"name": "[^"]*"' | head -n 1 | cut -d'"' -f4)"
+on "$c" "docker run -d --name admin-registry -p 127.0.0.1:5001:5000 $regimg" >/dev/null || die "could not start a registry on $c"
+out="$(on "$c" "cd /share && clab server images load cadence-$first-airgap.tar --registry 127.0.0.1:5001/cadence" 2>&1)" ||
+  { printf '%s\n' "$out" | tail -n 20 >&2; die "clab server images load --registry of $first failed"; }
+# A plain-http registry for regctl of the administrator, as docs/admin.md says.
+on "$c" "regctl registry set --tls disabled 127.0.0.1:5001" >/dev/null || die "could not configure regctl for the registry on $c"
+host="--host reg=127.0.0.1:5001,tls=disabled"
+check "load --registry: sdlc-pipeline-backend has its pin there" [ "$(on "$c" "regctl $host image digest 127.0.0.1:5001/cadence/sdlc-pipeline-backend:$first")" = \
+  "$(on "$c" "tar -xOf /share/cadence-$first-airgap.tar cadence-images.json" | grep -o "sdlc-pipeline-backend:$first@sha256:[0-9a-f]*" | head -n 1 | cut -d@ -f2)" ]
+check "...and exactly its two Sigstore bundles as referrers" [ "$(on "$c" "regctl $host artifact list 127.0.0.1:5001/cadence/sdlc-pipeline-backend:$first --format '{{range .Descriptors}}{{println .ArtifactType}}{{end}}'" | sort | uniq -c | tr -s ' ')" = \
+  " 2 application/vnd.dev.sigstore.bundle.v0.3+json" ]
+check "...which cosign verifies there offline" on "$c" "cosign verify --offline --trusted-root /share/download/$first/trusted_root.json --allow-http-registry --certificate-identity https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/$first --certificate-oidc-issuer https://token.actions.githubusercontent.com 127.0.0.1:5001/cadence/sdlc-pipeline-backend:$first"
+on "$c" "docker rm -f -v admin-registry; docker rmi $regimg" >/dev/null 2>&1 || true
 
 # The one-line installer of a package with the wrappers; clab server install
 # for a release before them.
