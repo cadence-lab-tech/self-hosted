@@ -45,7 +45,27 @@
 #
 # The output names the package and why. With CHECK_AIRGAP_FROM=vA the archive
 # of vA - always the published release - is saved too: vA is installed from it
-# and upgraded to VERSION without network.
+# and upgraded to VERSION without network. vA is v0.13.0 or newer, the first
+# version docs/admin.md takes into a closed network ("Air-gapped
+# installation"); an older one stops the check before anything is downloaded.
+# How vA is installed depends on its version, as docs/admin.md says:
+#
+#   v0.15.0 and newer   get-cadence.sh of vA, which verifies the signature of
+#                       checksums.txt offline with trusted_root.json of the
+#                       mirror;
+#   v0.13.0 to v0.14.1  clab server install --version vA of the clab of the
+#                       check. get-cadence.sh of vA cannot verify the
+#                       signature without network, and the check proves it
+#                       first: with CADENCE_VERIFY=require it must refuse
+#                       ("Nothing was installed.", no .env, no container) -
+#                       should it ever install, the check fails, and the
+#                       paragraph of docs/admin.md is out of date.
+#
+# Before the upgrade a mark is written into the bundled database of vA (a
+# table airgap_check of its own) and read after it; when vA runs PostgreSQL
+# 17 and VERSION 18, the move is checked too: PostgreSQL 18 after the
+# upgrade, the move in the logs of pg-upgrade-dump - all without network and
+# with nothing pulled.
 #
 # The clab is CLAB_BIN - a linux clab for the architecture of Docker (the
 # one of a branch) - else the clab of VERSION from the tap. A clab without
@@ -60,7 +80,7 @@
 #
 #   CLAB_BIN              linux clab with clab server images (default: the tap)
 #   CHECK_AIRGAP_PACKAGE  auto (default), release or checkout: see above
-#   CHECK_AIRGAP_FROM     a release to install first and upgrade from
+#   CHECK_AIRGAP_FROM     a release to install first and upgrade from (v0.13.0+)
 #   CADENCE_RELEASES_URL  where the releases are (default GitHub)
 set -euo pipefail
 
@@ -82,6 +102,10 @@ sha256_pinned() {
   esac
 }
 DIND=docker:28-dind
+# The first version docs/admin.md takes into a closed network, and the first
+# whose get-cadence.sh verifies the signature without network.
+AIRGAP_FIRST=v0.13.0
+OFFLINE_INSTALLER=v0.15.0
 
 failures=0
 pass() { printf '  ✓ %s\n' "$*"; }
@@ -102,6 +126,8 @@ version="$CADENCE_VERSION"
 from="${CHECK_AIRGAP_FROM:-}"
 [ -z "$from" ] || valid_version "$from" || die "CHECK_AIRGAP_FROM is '$from', expected vX.Y.Z"
 [ -z "$from" ] || version_lt "$from" "$version" || die "CHECK_AIRGAP_FROM ($from) must be older than VERSION ($version)"
+[ -z "$from" ] || ! version_lt "$from" "$AIRGAP_FIRST" ||
+  die "CHECK_AIRGAP_FROM ($from) is older than $AIRGAP_FIRST, the first version docs/admin.md takes into a closed network (\"Air-gapped installation\")"
 name="${COMPOSE_PROJECT_NAME:-check-airgap}"
 package="${CHECK_AIRGAP_PACKAGE:-auto}"
 case "$package" in
@@ -332,12 +358,32 @@ check "...and exactly its two Sigstore bundles as referrers" [ "$(on "$c" "regct
 check "...which cosign verifies there offline" on "$c" "cosign verify --offline --trusted-root /share/download/$first/trusted_root.json --allow-http-registry --certificate-identity https://github.com/cadence-lab-tech/sdlc-pipeline-backend/.github/workflows/release.yml@refs/tags/$first --certificate-oidc-issuer https://token.actions.githubusercontent.com 127.0.0.1:5001/cadence/sdlc-pipeline-backend:$first"
 on "$c" "docker rm -f -v admin-registry; docker rmi $regimg" >/dev/null 2>&1 || true
 
-# The one-line installer of a package with the wrappers; clab server install
-# for a release before them.
-if on "$c" "tar -tzf /share/download/$first/$(package_name "$first")" | grep -q '^\(\./\)\{0,1\}bin/clab-'; then
-  install="sh /share/download/$first/get-cadence.sh --version $first --dir /root/cadence --mode proxy --http-addr 127.0.0.1:8080 --yes"
+# The one-line installer of the version from the release that verifies the
+# signature offline; before it clab server install of the clab of the check,
+# as docs/admin.md says - the wrappers in bin/ of v0.14.1 do not make its
+# get-cadence.sh work without network.
+flags="--mode proxy --http-addr 127.0.0.1:8080 --yes"
+if ! version_lt "$first" "$OFFLINE_INSTALLER"; then
+  install="sh /share/download/$first/get-cadence.sh --version $first --dir /root/cadence $flags"
 else
-  install="clab server install --version $first --dir /root/cadence --mode proxy --http-addr 127.0.0.1:8080 --yes"
+  info "get-cadence.sh of $first cannot verify the signature without network (before $OFFLINE_INSTALLER): installing with clab server install of clab $(docker exec "$c" clab version 2>/dev/null | head -n 1 | cut -d' ' -f2), as docs/admin.md says"
+  if docker exec "$c" test -f "/share/download/$first/get-cadence.sh"; then
+    # What docs/admin.md says it cannot do: it must refuse and leave nothing.
+    out="$(on "$c" "cd /root && CADENCE_VERIFY=require sh /share/download/$first/get-cadence.sh --version $first --dir /root/cadence-old $flags" "$mirror" 2>&1)" && code=0 || code=$?
+    check "get-cadence.sh of $first without network (require) refuses" [ "$code" != 0 ]
+    check "...with \"Nothing was installed.\"" contains "$out" "Nothing was installed."
+    check "...and leaves no .env" docker exec "$c" sh -c '! test -e /root/cadence-old/.env'
+    check "...and no container" [ -z "$(docker exec "$c" docker ps -aq)" ]
+    if [ "$code" != 0 ]; then
+      say "  its refusal: $(grep -F '✗' <<<"$out" | tail -n 1)"
+    else
+      printf '%s\n' "$out" | tail -n 20 >&2
+    fi
+    docker exec "$c" rm -rf /root/cadence-old
+  else
+    say "  - no get-cadence.sh in the archive of $first: its refusal without network is not checked"
+  fi
+  install="clab server install --version $first --dir /root/cadence $flags"
 fi
 out="$(on "$c" "cd /root && CADENCE_VERIFY=require $install" "$mirror" 2>&1)" ||
   { printf '%s\n' "$out" | tail -n 30 >&2; die "the installation of $first without network failed"; }
@@ -361,7 +407,27 @@ check "restore without network" docker exec -w /root/cadence "$c" sh -c "$restor
 check "status without network" docker exec -w /root/cadence "$c" clab server status
 check "after restore: /readyz answers 200" docker exec "$c" wget -q -O /dev/null http://127.0.0.1:8080/readyz
 
+# service_on SERVICE: the container of that service of the installation on
+# $c, an exited one too; pg_on SQL: its bundled database answers SQL.
+service_on() { docker exec "$c" docker ps -aq --filter "label=com.docker.compose.service=$1" | head -n 1; }
+pg_on() {
+  # shellcheck disable=SC2016 # expanded by the shell of the container
+  docker exec "$c" docker exec "$(service_on postgres)" sh -c 'psql -X -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$1"
+}
+pg_major_on() { pg_on 'SHOW server_version_num' 2>/dev/null | cut -c1-2; }
+
 if [ -n "$from" ]; then
+  # A mark of $from in a table of its own, outside the schema of the service.
+  mark="written on $from before the upgrade without network"
+  pg_on "CREATE TABLE airgap_check (mark text NOT NULL); INSERT INTO airgap_check VALUES ('$mark')" >/dev/null ||
+    die "could not write the mark into the database of $from"
+  from_major="$(pg_major_on)"
+  moves=false
+  if version_lt "$from" "$OFFLINE_INSTALLER" && ! version_lt "$version" "$OFFLINE_INSTALLER"; then
+    moves=true
+    check "$from runs PostgreSQL 17: the upgrade moves the data to 18" [ "$from_major" = 17 ]
+  fi
+
   info "upgrade $from -> $version without network"
   out="$(on "$c" "cd /share && clab server images load cadence-$version-airgap.tar" 2>&1)" ||
     { printf '%s\n' "$out" | tail -n 20 >&2; die "clab server images load of $version failed"; }
@@ -370,6 +436,15 @@ if [ -n "$from" ]; then
   check "upgrade: the version is $version" [ "$(docker exec "$c" cat /root/cadence/VERSION)" = "$version" ]
   check "upgrade: /readyz answers 200" docker exec "$c" wget -q -O /dev/null http://127.0.0.1:8080/readyz
   check "upgrade: the images of $from stay for the rollback" docker exec "$c" docker image inspect "ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:$from"
+  check "upgrade: the mark written on $from is there" [ "$(pg_on 'SELECT mark FROM airgap_check' 2>/dev/null)" = "$mark" ]
+  check "upgrade: the bundled database runs PostgreSQL 18" [ "$(pg_major_on)" = 18 ]
+  if [ "$moves" = true ]; then
+    dump="$(service_on pg-upgrade-dump)"
+    check "upgrade: pg-upgrade-dump moved the data of PostgreSQL 17" contains "$([ -z "$dump" ] || docker exec "$c" docker logs "$dump" 2>&1)" "moving the data of PostgreSQL 17 to PostgreSQL 18"
+  else
+    say "  - $from and $version both on PostgreSQL $from_major: no move"
+  fi
+  check "upgrade: $c still has no network" sh -c "! docker exec $c wget -q -T 5 -O /dev/null https://ghcr.io/v2/"
 else
   info "no CHECK_AIRGAP_FROM: the upgrade without network is not checked"
 fi
