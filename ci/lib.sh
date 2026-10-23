@@ -149,9 +149,10 @@ CADDY_ROOT_URL=http://localhost/
 ROUTE_FAIL_STEPS=3
 
 # caddy_wget DEST URL: busybox wget in the caddy container, 5 seconds at
-# most; its error goes to stderr.
+# most; its error goes to stderr. stdin is not passed on: docker compose
+# exec would read it, and in a while-read loop it takes the rest of the list.
 caddy_wget() {
-  docker compose exec -T caddy wget -q -T 5 -O "$1" "$2"
+  docker compose exec -T caddy wget -q -T 5 -O "$1" "$2" </dev/null
 }
 
 # wget_status ERROR prints the HTTP status of "server returned error:
@@ -185,7 +186,7 @@ routes_answer() {
     done < <(grep -o '"address":"[^"]*"' <<<"$list" | sed 's/^"address":"//; s/"$//' | sort -u)
   fi
   [ "${#down[@]}" = 0 ] || ROUTE_WHY="the upstream ${down[*]} of the loaded Caddy configuration does not answer from the caddy container"
-  mode="$(docker compose exec -T caddy printenv CADENCE_MODE 2>/dev/null | tr -d '\r' || true)"
+  mode="$(docker compose exec -T caddy printenv CADENCE_MODE 2>/dev/null </dev/null | tr -d '\r' || true)"
   if [ "$mode" = proxy ] && ! err="$(caddy_wget /dev/null "$CADDY_ROOT_URL" 2>&1 >/dev/null)"; then
     status="$(wget_status "$err")"
     case "$status" in

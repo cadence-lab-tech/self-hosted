@@ -40,7 +40,7 @@
 # The routes of Caddy (CLAB-267): the admin API of Caddy lists the upstreams
 # of the Caddyfile of the package; a Caddyfile of the administrator routing
 # to ui:81, mounted by compose.override.yml, makes the site answer 502, and
-# wait_ready of ci/lib.sh refuses within a minute. ./restore.sh refuses to
+# wait_ready of ci/lib.sh refuses before its timeout. ./restore.sh refuses to
 # say ready with it, naming the upstream and the fix, with a clab of v0.16.0
 # or newer, or the clab of CHECK_CLAB_DIR; an older clab of the package skips
 # that with a note.
@@ -1089,7 +1089,7 @@ check "/readyz answers 200 after restore" [ "$(http_code "$base/readyz")" = 200 
 # does on the images of v0.16.0, which listen on 8080 only; ui:81 is closed
 # on the images of any version), mounted by compose.override.yml as
 # docs/admin.md ("Local compose changes") says: the site answers 502, the
-# wait of ci/lib.sh refuses at once, and clab - from v0.16.0, or the clab of
+# wait of ci/lib.sh refuses after three steps, and clab - from v0.16.0, or the clab of
 # CHECK_CLAB_DIR - refuses to say ready, naming the upstream and the fix.
 info "a route of Caddy to ui:81"
 cp compose.override.yml "$work/override.orig"
@@ -1107,13 +1107,15 @@ for _ in $(seq 1 20); do
 done
 check "/ through the route to ui:81 answers 502" [ "$(http_code "$base/")" = 502 ]
 check "...while /readyz still answers 200" [ "$(http_code "$base/readyz")" = 200 ]
+# The wait counts its steps of 3 s, so a refusal sooner than the timeout by
+# the clock is the refusal after ROUTE_FAIL_STEPS, not the timeout.
 not_ready_fast() {
   local start=$SECONDS err
-  err="$(wait_ready 180 2>&1 >/dev/null)" && return 1
-  [ $((SECONDS - start)) -lt 60 ] && contains "$err" "the upstream ui:81 of the loaded Caddy configuration does not answer" &&
+  err="$(wait_ready 600 2>&1 >/dev/null)" && return 1
+  [ $((SECONDS - start)) -lt 600 ] && contains "$err" "the upstream ui:81 of the loaded Caddy configuration does not answer" &&
     contains "$err" "the route / through Caddy ($CADDY_ROOT_URL in the caddy container) answers 502"
 }
-check "wait_ready of ci/lib.sh refuses within a minute, naming ui:81 and / answering 502" not_ready_fast
+check "wait_ready of ci/lib.sh refuses before its timeout, naming ui:81 and / answering 502" not_ready_fast
 if [ -z "${CHECK_CLAB_DIR:-}" ] && version_lt "$version" v0.16.0; then
   info "VERSION is $version: clab server checks the routes of Caddy from v0.16.0, the refusal of clab is checked from it (or with CHECK_CLAB_DIR)"
 else
@@ -1121,7 +1123,7 @@ else
   route_start=$SECONDS
   out="$(restore_cmd --yes "$dump" </dev/null 2>&1)" || code=$?
   check "./restore.sh with the route to ui:81 refuses to say ready: exit 1" [ "$code" = 1 ]
-  check "...without waiting for CADENCE_READY_TIMEOUT ($((SECONDS - route_start)) s)" [ $((SECONDS - route_start)) -lt 200 ]
+  check "...before CADENCE_READY_TIMEOUT, 300 s of steps ($((SECONDS - route_start)) s with the restore)" [ $((SECONDS - route_start)) -lt 300 ]
   check "...naming the upstream ui:81" contains "$out" "the upstream ui:81 of the loaded Caddy configuration does not answer"
   check "...and / answering 502" contains "$out" "the route / through Caddy (http://localhost/ in the caddy container) answers 502"
   check "...and the fix: the route at ui:8080" contains "$out" "point the route of your Caddyfile at ui:8080"
