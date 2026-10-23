@@ -2,13 +2,13 @@
 #
 # End-to-end check of the package on the images of VERSION: builds the
 # release package of this checkout (ci/package.sh, with the clab of VERSION
-# from the tap in bin/), installs it the way the documentation says - the
-# one-line installer piped into sh, from a local copy of the releases, with
-# git out of reach and no clab in PATH - in proxy mode into a scratch
-# directory, exercises the stack the way an administrator and an agent
-# would, backs it up, restores it, and tears it down. CI runs it on every
-# pull request; it runs the same way on any Linux or macOS machine with
-# Docker.
+# from the tap in bin/, or the clab of CHECK_CLAB_DIR), installs it the way
+# the documentation says - the one-line installer piped into sh, from a
+# local copy of the releases, with git out of reach and no clab in PATH - in
+# proxy mode into a scratch directory, exercises the stack the way an
+# administrator and an agent would, backs it up, restores it, and tears it
+# down. CI runs it on every pull request; it runs the same way on any Linux
+# or macOS machine with Docker.
 #
 # The scripts of the package are wrappers of clab server of the clab in the
 # package (decision 0057): one implementation, so the check no longer runs
@@ -48,6 +48,18 @@
 #   CLAB_BIN              clab of the people and agents in the scenarios of
 #                         the API (sign-in, teams, tasks); default: the clab
 #                         of the package for this machine
+#   CHECK_CLAB_DIR        a directory with clab-<os>-<arch> of the four
+#                         platforms of the package (CLAB_PLATFORMS in
+#                         ci/lib.sh), each built with -X main.version= the
+#                         VERSION of this checkout: the package of the
+#                         installation and the packages of the upgrades
+#                         (v98.0.0, v99.0.0) carry them instead of the clab
+#                         of the tap (ci/package.sh --clab), so the wrappers,
+#                         the external clab and the starter project run a
+#                         clab of a branch of the backend - its CI checks a
+#                         change of clab server this way (CLAB-253). Absolute
+#                         or relative to where the check is started; unset or
+#                         empty - the clab of the tap, as before
 #   CHECK_KEEP=1          leave the stack (and its directory) after the check
 #   CHECK_DB              bundled (default) - the postgres container of the
 #                         stack; external - a stand-in for the PostgreSQL of
@@ -123,6 +135,15 @@
 # COMPOSE_PROJECT_NAME and a CHECK_HTTP_PORT (and the port after it) of their
 # own, never those of a running instance.
 set -euo pipefail
+
+# CHECK_CLAB_DIR from where the check is started, before the cd below:
+# ci/package.sh --clab of every package this check builds.
+clab_pkg=()
+if [ -n "${CHECK_CLAB_DIR:-}" ]; then
+  check_clab_dir="$(cd "$CHECK_CLAB_DIR" 2>/dev/null && pwd)" ||
+    { printf '✗ CHECK_CLAB_DIR %s is no directory\n' "$CHECK_CLAB_DIR" >&2; exit 1; }
+  clab_pkg=(--clab "$check_clab_dir")
+fi
 
 cd "$(dirname "$0")/.."
 # shellcheck source=ci/lib.sh
@@ -241,7 +262,7 @@ fi
 # The releases as the installer sees them: download/<version>/ and
 # latest/download/ (ci/lib.sh, "releases").
 info "release package of this checkout"
-ci/package.sh --bundle "$work/releases/download/$version"
+ci/package.sh --bundle ${clab_pkg[@]+"${clab_pkg[@]}"} "$work/releases/download/$version"
 mkdir -p "$work/releases/latest"
 cp -R "$work/releases/download/$version" "$work/releases/latest/download"
 # git and clab must not be needed: a git and a clab that fail and leave a
@@ -1252,7 +1273,7 @@ else
   if [ "$db" = bundled ]; then
     info "the backup of an upgrade"
     up=v98.0.0
-    "$repo/ci/package.sh" --version "$up" "$work/releases/download/$up" >/dev/null
+    "$repo/ci/package.sh" --version "$up" ${clab_pkg[@]+"${clab_pkg[@]}"} "$work/releases/download/$up" >/dev/null
     sleep 1
     out="$(CADENCE_VERIFY=off CADENCE_BACKEND_DIGEST="" CADENCE_FRONTEND_DIGEST="" CADENCE_RELEASES_URL="file://$work/releases" upgrade_cmd "$up" 2>&1 || true)"
     check "the upgrade copies its backup to the bucket" contains "$out" "✓ uploaded cadence-$version-"
@@ -1307,7 +1328,7 @@ check "an empty COMPOSE_PROJECT_NAME is no variable: backup works" \
 if [ "$db" = external ]; then
   info "upgrade on the external database"
   next=v99.0.0
-  "$repo/ci/package.sh" --version "$next" "$work/releases/download/$next" >/dev/null
+  "$repo/ci/package.sh" --version "$next" ${clab_pkg[@]+"${clab_pkg[@]}"} "$work/releases/download/$next" >/dev/null
   registry="${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}"
   if [ -n "${CADENCE_BACKEND_DIGEST+set}" ] && [ -z "${CADENCE_BACKEND_DIGEST}" ]; then
     # Images of a branch go by the tag: give the same images the tag of
