@@ -1943,10 +1943,11 @@ asks `/` through the route (`http://localhost/` inside the container; only
 All of it is plain HTTP: in tls mode neither HTTPS nor `SDLC_DOMAIN` is
 asked, so readiness does not wait for a certificate. A route that does not
 reach its upstream for three steps in a row (about 9 s) ends the wait at
-once with exit code 1, not after `CADENCE_READY_TIMEOUT`:
+once with exit code 1, not after `CADENCE_READY_TIMEOUT` (`ui:PORT` is the
+upstream of your route):
 
 ```
-✗ the stack runs v0.16.0, but the upstream ui:80 of the loaded Caddy configuration does not answer from the caddy container.
+✗ the stack runs v0.16.0, but the upstream ui:PORT of the loaded Caddy configuration does not answer from the caddy container.
   The api and ui services are up (ui answers directly), but the site answers 502 everywhere except /v1, /mcp, /webhooks, /healthz and /readyz.
   The UI image listens on port 8080 only from v0.16.0: point the route of your Caddyfile at ui:8080, then reload Caddy:
   docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
@@ -1965,8 +1966,8 @@ the `caddy` container is not seen at all: check it with `curl`.
 
 The upgrade to v0.16.0 itself runs the `clab` of the version it starts from
 (see [Upgrades and rollback](#upgrades-and-rollback)): `./upgrade.sh` of
-v0.15.x does not check the routes and reports the new version ready over a
-route to `ui:80`. Move the route first, or run the upgrade with `clab`
+v0.15.x leaves the routes unchecked and reports the new version ready over
+a route to port 80 of the UI. Move the route first, or run the upgrade with `clab`
 v0.16.0, in the directory of the installation:
 
 ```bash
