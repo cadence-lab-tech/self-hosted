@@ -282,8 +282,9 @@ sum_on() {
 info "machine $c (containerd image store): save with network"
 machine "$c" "$work/c/daemon.json"
 check "$c runs the containerd image store" contains "$(docker exec "$c" docker info 2>/dev/null)" "io.containerd.snapshotter.v1"
-# curl for get-cadence.sh: the machine will have no network to add it.
-docker exec "$c" apk add -q curl >/dev/null || die "could not add curl to $c"
+# curl for get-cadence.sh, and bash: get-cadence.sh of v0.13.0 asks for it
+# before it verifies anything. The machine will have no network to add them.
+docker exec "$c" apk add -q curl bash >/dev/null || die "could not add curl and bash to $c"
 if [ "$package" = checkout ]; then
   # The stand-in is bound to the package of this run: another checksums.txt
   # goes to the real cosign, which refuses the stand-in bundle.
@@ -371,6 +372,7 @@ else
     # What docs/admin.md says it cannot do: it must refuse and leave nothing.
     out="$(on "$c" "cd /root && CADENCE_VERIFY=require sh /share/download/$first/get-cadence.sh --version $first --dir /root/cadence-old $flags" "$mirror" 2>&1)" && code=0 || code=$?
     check "get-cadence.sh of $first without network (require) refuses" [ "$code" != 0 ]
+    check "...on the signature of checksums.txt" contains "$out" "the signature of checksums.txt of $first did not verify"
     check "...with \"Nothing was installed.\"" contains "$out" "Nothing was installed."
     check "...and leaves no .env" docker exec "$c" sh -c '! test -e /root/cadence-old/.env'
     check "...and no container" [ -z "$(docker exec "$c" docker ps -aq)" ]
