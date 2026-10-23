@@ -183,6 +183,7 @@ frontend_digest="${CADENCE_FRONTEND_DIGEST-$(sed -n 's/^ *digest: "\(sha256:[0-9
 image_of() { printf '%s/%s:%s%s' "$registry" "$1" "$tag" "${2:+@$2}"; }
 backend_image="$(image_of sdlc-pipeline-backend "$backend_digest")"
 frontend_image="$(image_of sdlc-pipeline-frontend "$frontend_digest")"
+platform_of() { docker image inspect -f '{{.Os}}/{{.Architecture}}' "$1" 2>/dev/null; }
 # load_image REF: the image REF of the local registry into the node, the
 # platform of the node only. kind load docker-image imports every platform
 # docker save hands it; a multi-platform image pulled into the containerd
@@ -192,10 +193,13 @@ frontend_image="$(image_of sdlc-pipeline-frontend "$frontend_digest")"
 load_image() {
   local ref="$1" archive="$work/image.tar" out
   local hint="build images of one platform without attestations: docker buildx build --platform $node_platform --provenance=false --sbom=false ... --push"
-  # Not here, or here for another platform only: pulled for the node.
-  if [ "$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$ref" 2>/dev/null)" != "$node_platform" ]; then
+  # Not here, or here for another platform only: pulled for the node. Docker
+  # pulls an image of one platform whatever --platform asks: it is checked.
+  if [ "$(platform_of "$ref")" != "$node_platform" ]; then
     out="$(docker pull -q --platform "$node_platform" "$ref" 2>&1)" ||
-      die "$ref: no image for $node_platform, the platform of the kind node ($(tail -n1 <<<"$out")); $hint"
+      die "$ref: cannot pull it for $node_platform, the platform of the kind node ($(tail -n1 <<<"$out")); $hint"
+    [ "$(platform_of "$ref")" = "$node_platform" ] ||
+      die "$ref: no image for $node_platform, the platform of the kind node, only $(platform_of "$ref"); $hint"
   fi
   out="$(kind load docker-image --name "$cluster" "$ref" 2>&1)" && return 0
   if out="$out"$'\n'"$({ docker save --platform "$node_platform" -o "$archive" "$ref" &&
