@@ -774,8 +774,8 @@ no Caddy and no volumes.
   0.16.0 every container, the UI included, drops all capabilities and adds
   none. The charts 0.14.x and 0.15.x add to the UI the one capability
   `restricted` allows, binding ports below 1024: the Caddy binary of their
-  image carried it as a file capability. The chart 0.13.0 needs `baseline`: its
-  UI image runs as root.
+  image carried it as a file capability. The chart 0.13.0 needs
+  `baseline`: its UI image runs as root.
 - **The images of the version of the chart.** The chart runs the UI as
   uid 65532 on port 8080 with no capability added, which the frontend image
   does from v0.16.0. `image.tag` pointing at an older frontend image leaves
@@ -1895,8 +1895,8 @@ brew upgrade clab                 # or the install script of the tap, see "CLI a
 clab server upgrade v0.16.0       # or --dir /opt/cadence
 ```
 
-Upgrades from v0.14.0 on run the `clab` of the package, which waits for the
-UI on either port.
+An installation of v0.14.1 or newer upgrades with the `clab` of its
+package, which waits for the UI on either port: nothing to do there.
 
 On an arm64 machine (Apple Silicon, Graviton,
 Ampere) the upgrade to v0.5.3 or later recreates `api`, `worker` and `ui`
