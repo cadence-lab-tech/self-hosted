@@ -33,6 +33,8 @@ public address of your proxy in the `proxy` mode.
 - [Upgrades and rollback](#upgrades-and-rollback)
   ([releases and mirrors](#releases-and-mirrors),
   [moving a git installation](#moving-a-git-installation-to-release-packages))
+- [Air-gapped installation](#air-gapped-installation): a registry mirror
+  or an archive of the version, signatures verified offline
 - [Monitoring](#monitoring)
 - [Security](#security) ([audit log](#audit-log))
 - [Verifying a release](#verifying-a-release)
@@ -2029,17 +2031,21 @@ Docker Hub (or your Docker Hub mirror), two tags of it: `pg18-trixie` (the
 database, and the backup client of an external database) and `pg17` (the
 move from PostgreSQL 17, see [PostgreSQL 18](#postgresql-18)); the upgrade
 pulls both, and a mirror without one of them fails the pull with the stack
-untouched.
+untouched. `clab server images list` prints every image a version needs
+([Air-gapped installation](#air-gapped-installation)).
 
 A mirror of the releases must keep `checksums.txt.sigstore.json` of every
 release from v0.9.0 on: with `cosign` on the machine, a release without it
 is refused even with `CADENCE_VERIFY=auto` (a dropped signature is no
 reason to skip the check) — copy the asset to the mirror, or set
-`CADENCE_VERIFY=off`. A registry mirror in a closed network, where the
-machine does not reach `ghcr.io`, cannot have its images verified: `auto`
-warns `images not verified: ghcr.io is unreachable from this host` and
-goes on, `require` refuses; verify such images by hand where `ghcr.io` is
-reachable, and set `CADENCE_VERIFY=off` on the machine to drop the warning.
+`CADENCE_VERIFY=off`. A machine that reaches neither `ghcr.io` nor Sigstore
+verifies offline when the mirror of the releases also holds
+`download/vX.Y.Z/trusted_root.json` of Sigstore — `clab server images
+load` puts it there, with the signatures of the images in the archive or
+in your registry mirror: see [Air-gapped installation](#air-gapped-installation).
+Without it such a machine cannot verify: `auto` warns `images not
+verified: ghcr.io is unreachable from this host` and goes on, `require`
+refuses.
 
 ### Moving a git installation to release packages
 
@@ -2081,6 +2087,235 @@ Apply it with `docker compose up -d`. An installation from before v0.6.0 has
 no such file and its `COMPOSE_FILE` does not list one: create the file and
 append `:compose.override.yml` to `COMPOSE_FILE` in `.env`. `upgrade.sh`
 warns when an override file exists but `COMPOSE_FILE` does not list it.
+
+## Air-gapped installation
+
+A machine without internet access gets a version from a registry mirror of
+your network or from one archive you carry over. Both keep what an
+installation with internet access has: the images run by the digests
+`docker-compose.yml` pins, and the signatures of the package and of both
+images are verified — offline, with the `trusted_root.json` of Sigstore that
+comes along. It takes `clab` of the release after v0.14.1 or newer
+(`clab server images`); an archive of a version is loaded by `clab` of that
+version or newer.
+
+### What a version needs
+
+```bash
+clab server images list --version v0.15.0     # a release: its package is downloaded and its signature verified
+clab server images list --dir /opt/cadence    # the version of an installation, with CADENCE_REGISTRY of its .env
+```
+
+It prints one line per image: every image of the compose files of the
+package in every profile (the bundled PostgreSQL, the client of an external
+one, the move from PostgreSQL 17), and `alpine:3`, which `clab server` runs
+itself for backups, restores and reading a file of `secrets/` it cannot read
+as your user. Our two images come with their tag and digest, the others by
+tag:
+
+```
+alpine:3
+ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.15.0@sha256:…
+ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:v0.15.0@sha256:…
+pgvector/pgvector:pg17
+pgvector/pgvector:pg18-trixie
+```
+
+The list comes from the compose files of the version, never from a list in
+this guide: it changes with them.
+
+### Tools
+
+Besides Docker the closed machine needs, to load an archive,
+[regctl](https://github.com/regclient/regclient/releases) v0.9.2 or later
+(it copies the images with their signatures) and, to verify,
+[cosign](https://github.com/sigstore/cosign/releases) 3.x. Both are single
+static binaries: download them where you have access, check them, carry them
+with the archive and put them into `PATH`.
+
+```bash
+# cosign: the sum from the checksums of its release
+curl -fsSLO https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64
+curl -fsSL https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign_checksums.txt | grep ' cosign-linux-amd64$' | sha256sum -c
+# regctl: its signature, made by the release workflow of regclient
+curl -fsSLO https://github.com/regclient/regclient/releases/download/v0.9.2/regctl-linux-amd64
+curl -fsSL https://github.com/regclient/regclient/releases/download/v0.9.2/metadata.tgz | tar -xz regctl-linux-amd64.sig regctl-linux-amd64.pem
+chmod +x cosign-linux-amd64 regctl-linux-amd64
+./cosign-linux-amd64 verify-blob --certificate regctl-linux-amd64.pem --signature regctl-linux-amd64.sig \
+  --certificate-identity https://github.com/regclient/regclient/.github/workflows/go.yml@refs/tags/v0.9.2 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com regctl-linux-amd64
+install -m 755 cosign-linux-amd64 /usr/local/bin/cosign
+install -m 755 regctl-linux-amd64 /usr/local/bin/regctl
+```
+
+Without `regctl` (or with one older than v0.9.2) `save` and `load` stop
+before they do anything and say where to get it. Without `cosign`
+`CADENCE_VERIFY` decides as everywhere ([Automatic verification](#automatic-verification)):
+`auto` warns once and goes on, `require` refuses, `off` does not verify.
+
+### A registry mirror of your network
+
+Copy our two images into it with the whole index — every platform, the
+attestations, the signature and the OpenVEX — so that the digests stay and
+the signatures can be verified there:
+
+```bash
+regctl image copy --referrers ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:v0.15.0 registry.corp.example/cadence/sdlc-pipeline-backend:v0.15.0
+regctl image copy --referrers ghcr.io/cadence-lab-tech/sdlc-pipeline-frontend:v0.15.0 registry.corp.example/cadence/sdlc-pipeline-frontend:v0.15.0
+```
+
+(`crane copy` and `skopeo copy --all` keep the digests too, but not the
+signatures.) Set `CADENCE_REGISTRY=registry.corp.example/cadence`: the
+installers write it to `.env` from the environment, and `image.registry`
+for [Helm](#kubernetes-helm). `CADENCE_REGISTRY` covers our images only:
+`pgvector` and `alpine` come by tag from Docker Hub — through a Docker Hub
+mirror of your network (`registry-mirrors` of Docker), or from an archive as
+below, which loads them into Docker of the machine in either case. The
+releases of the package come from a [mirror of the releases](#releases-and-mirrors);
+for offline verification it also needs `download/vX.Y.Z/trusted_root.json`,
+which an archive brings.
+
+### An archive
+
+On a machine with internet access (GitHub, `ghcr.io`, Docker Hub, Sigstore),
+Docker, `regctl` and `cosign`:
+
+```bash
+clab server images save --version v0.15.0 --output cadence-v0.15.0-airgap.tar
+```
+
+The archive — about 0.8 GB — holds every image of the version with all its
+platforms (ours with their signatures, attestations and OpenVEX), the
+release of the package (`download/v0.15.0/`: the package with `bin/clab-*`,
+`checksums.txt` and its signature, `get-cadence.sh`) with the
+`trusted_root.json` of Sigstore, and the image of the temporary registry
+that `load` runs. `save` verifies the signature of `checksums.txt` and of
+both images before it writes anything, writes the archive next to
+`--output` and renames it (a failure leaves nothing, an existing file is not
+overwritten) and prints its SHA-256. The trust in the archive on the other
+side is the trust in its transfer: **compare the SHA-256 on the closed
+machine** with the one `save` printed, over a channel other than the one
+that carried the archive.
+
+On the closed machine — no access to the internet is needed:
+
+```bash
+sha256sum cadence-v0.15.0-airgap.tar
+tar -xf cadence-v0.15.0-airgap.tar download/v0.15.0/cadence-self-hosted-v0.15.0.tar.gz   # the clab of the version, if the machine has none
+tar -xzf download/v0.15.0/cadence-self-hosted-v0.15.0.tar.gz bin/clab-linux-amd64
+bin/clab-linux-amd64 server images load cadence-v0.15.0-airgap.tar
+bin/clab-linux-amd64 server images load cadence-v0.15.0-airgap.tar --registry registry.corp.example/cadence   # or into your registry
+```
+
+`load` verifies before anything reaches Docker or your registry: the
+checksum of the package and the signature of `checksums.txt` with the
+`trusted_root.json` of the archive, then the signatures of both images in a
+temporary registry on `127.0.0.1` that it runs from the archive and removes
+in any outcome, `Ctrl-C` included (an interrupted `load` says only
+`✗ interrupted. Nothing was loaded.`; with `--registry`, once our images
+have reached your registry, it names them instead). The digests it checks are the pins of the
+signed package, not of the archive. Every Sigstore bundle attached to our
+images must verify for the identity of the release — a bundle altered or
+slipped in next to a genuine one is not carried on — and the OpenVEX of
+both images is verified as an attestation too (`cosign verify-attestation
+--offline --type openvex`), so a scanner that reads it from your registry
+reads ours. A signature or an OpenVEX that does not verify stops it:
+`✗ … did not verify …`, nothing loaded.
+
+**Only what is verified leaves the archive.** `load` copies each image
+without its referrers, then — one by one — the Sigstore bundles it has just
+verified: the signature and the OpenVEX of our two images. Any other
+referrer in the archive goes neither to the temporary registry nor to
+yours: an unsigned OpenVEX (as `oras attach` puts it), an in-toto statement,
+anything attached to a platform manifest rather than to the index, and every
+bundle when signatures are not verified (`CADENCE_VERIFY=off`, `auto`
+without `cosign`, an archive without `trusted_root.json`). One line names
+what was left out, and it does not change the outcome:
+
+```
+! not carried from the archive, not a verified Sigstore bundle of the release: application/vnd.openvex+json of sdlc-pipeline-backend
+```
+
+A genuine archive prints no such line. The attestations of BuildKit (SBOM
+and provenance) are manifests inside the index of the image, under its
+signed digest: they travel as part of the image, and `regctl` lists them as
+referrers of the platform manifests in any registry it copies the image to.
+Load with the same `CADENCE_VERIFY` you install with: loaded without
+verification, your registry has no signatures, and an installation that
+verifies against it refuses.
+
+Then:
+
+- **without `--registry`** the images are pulled from the temporary registry
+  into Docker of this machine and tagged as the compose files name them;
+- **with `--registry HOST[/PATH]`** our two images go to your registry with
+  the same digests and their verified signature and OpenVEX (the credentials are those of
+  `docker login`, TLS settings those of your `regctl`), the others into
+  Docker of this machine. It prints the `CADENCE_REGISTRY` to use.
+
+Either way it puts the release next to the archive, in
+`download/v0.15.0/` — the mirror of the releases for
+`CADENCE_RELEASES_URL=file://…` — changes no `.env` and prints the next
+command. Loading the same archive again changes nothing.
+
+**The image store of Docker.** Without `--registry` the compose files find
+our images by tag *and digest* only with the
+[containerd image store](https://docs.docker.com/engine/storage/containerd/)
+of Docker (`docker info` shows `driver-type io.containerd.snapshotter.v1`;
+the default of new installations of Docker 29). The classic `overlay2`
+storage cannot keep the digest of a pulled-and-tagged image: on it `load`
+refuses — `✗ after docker pull and docker tag, … is not found by its
+digest` — removes what it added, and names both ways out: turn the
+containerd image store on (`{"features": {"containerd-snapshotter": true}}`
+in `/etc/docker/daemon.json`, then restart Docker; the images of the classic
+storage are not visible after the switch, load or pull them again) or load
+into a registry with `--registry`. Do not empty `CADENCE_BACKEND_DIGEST` to
+get around it: that drops the guarantee of the pins.
+
+### Install, upgrade and roll back without network
+
+```bash
+# without a registry: the images are in Docker of this machine
+CADENCE_RELEASES_URL=file:///srv/airgap bin/clab-linux-amd64 server install --version v0.15.0 --mode proxy --http-addr 127.0.0.1:8080
+# with your registry
+CADENCE_REGISTRY=registry.corp.example/cadence CADENCE_RELEASES_URL=file:///srv/airgap bin/clab-linux-amd64 server install --version v0.15.0 --mode proxy
+# the one-line installer of the release does the same
+CADENCE_RELEASES_URL=file:///srv/airgap sh /srv/airgap/download/v0.15.0/get-cadence.sh --version v0.15.0 --mode proxy
+```
+
+(`/srv/airgap` — the directory of the archive, where `load` put
+`download/`.) With `cosign` the installation verifies `checksums.txt` with
+the `trusted_root.json` of that mirror once Sigstore does not answer, and
+the images once `ghcr.io` does not answer: in `CADENCE_REGISTRY` offline,
+by digest; without a registry it takes an image that is in Docker of this
+machine exactly by the reference of the compose files, pin included, as
+verified — `load` verified its signature, and its digest is the pin of the
+signed package: `✓ … verified when loaded: same digest as the pin of the
+signed package`. `CADENCE_VERIFY=require` passes either way. Our images
+that are already on the machine by their pin are not pulled; the others
+(`pgvector`) are pulled whenever their registry answers, as on a machine with
+internet access, and stay as they are when it does not (one `!` line);
+`.env` keeps `CADENCE_REGISTRY`.
+
+`./backup.sh`, `./restore.sh`, `clab server backup verify` and
+`clab server status` need no network after `load`, cron included.
+
+To upgrade, load the archive of the new version next to the old one and
+run the upgrade against the same mirror:
+
+```bash
+bin/clab-linux-amd64 server images load /srv/airgap/cadence-v0.16.0-airgap.tar
+cd /opt/cadence && CADENCE_RELEASES_URL=file:///srv/airgap ./upgrade.sh v0.16.0
+```
+
+The images of the old version stay in Docker (or in your registry): the
+rollback that a failed upgrade prints runs on them without network — keep
+them until the new version has proved itself.
+
+The scripts of a package work in a closed network from the release after
+v0.14.1: they run the `clab` of their package. For an archive of an earlier
+version (v0.13.0 to v0.14.1) run `clab server install` (or the scripts with
+`CADENCE_CLAB=`) of a newer `clab`.
 
 ## Monitoring
 
@@ -2545,12 +2780,16 @@ without it the mode is `auto`:
 | a release of v0.9.0+ without `checksums.txt.sigstore.json` (a mirror that dropped it) | refused | refused | — |
 | an image without a digest (an empty `CADENCE_BACKEND_DIGEST`, an image of `compose.override.yml`) | `!` warning: not pinned, not verified | refused | — |
 | `ghcr.io` does not answer (a registry mirror in a closed network) | `!` warning: images not verified, goes on | refused | — |
+| the same, with `trusted_root.json` in the mirror of the releases (after `clab server images load`, from the release after v0.14.1) | `checksums.txt` and the images in `CADENCE_REGISTRY` verified offline; images only in Docker of this machine: `✓ … verified when loaded` | the same | — |
 
 A refusal names what failed — the package or the image with its digest —
 and the identity it expected, says what to do and that nothing was
 installed or changed. `cosign` needs to reach `ghcr.io` and Sigstore (the
-public good instance) for the check; without them use `off` and verify by
-hand where they are reachable (see [Releases and mirrors](#releases-and-mirrors)).
+public good instance) for the check — or, in a closed network, the
+`trusted_root.json` of Sigstore that `clab server images save` carries
+over ([Air-gapped installation](#air-gapped-installation)): then
+`checksums.txt` and the images are verified offline, and `require` works
+there too.
 The first upgrade to v0.12.0 runs the older `upgrade.sh`, which verifies
 nothing — see [Upgrades and rollback](#upgrades-and-rollback).
 
@@ -2823,7 +3062,14 @@ clab server restore backups/cadence-v0.7.0-20261008-030000.sql.gz   # = ./restor
 clab server upgrade                      # = ./upgrade.sh: the latest release
 clab server upgrade --force v0.7.1       # = ./upgrade.sh --force v0.7.1
 clab server starter --project PLAT       # the starter project in the team of SDLC_BOOTSTRAP_TEAM (v0.14.0+)
+clab server images list --dir .          # the images of the version (from the release after v0.14.1)
+clab server images save --version v0.15.0 --output cadence-v0.15.0-airgap.tar   # one archive for a closed network
+clab server images load cadence-v0.15.0-airgap.tar   # load it there, verified offline
 ```
+
+`clab server images` has no script of its own: run it with the `clab` of
+the package (`bin/clab-<os>-<arch> server images …`) or your own; see
+[Air-gapped installation](#air-gapped-installation).
 
 `clab server` needs no sign-in: it works with the files of the installation
 and Docker (`docker compose`) on this machine. Only the starter project

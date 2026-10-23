@@ -38,6 +38,13 @@
 #          since v0.13.0, the frontend image as uid 65532 on :8080 since
 #          v0.14.0): for older VERSION it is skipped with a notice
 #
+#   airgap the closed network (ci/check-airgap.sh): clab server images save
+#          of VERSION, then in docker:28-dind daemons without network load,
+#          install, backup, restore and backup verify on the containerd
+#          image store, and the refusal of the classic overlay2 storage.
+#          Needs a clab of VERSION with clab server images (the release
+#          after v0.13.0): for an older one it is skipped with a note
+#
 #   upgrade  the upgrade between two versions (ci/check-upgrade.sh): FROM as
 #          installed, TO as the package of this commit. On a release pull
 #          request (a branch release/*) on its own: FROM is VERSION of the
@@ -253,6 +260,15 @@ jobs:
       - name: the chart in kind
         if: steps.images.outputs.skip != 'true'
         run: ci/check-helm.sh
+
+  airgap:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: the closed network in Docker daemons of its own
+        run: ci/check-airgap.sh
 
   # The release pull request (release/vX.Y.Z, ci/release-pr.sh) moves VERSION:
   # the upgrade from the VERSION of main to it is checked there on its own.
