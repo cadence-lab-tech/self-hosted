@@ -2,8 +2,8 @@
 #
 # Stand-ins for the checks of the signatures (lib.sh, "signatures"): sourced
 # by ci/check-get-cadence.sh, ci/check-verify.sh, ci/check-stack.sh,
-# ci/check-upgrade.sh and ci/check-publish-chart.sh. Not part of the
-# package.
+# ci/check-upgrade.sh, ci/check-publish-chart.sh and ci/check-airgap.sh. Not
+# part of the package.
 #
 #   stub_cosign DIR LOG         DIR/cosign: a cosign 3.x that writes its
 #                               command line to LOG and verifies everything,
@@ -14,7 +14,14 @@
 #                               it is this checkout) and hands everything
 #                               else to the real cosign; only when a real
 #                               cosign 3.x is in PATH (status 1 otherwise)
-#   stub_curl DIR               DIR/curl: ghcr.io answers or not
+#   stub_cosign_package FILE REAL SUM LOG [TUF]
+#                               FILE: a POSIX sh cosign for the machines of
+#                               ci/check-airgap.sh (alpine): accepts
+#                               verify-blob of a file whose SHA-256 is SUM -
+#                               checksums.txt of the package of this checkout,
+#                               built in the same run - and hands everything
+#                               else to REAL, the real cosign, by exec
+#   stub_curl DIR              DIR/curl: ghcr.io answers or not
 #                               (FAKE_GHCR=down), everything else goes to
 #                               the real curl
 #   stub_compose_images FILE    FILE: what `docker compose [-f F]... config
@@ -95,6 +102,82 @@ fi
 exec "$real" "\$@"
 SH
   chmod 755 "$dir/cosign"
+}
+
+# stub_cosign_package FILE REAL SUM LOG [TUF]: the package of this checkout
+# is not signed and cannot be (the identity of the signature, release.yml of
+# self-hosted on main, is built into clab), so its checksums.txt passes here -
+# and only it: verify-blob of a file with another SHA-256 (a checksums.txt
+# of a published release, an altered one), verify and verify-attestation of
+# the images, initialize and version go to the real cosign untouched. As the
+# real one, it refuses without --trusted-root when Sigstore TUF (TUF, default
+# its timestamp.json) does not answer - a machine without network - so that
+# clab and get-cadence.sh take trusted_root.json of the mirror or the archive
+# as they would. Each call goes to LOG as "stub ..." or "real ..." with its
+# arguments; the check reads it.
+stub_cosign_package() {
+  local file="$1" real="$2" sum="$3" log="$4" tuf="${5:-https://tuf-repo-cdn.sigstore.dev/timestamp.json}"
+  cat >"$file" <<SH
+#!/bin/sh
+# The cosign of ci/check-airgap.sh on the package of this checkout
+# (ci/verify-stubs.sh, stub_cosign_package): not a cosign of the product.
+real='$real'
+sum='$sum'
+log='$log'
+tuf='$tuf'
+note() {
+  { printf '%s' "\$1"; shift; for a in "\$@"; do printf ' [%s]' "\$a"; done; echo; } >>"\$log"
+}
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "\$1" | cut -d' ' -f1; else shasum -a 256 "\$1" | cut -d' ' -f1; fi
+}
+reachable() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fs -m 5 -o /dev/null "\$tuf"
+  else
+    wget -q -T 5 -O /dev/null "\$tuf"
+  fi
+}
+if [ "\${1:-}" = verify-blob ]; then
+  blob="" bundle="" root="" prev=""
+  for a in "\$@"; do
+    case "\$prev" in
+    --bundle) bundle="\$a" ;;
+    --trusted-root) root="\$a" ;;
+    esac
+    case "\$a" in
+    --bundle=*) bundle="\${a#*=}" ;;
+    --trusted-root=*) root="\${a#*=}" ;;
+    esac
+    prev="\$a"
+    blob="\$a"
+  done
+  if [ -f "\$blob" ] && [ "\$(sha256 "\$blob")" = "\$sum" ]; then
+    if [ ! -f "\$bundle" ]; then
+      note refused "\$@"
+      echo "Error: open \$bundle: no such file or directory" >&2
+      exit 1
+    fi
+    if [ -n "\$root" ]; then
+      if [ ! -s "\$root" ]; then
+        note refused "\$@"
+        echo "Error: reading trusted root \$root: no such file or empty" >&2
+        exit 1
+      fi
+    elif ! reachable; then
+      note refused "\$@"
+      echo "Error: getting trusted root from TUF: \$tuf does not answer (no network)" >&2
+      exit 1
+    fi
+    note stub "\$@"
+    echo "Verified OK (the unsigned package of this checkout, sha256 \$sum: ci/verify-stubs.sh)" >&2
+    exit 0
+  fi
+fi
+note real "\$@"
+exec "\$real" "\$@"
+SH
+  chmod 755 "$file"
 }
 
 stub_curl() {

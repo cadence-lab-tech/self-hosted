@@ -15,10 +15,37 @@
 # They are removed with their volumes at the end, whatever happens; <name>
 # is COMPOSE_PROJECT_NAME (default check-airgap) - give it one of its own.
 #
-# The archive is of VERSION, from the releases of GitHub (or
-# CADENCE_RELEASES_URL) and the images of ghcr.io and Docker Hub: the release
-# must be published. With CHECK_AIRGAP_FROM=vA the archive of vA is saved
-# too: vA is installed from it and upgraded to VERSION without network.
+# The archive is of VERSION, with the images of ghcr.io and Docker Hub, and
+# the package of VERSION is one of two (CHECK_AIRGAP_PACKAGE):
+#
+#   release    the published release of VERSION, from the releases of GitHub
+#              (or CADENCE_RELEASES_URL): the real package, the real
+#              signature of its checksums.txt, nothing stands in;
+#   checkout   the package of this checkout, built by ci/package.sh --bundle
+#              (clab of VERSION from the tap, checked against its sums) and
+#              served to save as a release from a directory of its own
+#              (file:///pkg on the machine). It is not signed and cannot be:
+#              the identity of the signature is release.yml of self-hosted,
+#              built into clab. So on the machines cosign is a stand-in
+#              (ci/verify-stubs.sh, stub_cosign_package) that accepts
+#              verify-blob of exactly the checksums.txt built in this run - by
+#              its SHA-256 - and hands every other call to the real cosign:
+#              the images, their OpenVEX and trusted_root.json of Sigstore are
+#              verified for real, and installation and upgrade stay
+#              CADENCE_VERIFY=require. Before anything is saved the check
+#              makes sure that another checksums.txt goes to the real cosign
+#              and is refused, and at the end that the images went there too.
+#              What it does not prove is the signature of the package: there
+#              is none yet;
+#   auto       (default) release when download/VERSION/checksums.txt is
+#              there, checkout when the releases answer 404 for it - a release
+#              pull request (release/vX.Y.Z), where the release appears only
+#              once it is merged. Any other answer or a network error stops
+#              the check.
+#
+# The output names the package and why. With CHECK_AIRGAP_FROM=vA the archive
+# of vA - always the published release - is saved too: vA is installed from it
+# and upgraded to VERSION without network.
 #
 # The clab is CLAB_BIN - a linux clab for the architecture of Docker (the
 # one of a branch) - else the clab of VERSION from the tap. A clab without
@@ -29,15 +56,19 @@
 #
 #   ci/check-airgap.sh
 #   COMPOSE_PROJECT_NAME=check-clab-202 CLAB_BIN=/path/clab-linux-arm64 ci/check-airgap.sh
+#   CHECK_AIRGAP_PACKAGE=checkout CLAB_BIN=/path/clab-linux-arm64 ci/check-airgap.sh
 #
-#   CLAB_BIN            linux clab with clab server images (default: the tap)
-#   CHECK_AIRGAP_FROM   a release to install first and upgrade from
+#   CLAB_BIN              linux clab with clab server images (default: the tap)
+#   CHECK_AIRGAP_PACKAGE  auto (default), release or checkout: see above
+#   CHECK_AIRGAP_FROM     a release to install first and upgrade from
 #   CADENCE_RELEASES_URL  where the releases are (default GitHub)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 # shellcheck source=ci/lib.sh
 . ./ci/lib.sh
+# shellcheck source=ci/verify-stubs.sh
+. ./ci/verify-stubs.sh
 
 REGCTL_VERSION=v0.9.2
 COSIGN_VERSION=v3.1.3
@@ -72,6 +103,14 @@ from="${CHECK_AIRGAP_FROM:-}"
 [ -z "$from" ] || valid_version "$from" || die "CHECK_AIRGAP_FROM is '$from', expected vX.Y.Z"
 [ -z "$from" ] || version_lt "$from" "$version" || die "CHECK_AIRGAP_FROM ($from) must be older than VERSION ($version)"
 name="${COMPOSE_PROJECT_NAME:-check-airgap}"
+package="${CHECK_AIRGAP_PACKAGE:-auto}"
+case "$package" in
+auto | release | checkout) ;;
+*) die "CHECK_AIRGAP_PACKAGE is '$package', expected auto, release or checkout" ;;
+esac
+releases="${CADENCE_RELEASES_URL:-}"
+releases_url="${releases:-$CADENCE_RELEASES_DEFAULT}"
+releases_url="${releases_url%/}"
 command -v docker >/dev/null 2>&1 || die "Docker is required"
 case "$(docker version --format '{{.Server.Arch}}')" in
 amd64 | x86_64) arch=amd64 ;;
@@ -120,6 +159,58 @@ if ! docker run --rm -v "$work/tools:/t:ro" --entrypoint /t/clab "$DIND" server 
   exit 0
 fi
 
+# --- the package of VERSION ------------------------------------------------------------
+# published: the releases have download/VERSION/checksums.txt (true) or
+# answer 404 for it (false); anything else stops the check - a network error
+# is not "no release".
+published() {
+  local url="$releases_url/download/$version/checksums.txt" code
+  case "$url" in
+  file://*)
+    [ -f "${url#file://}" ]
+    return
+    ;;
+  esac
+  code="$(curl -sL --retry 2 -o /dev/null -w '%{http_code}' "$url")" ||
+    die "could not ask $releases_url whether the release $version is published ($url)"
+  case "$code" in
+  200) return 0 ;;
+  404) return 1 ;;
+  *) die "$url answered $code: cannot tell whether the release $version is published" ;;
+  esac
+}
+case "$package" in
+release)
+  published || die "CHECK_AIRGAP_PACKAGE=release, but there is no release $version at $releases_url (no download/$version/checksums.txt there): nothing to check"
+  why="CHECK_AIRGAP_PACKAGE=release"
+  ;;
+checkout) why="CHECK_AIRGAP_PACKAGE=checkout" ;;
+auto)
+  if published; then
+    package=release
+    why="it is published"
+  else
+    package=checkout
+    why="there is no release $version at $releases_url yet (404): a release pull request"
+  fi
+  ;;
+esac
+mkdir -p "$work/pkg" "$work/log"
+cosign_log="$work/log/cosign.log"
+if [ "$package" = release ]; then
+  info "the package: the published release $version at $releases_url ($why)"
+  save_releases="$releases"
+else
+  info "the package: of this checkout, not a release ($why)"
+  ./ci/package.sh --bundle "$work/pkg/download/$version" >/dev/null ||
+    die "ci/package.sh could not build the package of $version of this checkout"
+  package_sum="$(sha256_of "$work/pkg/download/$version/checksums.txt")"
+  stub_cosign_package "$work/tools/cosign-package" /usr/local/libexec/cosign "$package_sum" /log/cosign.log
+  save_releases="file:///pkg"
+  say "  built by ci/package.sh, served to save as $save_releases; its checksums.txt (sha256 $package_sum)"
+  say "  is not signed: a stand-in cosign accepts it, every other call goes to the real cosign"
+fi
+
 # --- the two machines -----------------------------------------------------------------
 mkdir -p "$work/c" "$work/o" "$work/share"
 printf '{"features":{"containerd-snapshotter":true}}\n' >"$work/c/daemon.json"
@@ -129,30 +220,47 @@ machine() { # machine NAME CONFIG [docker run flags]
   shift 2
   docker rm -f -v "$n" >/dev/null 2>&1 || true
   docker run -d --privileged --name "$n" "$@" -v "$cfg:/etc/docker/daemon.json:ro" \
-    -v "$work/share:/share" -v "$work/tools:/tools:ro" "$DIND" >/dev/null
+    -v "$work/share:/share" -v "$work/tools:/tools:ro" -v "$work/pkg:/pkg:ro" -v "$work/log:/log" "$DIND" >/dev/null
   local i
   for i in $(seq 60); do
     docker exec "$n" docker info >/dev/null 2>&1 && break
     [ "$i" -lt 60 ] || die "the Docker daemon of $n did not start"
     sleep 1
   done
-  docker exec "$n" sh -c 'install -m 755 /tools/regctl /tools/cosign /tools/clab /usr/local/bin/'
+  # The package of this checkout: the stand-in as cosign, the real one behind it.
+  docker exec "$n" sh -c 'install -m 755 /tools/regctl /tools/clab /usr/local/bin/ &&
+    if [ -f /tools/cosign-package ]; then
+      install -D -m 755 /tools/cosign /usr/local/libexec/cosign && install -m 755 /tools/cosign-package /usr/local/bin/cosign
+    else
+      install -m 755 /tools/cosign /usr/local/bin/
+    fi'
 }
 # on NAME SCRIPT: sh -c SCRIPT on the machine NAME; the clab of the check
 # runs the scripts of the package too (CADENCE_CLAB).
 on() {
   docker exec -e CADENCE_CLAB=/usr/local/bin/clab -e CADENCE_RELEASES_URL="${3:-}" "$1" sh -c "$2"
 }
-releases="${CADENCE_RELEASES_URL:-}"
 
 info "machine $c (containerd image store): save with network"
 machine "$c" "$work/c/daemon.json"
 check "$c runs the containerd image store" contains "$(docker exec "$c" docker info 2>/dev/null)" "io.containerd.snapshotter.v1"
 # curl for get-cadence.sh: the machine will have no network to add it.
 docker exec "$c" apk add -q curl >/dev/null || die "could not add curl to $c"
+if [ "$package" = checkout ]; then
+  # The stand-in is bound to the package of this run: another checksums.txt
+  # goes to the real cosign, which refuses the stand-in bundle.
+  docker exec "$c" sh -c "cp /pkg/download/$version/checksums.txt /tmp/altered.txt && echo altered >>/tmp/altered.txt"
+  blob="cosign verify-blob --bundle /pkg/download/$version/$VERIFY_BUNDLE --certificate-identity $VERIFY_PACKAGE_IDENTITY --certificate-oidc-issuer $VERIFY_ISSUER"
+  check "stand-in cosign: another checksums.txt is refused" sh -c "! docker exec $c $blob /tmp/altered.txt"
+  check "...by the real cosign" grep -qF "real [verify-blob]" "$cosign_log"
+  check "stand-in cosign: checksums.txt of this package passes" docker exec "$c" sh -c "$blob /pkg/download/$version/checksums.txt"
+  check "stand-in cosign: cosign version is the real one" contains "$(docker exec "$c" cosign version 2>&1)" "$COSIGN_VERSION"
+fi
 saved_sum=""
 for v in $from $version; do
-  out="$(on "$c" "cd /share && clab server images save --version $v --output cadence-$v-airgap.tar" "$releases" 2>&1)" ||
+  rel="$releases"
+  [ "$v" != "$version" ] || rel="$save_releases"
+  out="$(on "$c" "cd /share && clab server images save --version $v --output cadence-$v-airgap.tar" "$rel" 2>&1)" ||
     { printf '%s\n' "$out" | tail -n 20 >&2; die "clab server images save --version $v failed"; }
   sum="$(sha256_of "$work/share/cadence-$v-airgap.tar")"
   check "save $v prints the SHA-256 of the archive" contains "$out" "$sum"
@@ -254,5 +362,19 @@ else
   info "no CHECK_AIRGAP_FROM: the upgrade without network is not checked"
 fi
 
+if [ "$package" = checkout ]; then
+  # What the stand-in let through: verify-blob of this package only; the
+  # images, their OpenVEX and the root of Sigstore went to the real cosign.
+  check "stand-in cosign: it accepted verify-blob of this package only" sh -c "! grep -E '^(stub|refused) ' '$cosign_log' | grep -qvE '^(stub|refused) \[verify-blob\]'"
+  check "...and refused it off the network without trusted_root.json" grep -q '^refused \[verify-blob\]' "$cosign_log"
+  check "the real cosign verified the images" grep -q '^real \[verify\]' "$cosign_log"
+  check "...and their OpenVEX" grep -q '^real \[verify-attestation\]' "$cosign_log"
+  check "...and fetched trusted_root.json of Sigstore" grep -q '^real \[initialize\]' "$cosign_log"
+fi
+
 [ "$failures" -eq 0 ] || die "$failures check(s) failed"
-ok "the closed network works on $version (archive $saved_sum)"
+if [ "$package" = checkout ]; then
+  ok "the closed network works on $version (archive $saved_sum; the package of this checkout, its checksums.txt not signed)"
+else
+  ok "the closed network works on $version (archive $saved_sum; the published release at $releases_url)"
+fi
