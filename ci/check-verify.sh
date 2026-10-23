@@ -31,6 +31,10 @@
 # version before the backup, the files and the pull - a bad one changes
 # nothing; a release without the bundle is refused; CADENCE_VERIFY of .env
 # wins over the environment and .env is not touched.
+# The stand-in cosign of ci/check-airgap.sh (stub_cosign_package): it passes
+# checksums.txt of the package it is bound to and nothing else - another or
+# an altered checksums.txt, verify, verify-attestation and initialize go to
+# the real cosign - and refuses without --trusted-root when TUF is down.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -338,6 +342,44 @@ d="$(installation "$unsigned_from")"
 before="$(state "$d")"
 run "$d" upgrade.sh CADENCE_VERIFY=require -- "$unsigned"
 unchanged "$d" "$before" "require: an upgrade to the unsigned $unsigned is refused, nothing has changed"
+
+# The stand-in of ci/check-airgap.sh for the package of a checkout: the stub
+# cosign above plays the real one (FAKE_COSIGN_BAD=package - it refuses
+# verify-blob, as the real cosign refuses a stand-in bundle), TUF answers
+# when the file of a file:// address is there.
+info "the stand-in cosign of ci/check-airgap.sh (stub_cosign_package)"
+quiet() { "$@" >/dev/null 2>&1; }
+rel="$releases/download/$version"
+stand="$work/cosign-package"
+stand_log="$work/cosign-package.log"
+stub_cosign_package "$stand" "$cosign_dir/cosign" "$(sha256_of "$rel/checksums.txt")" "$stand_log" "file://$work/tuf"
+blob=(verify-blob --bundle "$rel/$VERIFY_BUNDLE" --certificate-identity "$VERIFY_PACKAGE_IDENTITY" --certificate-oidc-issuer "$VERIFY_ISSUER")
+printf '{}\n' >"$work/trusted_root.json"
+cp "$rel/checksums.txt" "$work/altered.txt"
+echo altered >>"$work/altered.txt"
+export FAKE_COSIGN_BAD=package
+: >"$work/tuf"
+: >"$work/cosign.log"
+check "checksums.txt of the package passes with TUF answering" quiet "$stand" "${blob[@]}" "$rel/checksums.txt"
+check "...and with --trusted-root" quiet "$stand" "${blob[@]}" --trusted-root "$work/trusted_root.json" "$rel/checksums.txt"
+check "...without the real cosign" [ ! -s "$work/cosign.log" ]
+check "checksums.txt of another package goes to the real cosign and is refused" sh -c "! \"\$0\" \"\$@\" >/dev/null 2>&1" "$stand" "${blob[@]}" "$releases/download/$target/checksums.txt"
+check "...an altered checksums.txt too" sh -c "! \"\$0\" \"\$@\" >/dev/null 2>&1" "$stand" "${blob[@]}" "$work/altered.txt"
+check "...the real cosign was called twice" [ "$(grep -c '^cosign \[verify-blob\]' "$work/cosign.log")" = 2 ]
+rm "$work/tuf"
+check "TUF does not answer: refused without --trusted-root" sh -c "! \"\$0\" \"\$@\" >/dev/null 2>&1" "$stand" "${blob[@]}" "$rel/checksums.txt"
+check "...passes with --trusted-root" quiet "$stand" "${blob[@]}" --trusted-root "$work/trusted_root.json" "$rel/checksums.txt"
+check "...refused with a missing one" sh -c "! \"\$0\" \"\$@\" >/dev/null 2>&1" "$stand" "${blob[@]}" --trusted-root "$work/none.json" "$rel/checksums.txt"
+check "...refused without the bundle" sh -c "! \"\$0\" \"\$@\" >/dev/null 2>&1" "$stand" verify-blob --bundle "$work/none.json" --trusted-root "$work/trusted_root.json" "$rel/checksums.txt"
+unset FAKE_COSIGN_BAD
+: >"$work/cosign.log"
+quiet "$stand" verify --offline --trusted-root "$work/trusted_root.json" "$backend_ref" || true
+quiet "$stand" verify-attestation --type openvex "$backend_ref" || true
+quiet "$stand" initialize || true
+check "verify, verify-attestation and initialize go to the real cosign" \
+  [ "$(cut -d' ' -f1-2 "$work/cosign.log" | tr '\n' ' ')" = "cosign [verify] cosign [verify-attestation] cosign [initialize] " ]
+check "...and its log says which went where" \
+  [ "$(cut -d' ' -f1-2 "$stand_log" | tr '\n' ' ')" = "stub [verify-blob] stub [verify-blob] real [verify-blob] real [verify-blob] refused [verify-blob] stub [verify-blob] refused [verify-blob] refused [verify-blob] real [verify] real [verify-attestation] real [initialize] " ]
 
 [ "$failures" -eq 0 ] || die "$failures check(s) failed"
 ok "signature verification checks passed"

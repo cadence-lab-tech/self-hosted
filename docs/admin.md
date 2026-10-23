@@ -1930,12 +1930,28 @@ docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres -At 
 df -h "$(docker info -f '{{.DockerRootDir}}')"
 ```
 
-`clab server upgrade` (and `./upgrade.sh` of a release with
-[clab in the package](#clab-in-the-package)) says before the backup that
+`clab` v0.15.0 and newer (`clab server upgrade`) says before the backup that
 the upgrade moves the data, with the size of the database, and refuses with
-nothing changed when the disk of the volumes has less free space than that;
-the bash `upgrade.sh` of v0.13.0 checks nothing - check by hand as above.
-What the move does is in the logs:
+nothing changed when the disk of the volumes has less free space than that.
+Older `clab` checks nothing - and the first move is exactly when the
+installation runs an older one: `./upgrade.sh` runs the `clab` in `bin/` of
+the version it starts from (see [Upgrades and rollback](#upgrades-and-rollback)),
+v0.14.x for a release on PostgreSQL 17, and the bash `upgrade.sh` of v0.13.0
+or older has no `clab` at all. So for the first move either upgrade with
+`clab` v0.15.0 or newer, in the directory of the installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=v0.15.0 sh
+clab server upgrade v0.15.0                              # or --dir /opt/cadence
+CADENCE_CLAB=/usr/local/bin/clab ./upgrade.sh v0.15.0    # the same through the script
+```
+
+(`brew upgrade clab` does as well; on a closed network take
+`bin/clab-<os>-<arch>` of the package in the archive of v0.15.0, see
+[Air-gapped installation](#air-gapped-installation)), or check the free
+space by hand as above and run `./upgrade.sh v0.15.0` as usual. Later
+upgrades run the `clab` of v0.15.0 or newer from `bin/` and check by
+themselves. What the move does is in the logs:
 
 ```bash
 docker compose logs pg-upgrade-dump pg-upgrade-load

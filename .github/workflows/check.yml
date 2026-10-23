@@ -42,8 +42,15 @@
 #          of VERSION, then in docker:28-dind daemons without network load,
 #          install, backup, restore and backup verify on the containerd
 #          image store, and the refusal of the classic overlay2 storage.
-#          Needs a clab of VERSION with clab server images (the release
-#          after v0.13.0): for an older one it is skipped with a note
+#          The package of VERSION is the published release, or - while
+#          there is none, as on a release pull request (release/vX.Y.Z),
+#          whose release appears once it is merged - the package of this
+#          commit built by ci/package.sh; its checksums.txt, unsigned, is
+#          accepted by a stand-in cosign bound to its SHA-256, the images
+#          are verified by the real cosign (CHECK_AIRGAP_PACKAGE=auto, the
+#          default: release or checkout). Needs a clab of VERSION with clab
+#          server images (the release after v0.14.1): for an older one it is
+#          skipped with a note
 #
 #   upgrade  the upgrade between two versions (ci/check-upgrade.sh): FROM as
 #          installed, TO as the package of this commit. On a release pull
