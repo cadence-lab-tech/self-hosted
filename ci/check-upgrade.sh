@@ -49,7 +49,10 @@
 #
 # CADENCE_VERIFY=off there: images of a branch are no images of a release,
 # their signatures are not ours to check (with auto they are "not pinned,
-# not verified", require refuses them).
+# not verified", require refuses them). The installer of FROM v0.15.0 and
+# later keeps that CADENCE_REGISTRY in .env, and .env wins over the
+# environment: the failed image pull puts its unreachable registry into .env
+# itself and brings .env back afterwards - leave the line in .env as it is.
 #
 # Signatures (CADENCE_VERIFY, docs/admin.md "Verifying a release"): the package of TO is
 # this checkout, not signed; it gets a stand-in bundle (ci/package.sh
@@ -400,8 +403,20 @@ JSON
   }
 
   # --- a failed image pull -------------------------------------------------------------
+  # The installer of FROM v0.15.0 and later writes CADENCE_REGISTRY of its
+  # environment to .env, and .env wins over the environment (clab server, and
+  # set -a; . ./.env of the bash scripts): the unreachable registry goes into
+  # .env as well - in place of the line, or as a new one - and the copy of
+  # .env comes back after the scenario, byte for byte.
   info "$up_name $to with images that cannot be pulled"
-  local before out
+  local before out env_sum
+  env_sum="$(sha256_of .env)"
+  cp -p .env "$work/env.before-pull"
+  if grep -q '^CADENCE_REGISTRY=' .env; then
+    sed 's/^CADENCE_REGISTRY=.*/CADENCE_REGISTRY=127.0.0.1:9/' "$work/env.before-pull" >.env
+  else
+    { cat "$work/env.before-pull"; [ -z "$(tail -c 1 "$work/env.before-pull")" ] || echo; echo CADENCE_REGISTRY=127.0.0.1:9; } >.env
+  fi
   before="$(files_state)"
   if out="$(CADENCE_REGISTRY=127.0.0.1:9 upgrade_cmd "$to" 2>&1)"; then
     fail "$up_name $to succeeded with an unreachable registry"
@@ -418,6 +433,12 @@ JSON
     pass "the stack still runs $from"
   else
     fail "the stack does not report $from after the failed pull"
+  fi
+  cp -p "$work/env.before-pull" .env
+  if [ "$(sha256_of .env)" = "$env_sum" ]; then
+    pass ".env as it was before the failed pull"
+  else
+    fail ".env is not as it was before the failed pull"
   fi
 
   # --- signatures of TO -------------------------------------------------------------------
