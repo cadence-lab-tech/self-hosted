@@ -191,7 +191,7 @@ auto)
     why="it is published"
   else
     package=checkout
-    why="there is no release $version at $releases_url yet (404): a release pull request"
+    why="there is no release $version at $releases_url yet, as on a release pull request"
   fi
   ;;
 esac
