@@ -770,14 +770,19 @@ no Caddy and no volumes.
   ends before the Ingress.
 - **Pod Security `restricted`** for the namespace, from the chart 0.14.0:
   every pod meets it — the API, the worker, the precheck and the UI. The
-  frontend image runs Caddy as uid 65532, and the chart has it listen on
-  port 8080 only; its one added capability is `NET_BIND_SERVICE`, the one
-  `restricted` allows (the Caddy binary carries it as a file capability).
-  The chart 0.13.0 needs `baseline`: its UI image runs as root.
+  frontend image runs Caddy as uid 65532 on port 8080, and from the chart
+  0.16.0 every container, the UI included, drops all capabilities and adds
+  none. The charts 0.14.x and 0.15.x add to the UI the one capability
+  `restricted` allows, binding ports below 1024: the Caddy binary of their
+  image carried it as a file capability. The chart 0.13.0 needs
+  `baseline`: its UI image runs as root.
 - **The images of the version of the chart.** The chart runs the UI as
-  uid 65532 on port 8080, which the frontend image does from v0.14.0;
-  `image.tag` pointing at an older frontend image (root, port 80 only)
-  leaves the UI pod not ready.
+  uid 65532 on port 8080 with no capability added, which the frontend image
+  does from v0.16.0. `image.tag` pointing at an older frontend image leaves
+  the UI pod failing: the Caddy of v0.14.x and v0.15.x does not start
+  (`operation not permitted`: its binary carries a file capability the pod
+  does not have), an image before v0.14.0 (root, port 80 only) is never
+  ready.
 
 ### The chart
 
@@ -1875,7 +1880,25 @@ script and verifies no signature (check them by hand, as in
 upgrade` v0.12.0+, which verifies from the first upgrade on). Every later
 `./upgrade.sh` verifies.
 
-Skipping versions is fine. On an arm64 machine (Apple Silicon, Graviton,
+Skipping versions is fine, with one exception: from v0.13.0 or older
+straight to v0.16.0 or newer. From v0.16.0 the UI listens on port 8080
+only (see [The UI on port 8080](#the-ui-on-port-8080)), and the bash
+`upgrade.sh` of v0.13.0 and older, like `clab` before v0.14.0, waits for
+the UI on port 80: it never sees the new version ready, exits with an error
+and prints the rollback, although the new version runs. So either go
+through a release in between - `./upgrade.sh v0.15.0` (or v0.14.1), then
+`./upgrade.sh` to the version you want - or run the upgrade with `clab`
+v0.14.0 or newer, in the directory of the installation:
+
+```bash
+brew upgrade clab                 # or the install script of the tap, see "CLI and agents"
+clab server upgrade v0.16.0       # or --dir /opt/cadence
+```
+
+An installation of v0.14.1 or newer upgrades with the `clab` of its
+package, which waits for the UI on either port: nothing to do there.
+
+On an arm64 machine (Apple Silicon, Graviton,
 Ampere) the upgrade to v0.5.3 or later recreates `api`, `worker` and `ui`
 from native linux/arm64 images instead of the amd64 ones that ran under
 emulation before; `postgres`, `caddy` and the data are not affected. If the
@@ -1893,6 +1916,28 @@ example:
 Releases are published as GitHub Releases of this repository; watch it
 (Releases and Security alerts) to hear about them and about security fixes
 (see [Security](#security)).
+
+### The UI on port 8080
+
+From v0.16.0 the `ui` container listens on port 8080 only; v0.14.x and
+v0.15.x listen on 80 and 8080, older versions on 80 only. The `Caddyfile`
+of the package goes to `ui:8080` and is replaced together with the image,
+so the upgrade and its rollback need nothing from you.
+
+What the package does not replace is yours to move: a `Caddyfile` edited by
+hand and carried over after `upgrade --force`, a Caddyfile of your own
+mounted in `compose.override.yml`, a proxy of your own in the network of
+compose - anything that goes to port 80 of the UI (`ui` with no port or
+with `:80`). Point it at `ui:8080` before the upgrade: port 8080 already
+answers in v0.14.x and v0.15.x. Missed, it shows as a working upgrade -
+the upgrade reports the new version ready, because readiness asks the UI
+directly and not through your route - and the site answers 502 everywhere
+but `/v1`, `/mcp`, `/webhooks`, `/healthz` and `/readyz`. The fix is the
+same `ui:8080` in your route, then:
+
+```bash
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile   # or restart your own proxy
+```
 
 ### PostgreSQL 18
 
@@ -2103,6 +2148,10 @@ Apply it with `docker compose up -d`. An installation from before v0.6.0 has
 no such file and its `COMPOSE_FILE` does not list one: create the file and
 append `:compose.override.yml` to `COMPOSE_FILE` in `.env`. `upgrade.sh`
 warns when an override file exists but `COMPOSE_FILE` does not list it.
+
+A Caddyfile or a proxy of your own that serves the UI goes to `ui:8080`:
+from v0.16.0 it is the only port of the UI, and a route to its port 80
+answers 502 after the upgrade (see [The UI on port 8080](#the-ui-on-port-8080)).
 
 ## Air-gapped installation
 
@@ -2664,11 +2713,14 @@ vulnerability, response times, disclosure and CVE.
   [Upgrades and rollback](#upgrades-and-rollback); the advisory names the
   affected and fixed versions and any step beyond the upgrade.
 - **Users of the containers.** The API and the worker run as uid 65532;
-  the UI too, from v0.14.0 (before, its image ran as root). The entry
-  point `caddy` runs the same frontend image as root, by `user: "0:0"` in
-  `docker-compose.yml`: it binds 80 and 443, and the certificates in its
-  volume `caddy_data` belong to root. In Kubernetes every pod of the chart
-  runs as uid 65532 under Pod Security `restricted`
+  the UI too, from v0.14.0 (before, its image ran as root), and from
+  v0.16.0 it listens on port 8080 only, its Caddy binary carries no file
+  capability, and it writes nothing at runtime, so it runs with no
+  capabilities on a read-only root. The entry point `caddy` runs the same
+  frontend image as root, by `user: "0:0"` in `docker-compose.yml`: it
+  binds 80 and 443, and the certificates in its volume `caddy_data` belong
+  to root. In Kubernetes every pod of the chart runs as uid 65532 under Pod
+  Security `restricted`, from the chart 0.16.0 with no capability added
   ([Kubernetes (Helm)](#kubernetes-helm)).
 - **Is it ours?** Releases from v0.9.0 are signed; how to check the
   package, the images, the CLI, their SBOM and provenance, and which scanner
@@ -2970,7 +3022,7 @@ same in every image built on it. None of them is on the path of Caddy: Go
 has its own TLS and HTTP/2, and Caddy links no C library; `curl` and
 `ssl_client` are never run, and the package runs `busybox wget` in the
 `caddy` container only for plain HTTP inside the compose network
-(`http://ui/` on start, the metrics in its checks) with URLs of its own.
+(`http://ui:8080/` on start, the metrics in its checks) with URLs of its own.
 They go away with the base image once Alpine ships the fixes.
 
 **Third-party images: `postgres`, `db-client` and the move to

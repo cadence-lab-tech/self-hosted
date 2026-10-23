@@ -120,17 +120,33 @@ container_of() {
   docker compose ps -a -q "$1" 2>/dev/null | head -n1
 }
 
+# The addresses wait_ready asks the UI on, in order, as uiProbes of clab
+# (cmd/clab/server_compose.go). The port of ui depends on the version of the
+# image: :80 only before v0.14.0 (root), :80 and :8080 in v0.14.x and
+# v0.15.x, :8080 only since v0.16.0. The checks run stacks of older versions
+# too (FROM of ci/check-upgrade.sh), so the wait takes either.
+UI_PROBES=(http://ui:8080/ http://ui:80/)
+
+# ui_answers succeeds when the UI answers on one of UI_PROBES.
+ui_answers() {
+  local url
+  for url in "${UI_PROBES[@]}"; do
+    docker compose exec -T caddy wget -q -O /dev/null "$url" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 # wait_ready [SECONDS] waits until the API reports ready (its healthcheck is
 # /readyz: the service is up and the database answers) and the UI answers
-# through Caddy.
+# from the caddy container on one of UI_PROBES. The route of the Caddyfile
+# is not what it asks: the package changes it together with the image.
 wait_ready() {
   local timeout="${1:-180}" waited=0 api health
   while [ "$waited" -lt "$timeout" ]; do
     api="$(container_of api)"
     health=""
     [ -n "$api" ] && health="$(docker inspect -f '{{.State.Health.Status}}' "$api" 2>/dev/null || true)"
-    if [ "$health" = healthy ] &&
-      docker compose exec -T caddy wget -q -O /dev/null http://ui/ >/dev/null 2>&1; then
+    if [ "$health" = healthy ] && ui_answers; then
       return 0
     fi
     sleep 3

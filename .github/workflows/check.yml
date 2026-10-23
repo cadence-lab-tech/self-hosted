@@ -34,9 +34,10 @@
 #          an external PostgreSQL and a stand-in bucket, the secrets as
 #          Secrets; the precheck, three replicas of the API, sign-in, MCP
 #          through the Ingress, the bucket, Pod Security restricted for
-#          every pod, upgrades. Needs the images of v0.14.0 or newer (*_FILE
+#          every pod, upgrades. Needs the images of v0.16.0 or newer (*_FILE
 #          since v0.13.0, the frontend image as uid 65532 on :8080 since
-#          v0.14.0): for older VERSION it is skipped with a notice
+#          v0.14.0, with no capability to add since v0.16.0): for older
+#          VERSION it is skipped with a notice
 #
 #   airgap the closed network (ci/check-airgap.sh): clab server images save
 #          of VERSION, then in docker:28-dind daemons without network load,
@@ -235,9 +236,12 @@ jobs:
   # The Helm chart (CLAB-201) in kind. Images before v0.13.0 do not read
   # *_FILE, which the chart passes every secret by; the frontend image before
   # v0.14.0 runs as root on :80, and the chart runs ui as uid 65532 on :8080
-  # under Pod Security restricted (CLAB-236). For an older VERSION the job
-  # prints a notice and skips, so main stays green until the release of the
-  # images catches up (the release pull request of v0.14.0 runs it).
+  # under Pod Security restricted (CLAB-236); the frontend image before
+  # v0.16.0 carries a file capability for :80, and the chart drops ALL with
+  # nothing added, so its Caddy fails to exec (EPERM, CLAB-248). For an
+  # older VERSION the job prints a notice and skips, so main stays green
+  # until the release of the images catches up (the release pull request of
+  # v0.16.0 runs it).
   helm:
     needs: lint
     runs-on: ubuntu-latest
@@ -249,8 +253,8 @@ jobs:
         run: |
           . ./ci/lib.sh
           v="$(tr -d '[:space:]' <VERSION)"
-          if version_lt "$v" v0.14.0; then
-            echo "::notice::VERSION is $v: the chart needs images of v0.14.0+ (*_FILE, the frontend image as uid 65532 on :8080), the check of the Helm chart is skipped"
+          if version_lt "$v" v0.16.0; then
+            echo "::notice::VERSION is $v: the chart needs images of v0.16.0+ (*_FILE, the frontend image as uid 65532 on :8080 with no capability to add), the check of the Helm chart is skipped"
             echo "skip=true" >>"$GITHUB_OUTPUT"
           else
             echo "skip=false" >>"$GITHUB_OUTPUT"

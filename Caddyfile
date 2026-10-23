@@ -31,9 +31,11 @@
 	}
 
 	# The UI image serves its own static files and falls back to index.html:
-	# routes such as /projects/ACME/tasks/42 live in the browser router.
+	# routes such as /projects/ACME/tasks/42 live in the browser router. It
+	# listens on 8080 only since v0.16.0 (on 80 and 8080 in v0.14.x and
+	# v0.15.x, so this route works with their images too).
 	handle {
-		reverse_proxy ui:80
+		reverse_proxy ui:8080
 	}
 }
 

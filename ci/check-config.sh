@@ -826,9 +826,30 @@ check "[proxy] has no TLS automation" lacks "$proxy" '"acme"'
 for cfg in "$tls" "$proxy"; do
   check "routes /v1 /mcp /webhooks /healthz /readyz to the API" contains "$cfg" '"/v1/*","/mcp/*","/webhooks/*","/healthz","/readyz"'
   check "MCP is proxied without buffering" contains "$cfg" '"flush_interval":-1'
-  check "everything else goes to the UI" contains "$cfg" '"dial":"ui:80"'
+  # The frontend image listens on :8080 only since v0.16.0 (CLAB-248); its
+  # images of v0.14.x and v0.15.x answer there too.
+  check "everything else goes to the UI on ui:8080" contains "$cfg" '"dial":"ui:8080"'
   check "nothing is routed to the metrics port" lacks "$cfg" ':9090'
 done
+
+# CLAB-248: the UI listens on :8080 only from v0.16.0. Nothing the package
+# ships goes to its port 80 (ci/lib.sh still waits on either port: the
+# checks run stacks of older versions), and docs/admin.md tells what an
+# administrator moves by hand and how versions before v0.14.0 upgrade.
+info "the UI on port 8080"
+ui80="$(grep -rnE 'ui:80([^0-9]|$)|http://ui/' Caddyfile docker-compose.yml compose.*.yml charts docs/admin.md README.md || true)"
+check "the package goes to ui:8080, never to port 80 of ui${ui80:+ ($(head -n1 <<<"$ui80"))}" [ -z "$ui80" ]
+check "nothing in the package adds NET_BIND_SERVICE" \
+  [ -z "$(grep -rn NET_BIND_SERVICE docker-compose.yml compose.*.yml charts docs/admin.md README.md || true)" ]
+check "docs/admin.md has the section The UI on port 8080" contains "$admin" "### The UI on port 8080"
+check "docs/admin.md: a route of your own goes to ui:8080, missed it is 502 at ready" \
+  [ "$(awk '/^### The UI on port 8080$/ { on = 1; next } on && /^#/ { exit } on' docs/admin.md | grep -cE 'ui:8080|502|ready')" -ge 3 ]
+skip_rule() {
+  grep -qF 'with one exception: from v0.13.0 or older' docs/admin.md &&
+    grep -qF './upgrade.sh v0.15.0' docs/admin.md && grep -qF 'clab server upgrade v0.16.0' docs/admin.md
+}
+check "docs/admin.md: versions before v0.14.0 go through v0.15.0 or clab v0.14.0+" skip_rule
+check "docs/admin.md: busybox wget asks http://ui:8080/" contains "$admin" "(\`http://ui:8080/\` on start"
 
 # The Helm chart (charts/cadence, docs/admin.md "Kubernetes (Helm)"): the
 # second way to install, kept in parity with docker-compose.yml. helm of PATH
@@ -1105,15 +1126,16 @@ check "api, worker, wait-for-api, dbcheck and ui: non-root 65532, read-only root
   [ "$sc" = "true 65532 true 65532 true false ALL RuntimeDefault" ]
 check "every pod has seccomp RuntimeDefault and fsGroup 65532" \
   [ "$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | .spec.template.spec.securityContext | "\(.seccompProfile.type) \(.fsGroup)"] | unique | join("|")' <<<"$min_json")" = "RuntimeDefault 65532" ]
-# The one capability restricted lets a container add: NET_BIND_SERVICE, and
-# only ui has it (the file capability of its Caddy binary needs it in the
-# bounding set, or exec fails).
-check "added capabilities: NET_BIND_SERVICE of ui and nothing else" \
-  [ "$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | .metadata.name as $n | .spec.template.spec as $p |
-    ($p.containers + ($p.initContainers // []))[] | (.securityContext.capabilities.add // [])[] | "\($n):\(.)"] | join(",")' <<<"$min_json")" = "cadence-ui:NET_BIND_SERVICE" ]
+# No container adds a capability, ui included: since v0.16.0 the Caddy
+# binary of the frontend image has no file capability (CLAB-248), so drop
+# ALL is all it gets.
+check "no container adds a capability" \
+  [ -z "$(jq -r '[.[] | select(.kind == "Deployment" or .kind == "Job") | .metadata.name as $n | .spec.template.spec as $p |
+    ($p.containers + ($p.initContainers // []))[] | (.securityContext.capabilities.add // [])[] | "\($n):\(.)"] | join(",")' <<<"$min_json")" ]
 ui_spec="$(jq -c '.[] | select(.kind == "Deployment" and .metadata.name == "cadence-ui") | .spec.template.spec' <<<"$min_json")"
-check "ui: Caddy on :8080 only (CADENCE_UI_ADDRESS), the port http is 8080" \
-  [ "$(jq -r '.containers[0] | "\([.env[] | select(.name == "CADENCE_UI_ADDRESS") | .value] | join(",")) \([.ports[] | "\(.name)=\(.containerPort)"] | join(","))"' <<<"$ui_spec")" = ":8080 http=8080" ]
+# The image listens on :8080 by itself: no variable to set its address.
+check "ui: no environment, the port http is 8080" \
+  [ "$(jq -r '.containers[0] | "\(.env // [] | length) \([.ports[] | "\(.name)=\(.containerPort)"] | join(","))"' <<<"$ui_spec")" = "0 http=8080" ]
 check "ui: readiness and liveness on the port http" \
   [ "$(jq -r '.containers[0] | "\(.readinessProbe.httpGet.port) \(.livenessProbe.httpGet.port)"' <<<"$ui_spec")" = "http http" ]
 check "ui: emptyDir on /data and /config" \

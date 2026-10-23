@@ -51,8 +51,10 @@
 #
 # Needs Docker, kind, helm, kubectl, jq, curl and openssl. The images must
 # read *_FILE (v0.13.0 or newer) and the frontend image must run as uid 65532
-# on :8080 (v0.14.0 or newer, CLAB-236): check.yml skips the job for an
-# older VERSION.
+# on :8080 (v0.14.0 or newer, CLAB-236) with no capability to add (v0.16.0
+# or newer, CLAB-248: before it the Caddy binary carries a file capability
+# and fails to exec under drop ALL): check.yml skips the job for an older
+# VERSION.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -317,9 +319,9 @@ for c in api worker ui; do
       ([.containers[], (.initContainers // [])[]] | map(.securityContext | "\(.readOnlyRootFilesystem) \(.allowPrivilegeEscalation) \(.capabilities.drop | join(","))") | unique | join("|"))] | join(" ")' <<<"$spec")" = \
       "true 65532 RuntimeDefault true false ALL" ]
 done
-check "api and worker add no capability, ui only NET_BIND_SERVICE" \
+check "no pod adds a capability" \
   [ "$(for c in api worker ui; do spec_of "$c" | jq -r --arg c "$c" '[.containers[], (.initContainers // [])[]] | map("\($c):\(.securityContext.capabilities.add // [] | join(","))") | join(" ")'; done | tr '\n' ' ')" = \
-    "api: worker: worker: ui:NET_BIND_SERVICE " ]
+    "api: worker: worker: ui: " ]
 # shellcheck disable=SC2016 # the program of awk
 ui_uid="$(k exec "deploy/$release-ui" -- awk '/^Uid:/ { print $2 }' /proc/1/status 2>/dev/null || true)"
 check "the Caddy of ui runs as uid 65532 ($ui_uid)" [ "$ui_uid" = 65532 ]
