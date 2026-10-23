@@ -256,8 +256,8 @@ services:
       - ./secrets:/secrets:ro
 
   # The UI: static files served by Caddy inside the image, as the user of
-  # the image (uid 65532 from v0.14.0), on :80 and :8080; the Caddyfile goes
-  # to ui:80.
+  # the image (uid 65532 from v0.14.0), on :8080 only from v0.16.0; the
+  # Caddyfile goes to ui:8080.
   ui:
     <<: *image-frontend
     restart: unless-stopped

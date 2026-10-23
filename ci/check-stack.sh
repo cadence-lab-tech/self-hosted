@@ -721,6 +721,26 @@ if version_lt "$version" v0.14.0; then
 else
   check "ui is no root: uid 65532 ($ui_uid)" [ "$ui_uid" = 65532 ]
 fi
+# CLAB-248: the frontend image listens on :8080 since v0.14.0 and on :8080
+# only since v0.16.0, with no file capability on its Caddy binary. Asked
+# from the caddy container, as the Caddyfile of the package goes there.
+# Images of a branch (CADENCE_FRONTEND_DIGEST set, even empty) are checked
+# as the next release whatever VERSION says.
+ui_get() { docker compose exec -T caddy wget -q -T 3 -O /dev/null "http://ui:$1/" >/dev/null 2>&1; }
+ui_closed() { ! ui_get "$1"; }
+if version_lt "$version" v0.14.0; then
+  info "VERSION is $version: the frontend image listens on :80 only before v0.14.0, its ports are not checked"
+else
+  check "ui answers on :8080" ui_get 8080
+  if version_lt "$version" v0.16.0 && [ -z "${CADENCE_FRONTEND_DIGEST+set}" ]; then
+    info "VERSION is $version: the frontend image of v0.14.x and v0.15.x answers on :80 too, :80 closed is checked from v0.16.0 (or on images of a branch, CADENCE_FRONTEND_DIGEST=)"
+  else
+    check "ui does not answer on :80" ui_closed 80
+    # shellcheck disable=SC2016 # expanded in the container
+    check "the Caddy binary of ui has no file capability" \
+      docker compose exec -T ui sh -c 'command -v getcap && [ -z "$(getcap /usr/bin/caddy)" ]'
+  fi
+fi
 check "no permission denied in the logs of ui and caddy" \
   lacks "$(docker compose logs ui caddy 2>&1 | tr '[:upper:]' '[:lower:]')" "permission denied"
 
