@@ -1950,6 +1950,7 @@ upstream of your route):
 ✗ the stack runs v0.16.0, but the upstream ui:PORT of the loaded Caddy configuration does not answer from the caddy container.
   The api and ui services are up (ui answers directly), but the site answers 502 everywhere except /v1, /mcp, /webhooks, /healthz and /readyz.
   The UI image listens on port 8080 only from v0.16.0: point the route of your Caddyfile at ui:8080, then reload Caddy:
+  export CADENCE_VERSION=$(cat VERSION)
   docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
   Check the site: curl -sS -o /dev/null -w '%{http_code}\n' https://cadence.example.com/
   See docs/admin.md, "The UI on port 8080".
@@ -1967,8 +1968,8 @@ the `caddy` container is not seen at all: check it with `curl`.
 The upgrade to v0.16.0 itself runs the `clab` of the version it starts from
 (see [Upgrades and rollback](#upgrades-and-rollback)): `./upgrade.sh` of
 v0.15.x leaves the routes unchecked and reports the new version ready over
-a route to port 80 of the UI. Move the route first, or run the upgrade with `clab`
-v0.16.0, in the directory of the installation:
+a route to port 80 of the UI. Move the route first, or run the upgrade
+with `clab` v0.16.0, in the directory of the installation:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=v0.16.0 sh
