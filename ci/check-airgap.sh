@@ -123,8 +123,9 @@ c="$name-c"
 o="$name-o"
 cleanup() {
   docker rm -f -v "$c" "$o" >/dev/null 2>&1 || true
-  # The daemons ran as root in the containers: their files under $work too.
-  docker run --rm -v "$work:/w" --entrypoint sh "$DIND" -c 'rm -rf /w/*' >/dev/null 2>&1 || true
+  # The daemons ran as root in the containers: their files under $work too,
+  # dot files among them (.cadence-*.partial of an interrupted save).
+  docker run --rm -v "$work:/w" --entrypoint sh "$DIND" -c 'find /w -mindepth 1 -delete' >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -240,6 +241,17 @@ machine() { # machine NAME CONFIG [docker run flags]
 on() {
   docker exec -e CADENCE_CLAB=/usr/local/bin/clab -e CADENCE_RELEASES_URL="${3:-}" "$1" sh -c "$2"
 }
+# sum_on NAME FILE prints the SHA-256 of FILE on the machine NAME and stops
+# the check when there is none. What a machine writes under /share belongs to
+# its root - the archive of save is 0600 there - and a runner of Linux reads
+# it as another user: the sum is taken on the machine, whatever the mode.
+sum_on() {
+  local s
+  s="$(docker exec "$1" sha256sum "$2" 2>&1)" || die "no SHA-256 of $2 on $1: ${s:-sha256sum failed}"
+  s="${s%% *}"
+  [[ "$s" =~ ^[0-9a-f]{64}$ ]] || die "no SHA-256 of $2 on $1: sha256sum printed '$s'"
+  printf '%s\n' "$s"
+}
 
 info "machine $c (containerd image store): save with network"
 machine "$c" "$work/c/daemon.json"
@@ -262,7 +274,7 @@ for v in $from $version; do
   [ "$v" != "$version" ] || rel="$save_releases"
   out="$(on "$c" "cd /share && clab server images save --version $v --output cadence-$v-airgap.tar" "$rel" 2>&1)" ||
     { printf '%s\n' "$out" | tail -n 20 >&2; die "clab server images save --version $v failed"; }
-  sum="$(sha256_of "$work/share/cadence-$v-airgap.tar")"
+  sum="$(sum_on "$c" "/share/cadence-$v-airgap.tar")" || exit 1
   check "save $v prints the SHA-256 of the archive" contains "$out" "$sum"
   [ "$v" != "$version" ] || saved_sum="$sum"
 done
