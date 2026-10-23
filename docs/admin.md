@@ -1857,7 +1857,8 @@ needed. The script:
 6. pulls the images of the new version — if that fails, it puts the files
    back and the running stack is untouched;
 7. starts the stack (the API applies migrations itself), reloads Caddy and
-   waits for readiness (`CADENCE_READY_TIMEOUT`, 300 s);
+   waits for readiness (`CADENCE_READY_TIMEOUT`, 300 s), the routes of
+   Caddy included from v0.16.0 (see [The UI on port 8080](#the-ui-on-port-8080));
 8. reminds to update `clab` on the machines of people and agents to the new
    version: `brew upgrade clab`, or the install script of the tap with
    `CLAB_VERSION`, then `clab version` (see "CLI and agents"). The server
@@ -1929,11 +1930,52 @@ hand and carried over after `upgrade --force`, a Caddyfile of your own
 mounted in `compose.override.yml`, a proxy of your own in the network of
 compose - anything that goes to port 80 of the UI (`ui` with no port or
 with `:80`). Point it at `ui:8080` before the upgrade: port 8080 already
-answers in v0.14.x and v0.15.x. Missed, it shows as a working upgrade -
-the upgrade reports the new version ready, because readiness asks the UI
-directly and not through your route - and the site answers 502 everywhere
-but `/v1`, `/mcp`, `/webhooks`, `/healthz` and `/readyz`. The fix is the
-same `ui:8080` in your route, then:
+answers in v0.14.x and v0.15.x. Missed, the site answers 502 everywhere
+but `/v1`, `/mcp`, `/webhooks`, `/healthz` and `/readyz`.
+
+From v0.16.0 `clab server` (`install`, `upgrade`, `restore` and the
+scripts over them) sees that: once the API and the UI answer, readiness
+also asks the admin API of Caddy inside the `caddy` container
+(`http://127.0.0.1:2019/reverse_proxy/upstreams`) for the upstreams of the
+loaded configuration and asks each of them from there, and in proxy mode
+asks `/` through the route (`http://localhost/` inside the container; only
+502 and 504 count as a failure, a 401 of your basic auth or a 404 do not).
+All of it is plain HTTP: in tls mode neither HTTPS nor `SDLC_DOMAIN` is
+asked, so readiness does not wait for a certificate. A route that does not
+reach its upstream for three steps in a row (about 9 s) ends the wait at
+once with exit code 1, not after `CADENCE_READY_TIMEOUT`:
+
+```
+✗ the stack runs v0.16.0, but the upstream ui:80 of the loaded Caddy configuration does not answer from the caddy container.
+  The api and ui services are up (ui answers directly), but the site answers 502 everywhere except /v1, /mcp, /webhooks, /healthz and /readyz.
+  The UI image listens on port 8080 only from v0.16.0: point the route of your Caddyfile at ui:8080, then reload Caddy:
+  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+  Check the site: curl -sS -o /dev/null -w '%{http_code}\n' https://cadence.example.com/
+  See docs/admin.md, "The UI on port 8080".
+  The database may already be migrated: fixing the route needs no new upgrade. Or return to v0.15.0 and its backup:
+  ...
+```
+
+The stack then runs the new version: fix the route rather than upgrade
+again; the printed rollback is the other way out. A Caddyfile of your own
+without the admin API (`admin off`, or `admin` on another address) gets a
+warning instead - "the routes of Caddy are not checked", readiness is the
+direct probes only (and `/` in proxy mode). A proxy of your own outside
+the `caddy` container is not seen at all: check it with `curl`.
+
+The upgrade to v0.16.0 itself runs the `clab` of the version it starts from
+(see [Upgrades and rollback](#upgrades-and-rollback)): `./upgrade.sh` of
+v0.15.x does not check the routes and reports the new version ready over a
+route to `ui:80`. Move the route first, or run the upgrade with `clab`
+v0.16.0, in the directory of the installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cadence-lab-tech/homebrew-tap/main/install.sh | CLAB_VERSION=v0.16.0 sh
+clab server upgrade v0.16.0                              # or --dir /opt/cadence
+CADENCE_CLAB=/usr/local/bin/clab ./upgrade.sh v0.16.0    # the same through the script
+```
+
+The fix is the same `ui:8080` in your route, then:
 
 ```bash
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile   # or restart your own proxy
@@ -2152,6 +2194,8 @@ warns when an override file exists but `COMPOSE_FILE` does not list it.
 A Caddyfile or a proxy of your own that serves the UI goes to `ui:8080`:
 from v0.16.0 it is the only port of the UI, and a route to its port 80
 answers 502 after the upgrade (see [The UI on port 8080](#the-ui-on-port-8080)).
+From v0.16.0 `clab server` refuses to call such a stack ready; a Caddyfile
+of your own with `admin off` is not checked, with a warning.
 
 ## Air-gapped installation
 
@@ -3021,8 +3065,11 @@ Alpine — OpenSSL (`libssl3`, `libcrypto3`), `curl`, `nghttp2-libs`,
 same in every image built on it. None of them is on the path of Caddy: Go
 has its own TLS and HTTP/2, and Caddy links no C library; `curl` and
 `ssl_client` are never run, and the package runs `busybox wget` in the
-`caddy` container only for plain HTTP inside the compose network
-(`http://ui:8080/` on start, the metrics in its checks) with URLs of its own.
+`caddy` container only for plain HTTP inside the compose network and the
+container (`http://ui:8080/` on start, from v0.16.0 also the admin API of
+Caddy at `http://127.0.0.1:2019/reverse_proxy/upstreams`, the upstreams it
+lists and `http://localhost/` in proxy mode, the metrics in its checks)
+with URLs of its own.
 They go away with the base image once Alpine ships the fixes.
 
 **Third-party images: `postgres`, `db-client` and the move to

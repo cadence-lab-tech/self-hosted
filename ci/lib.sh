@@ -127,7 +127,8 @@ container_of() {
 # too (FROM of ci/check-upgrade.sh), so the wait takes either.
 UI_PROBES=(http://ui:8080/ http://ui:80/)
 
-# ui_answers succeeds when the UI answers on one of UI_PROBES.
+# ui_answers succeeds when the UI answers on one of UI_PROBES, directly and
+# not through a route of Caddy: routes_answer asks the routes.
 ui_answers() {
   local url
   for url in "${UI_PROBES[@]}"; do
@@ -136,22 +137,97 @@ ui_answers() {
   return 1
 }
 
+# The routes of Caddy, as clab asks them since v0.16.0 (CLAB-267): the
+# upstreams of the loaded configuration from the admin API of Caddy inside
+# its container, each asked from there, and in proxy mode / through the
+# route. Plain HTTP only: in tls mode neither HTTPS nor SDLC_DOMAIN is
+# asked, so readiness does not wait for a certificate.
+CADDY_UPSTREAMS_URL=http://127.0.0.1:2019/reverse_proxy/upstreams
+CADDY_ROOT_URL=http://localhost/
+# How many steps in a row a route may fail while api and ui are ready: a
+# configuration of Caddy does not mend itself after a reload.
+ROUTE_FAIL_STEPS=3
+
+# caddy_wget DEST URL: busybox wget in the caddy container, 5 seconds at
+# most; its error goes to stderr.
+caddy_wget() {
+  docker compose exec -T caddy wget -q -T 5 -O "$1" "$2"
+}
+
+# wget_status ERROR prints the HTTP status of "server returned error:
+# HTTP/1.1 502 Bad Gateway" of busybox wget; nothing when no HTTP answer came
+# (connection refused, a name that does not resolve, a timeout).
+wget_status() {
+  sed -n 's|.*server returned error: HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' <<<"$1" | head -n 1
+}
+
+# routes_answer succeeds when the routes of Caddy reach their upstreams. An
+# upstream answers when any HTTP answer comes, a 4xx too; / in proxy mode
+# fails on 502 and 504 only (a 401 of basicauth and a 404 are answers of the
+# route). ROUTE_WHY says what failed; ROUTES_CHECKED is false when the admin
+# API did not answer (admin off in a Caddyfile of your own): the upstreams
+# are then not checked, / in proxy mode still is.
+routes_answer() {
+  local list addr err status mode down=()
+  ROUTE_WHY=""
+  ROUTES_CHECKED=false
+  if list="$(caddy_wget - "$CADDY_UPSTREAMS_URL" 2>/dev/null)" && [ "${list:0:1}" = "[" ]; then
+    ROUTES_CHECKED=true
+    while IFS= read -r addr; do
+      case "$addr" in
+      "" | */* | *[{}\ ]* | :* | *:) continue ;;
+      *:*) ;;
+      *) continue ;;
+      esac
+      if ! err="$(caddy_wget /dev/null "http://$addr/" 2>&1 >/dev/null)" && [ -z "$(wget_status "$err")" ]; then
+        down+=("$addr")
+      fi
+    done < <(grep -o '"address":"[^"]*"' <<<"$list" | sed 's/^"address":"//; s/"$//' | sort -u)
+  fi
+  [ "${#down[@]}" = 0 ] || ROUTE_WHY="the upstream ${down[*]} of the loaded Caddy configuration does not answer from the caddy container"
+  mode="$(docker compose exec -T caddy printenv CADENCE_MODE 2>/dev/null | tr -d '\r' || true)"
+  if [ "$mode" = proxy ] && ! err="$(caddy_wget /dev/null "$CADDY_ROOT_URL" 2>&1 >/dev/null)"; then
+    status="$(wget_status "$err")"
+    case "$status" in
+    502 | 504) ROUTE_WHY="${ROUTE_WHY:+$ROUTE_WHY, and }the route / through Caddy ($CADDY_ROOT_URL in the caddy container) answers $status" ;;
+    esac
+  fi
+  [ -z "$ROUTE_WHY" ]
+}
+
 # wait_ready [SECONDS] waits until the API reports ready (its healthcheck is
-# /readyz: the service is up and the database answers) and the UI answers
-# from the caddy container on one of UI_PROBES. The route of the Caddyfile
-# is not what it asks: the package changes it together with the image.
+# /readyz: the service is up and the database answers), the UI answers from
+# the caddy container on one of UI_PROBES, and the routes of Caddy reach
+# their upstreams (routes_answer) - waitReady of clab. A route that fails
+# ROUTE_FAIL_STEPS steps in a row while api and ui are ready ends the wait
+# at once, saying why on stderr; an admin API that does not answer is a
+# warning, not a failure.
 wait_ready() {
-  local timeout="${1:-180}" waited=0 api health
+  local timeout="${1:-180}" waited=0 api health fails=0 warned=false routed
   while [ "$waited" -lt "$timeout" ]; do
     api="$(container_of api)"
     health=""
     [ -n "$api" ] && health="$(docker inspect -f '{{.State.Health.Status}}' "$api" 2>/dev/null || true)"
     if [ "$health" = healthy ] && ui_answers; then
-      return 0
+      routed=true
+      routes_answer || routed=false
+      if [ "$ROUTES_CHECKED" = false ] && [ "$warned" = false ]; then
+        warned=true
+        warn "the routes of Caddy are not checked: its admin API ($CADDY_UPSTREAMS_URL in the caddy container) does not answer; readiness is the direct probes only"
+      fi
+      [ "$routed" = false ] || return 0
+      fails=$((fails + 1))
+      if [ "$fails" -ge "$ROUTE_FAIL_STEPS" ]; then
+        warn "the stack is running, but $ROUTE_WHY"
+        return 1
+      fi
+    else
+      fails=0
     fi
     sleep 3
     waited=$((waited + 3))
   done
+  [ "$fails" = 0 ] || warn "the stack is running, but $ROUTE_WHY"
   return 1
 }
 
