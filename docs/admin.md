@@ -1979,6 +1979,7 @@ CADENCE_CLAB=/usr/local/bin/clab ./upgrade.sh v0.16.0    # the same through the 
 The fix is the same `ui:8080` in your route, then:
 
 ```bash
+export CADENCE_VERSION=$(cat VERSION)
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile   # or restart your own proxy
 ```
 
@@ -2014,9 +2015,17 @@ plus the compressed dump, which is removed after the load; the volume
 `pgdata` stays as it was. Check before the upgrade:
 
 ```bash
+export CADENCE_VERSION=$(cat VERSION)
 docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres -At -c "SELECT pg_size_pretty(sum(pg_database_size(oid))) FROM pg_database"'
-df -h "$(docker info -f '{{.DockerRootDir}}')"
+docker compose exec -T postgres sh -c 'df -h "$PGDATA"'
 ```
+
+The second command runs `df` inside `postgres`, on the disk of the Docker
+volumes - the one `clab` v0.15.0 and newer checks. On Docker Desktop (macOS,
+Windows) that disk is the virtual disk of its VM, not a disk of the host:
+`df` on the host does not see it, and its size is set in the settings of
+Docker Desktop (Resources). `docker system df` shows the space Docker takes,
+not the space left.
 
 `clab` v0.15.0 and newer (`clab server upgrade`) says before the backup that
 the upgrade moves the data, with the size of the database, and refuses with
@@ -2042,6 +2051,7 @@ upgrades run the `clab` of v0.15.0 or newer from `bin/` and check by
 themselves. What the move does is in the logs:
 
 ```bash
+export CADENCE_VERSION=$(cat VERSION)
 docker compose logs pg-upgrade-dump pg-upgrade-load
 ```
 
@@ -2089,6 +2099,7 @@ disk. Remove it with the stopped container that holds it, in the directory
 of the installation:
 
 ```bash
+export CADENCE_VERSION=$(cat VERSION)
 docker compose rm -f pg-upgrade-dump
 docker volume rm "$(grep '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2 | grep . || echo cadence)_pgdata"
 ```
