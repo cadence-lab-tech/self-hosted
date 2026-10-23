@@ -24,8 +24,10 @@
 # without the archives, and builds without the tap from --clab DIR.
 #
 #   CLAB_BIN  clab whose "clab server ... --help" the documented clab server
-#             commands are checked against; default: the clab of the package
-#             for this machine (bin/clab-<os>-<arch>). Without CLAB_BIN a
+#             commands - "clab server ..." and those of the clab of the
+#             package, "bin/clab-<os>-<arch> server ..." - are checked
+#             against; default: the clab of the package for this machine
+#             (bin/clab-<os>-<arch>). Without CLAB_BIN a
 #             documented command that the clab of VERSION does not have yet
 #             (documented ahead of the release that brings it) is skipped
 #             with a note; with CLAB_BIN it fails. So is a flag of the list
@@ -380,12 +382,14 @@ check "backup.sh takes --no-upload and --ignore-version" [ "$(grep -cxE -- '--no
 check "the documentation shows ./backup.sh verify" grep -qF "./backup.sh verify" docs/admin.md
 check "the documentation shows ./backup.sh fetch" grep -qF "./backup.sh fetch" docs/admin.md
 
-# clab server: every "clab server <command> ..." of the documentation uses
-# only flags that "clab server <command> --help" lists. The clab is CLAB_BIN,
-# else the clab of the package for this machine - clab of VERSION from the
-# tap. A command it does not list yet is documented ahead of its release:
-# skipped with a note until VERSION catches up, checked with CLAB_BIN of the
-# branch that brings it.
+# clab server: every "clab server <command> ..." of the documentation, and
+# every command of the clab of the package, "bin/clab-<os>-<arch> server
+# <command> ..." (the air-gapped installation runs it, with no network to
+# check a flag against), uses only flags that "clab server <command> --help"
+# lists. The clab is CLAB_BIN, else the clab of the package for this
+# machine - clab of VERSION from the tap. A command it does not list yet is
+# documented ahead of its release: skipped with a note until VERSION catches
+# up, checked with CLAB_BIN of the branch that brings it.
 info "documented clab server flags"
 clab_server="${CLAB_BIN:-$pkg_clab}"
 if [ -z "$clab_server" ]; then
@@ -421,10 +425,16 @@ else
           fail "$f:$line: clab server ${words[*]} has no flag $flag"
         fi
       done
-    done < <(grep -noE -- 'clab server [a-z]+[^`#]*' "$f" || true)
+    done < <(grep -noE -- 'clab(-[a-z]+-[a-z0-9]+)? server [a-z]+[^`#]*' "$f" || true)
   done
-  check "the documentation shows clab server with flags" [ "$documented" -gt 0 ]
+  check "the documentation shows clab server with flags ($documented flags)" [ "$documented" -gt 0 ]
 fi
+# The flags above are checked where they are documented; this is that the
+# load into a registry of its own is documented at all: the air-gapped
+# installation with a registry runs "clab server images load ARCHIVE
+# --registry HOST[/PATH]".
+check "docs/admin.md shows clab server images load ... --registry HOST[/PATH]" \
+  grep -qE -- 'clab(-[a-z]+-[a-z0-9]+)? server images load [^`#]* --registry [[:alnum:]]' docs/admin.md
 
 # clab without a host: docs/admin.md quotes the line clab prints when no host
 # is configured (clab v0.10.1, CLAB-147). The clab is CLAB_BIN, else the
