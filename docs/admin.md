@@ -2478,8 +2478,8 @@ Docker itself treats as insecure. Without that cosign answers such a mirror
 with a false alarm, "the image is altered or not ours" (on its own it takes
 http only from loopback and private IP literals). `clab server images load
 --registry` copies with `regctl`, which needs its own setting:
-`regctl registry set --tls disabled <host>`. A registry with a CA of your
-own needs neither: add the CA to the trusted ones of Docker and of the
+`regctl registry set --tls disabled <host[:port]>`. A registry with a CA of
+your own needs neither: add the CA to the trusted ones of Docker and of the
 system instead.
 
 ### An archive
