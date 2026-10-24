@@ -2099,6 +2099,12 @@ with `:80`). Point it at `ui:8080` before the upgrade: port 8080 already
 answers in v0.14.x and v0.15.x. Missed, the site answers 502 everywhere
 but `/v1`, `/mcp`, `/webhooks`, `/healthz` and `/readyz`.
 
+`CADENCE_UI_ADDRESS` no longer has any effect from v0.16.0. The images of
+v0.14.x and v0.15.x took the addresses of the UI from it (`:80` and `:8080`
+by default); the image of v0.16.0 listens on 8080 only whatever it says.
+Setting it in an override does not bring port 80 back: point the override
+or the Caddyfile of your own at `ui:8080`.
+
 From v0.16.0 `clab server` (`install`, `upgrade`, `restore` and the
 scripts over them) sees that: once the API and the UI answer, readiness
 also asks the admin API of Caddy inside the `caddy` container
@@ -2462,6 +2468,19 @@ below, which loads them into Docker of the machine in either case. The
 releases of the package come from a [mirror of the releases](#releases-and-mirrors);
 for offline verification it also needs `download/vX.Y.Z/trusted_root.json`,
 which an archive brings.
+
+A mirror on plain http that is not on localhost must be declared to Docker
+on this machine (`insecure-registries` in `/etc/docker/daemon.json`, by
+`host[:port]` or by a CIDR, then restart Docker). Docker then pulls from it,
+and the cosign check of the images at install and upgrade goes over http
+too: `clab` passes `--allow-http-registry` to cosign only for a registry
+Docker itself treats as insecure. Without that cosign answers such a mirror
+with a false alarm, "the image is altered or not ours" (on its own it takes
+http only from loopback and private IP literals). `clab server images load
+--registry` copies with `regctl`, which needs its own setting:
+`regctl registry set --tls disabled <host>`. A registry with a CA of your
+own needs neither: add the CA to the trusted ones of Docker and of the
+system instead.
 
 ### An archive
 
