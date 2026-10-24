@@ -42,12 +42,20 @@
 #   CHECK_KEEP=1      leave the cluster and the stand-ins after the check
 #
 # Images in a local registry (localhost:*) are not reachable from the nodes
-# of kind: the check pulls them on this machine and loads them into the
-# cluster (kind load docker-image). Images of a branch, as for
-# ci/check-stack.sh:
+# of kind: the check pulls them on this machine for the platform of the node
+# and loads that platform into the cluster - kind load docker-image, and
+# when it fails (a multi-platform image in the containerd image store of
+# Docker Desktop: "content digest ... not found") the archive of that
+# platform alone, docker save --platform (Docker 28 or newer) and kind load
+# image-archive. Images of a branch, as for ci/check-stack.sh, built for
+# both platforms with the attestations of buildx:
 #
 #   CADENCE_REGISTRY=localhost:5050 CADENCE_BACKEND_DIGEST= CADENCE_FRONTEND_DIGEST= \
 #     CHECK_CLUSTER=check-<name> CHECK_HTTP_PORT=<port> ci/check-helm.sh
+#
+# If the images still do not load, the fallback is images of one platform
+# without attestations: docker buildx build --platform linux/<arch>
+# --provenance=false --sbom=false ... --push.
 #
 # Needs Docker, kind, helm, kubectl, jq, curl and openssl. The images must
 # read *_FILE (v0.13.0 or newer) and the frontend image must run as uid 65532
@@ -175,12 +183,40 @@ frontend_digest="${CADENCE_FRONTEND_DIGEST-$(sed -n 's/^ *digest: "\(sha256:[0-9
 image_of() { printf '%s/%s:%s%s' "$registry" "$1" "$tag" "${2:+@$2}"; }
 backend_image="$(image_of sdlc-pipeline-backend "$backend_digest")"
 frontend_image="$(image_of sdlc-pipeline-frontend "$frontend_digest")"
+platform_of() { docker image inspect -f '{{.Os}}/{{.Architecture}}' "$1" 2>/dev/null; }
+# load_image REF: the image REF of the local registry into the node, the
+# platform of the node only. kind load docker-image imports every platform
+# docker save hands it; a multi-platform image pulled into the containerd
+# image store has the blobs of one platform, so the import fails and the
+# archive of that platform goes instead. Nothing of the first try is shown
+# when the second one loads the image.
+load_image() {
+  local ref="$1" archive="$work/image.tar" out
+  local hint="build images of one platform without attestations: docker buildx build --platform $node_platform --provenance=false --sbom=false ... --push"
+  # Not here, or here for another platform only: pulled for the node. Docker
+  # pulls an image of one platform whatever --platform asks: it is checked.
+  if [ "$(platform_of "$ref")" != "$node_platform" ]; then
+    out="$(docker pull -q --platform "$node_platform" "$ref" 2>&1)" ||
+      die "$ref: cannot pull it for $node_platform, the platform of the kind node ($(tail -n1 <<<"$out")); $hint"
+    [ "$(platform_of "$ref")" = "$node_platform" ] ||
+      die "$ref: no image for $node_platform, the platform of the kind node, only $(platform_of "$ref"); $hint"
+  fi
+  out="$(kind load docker-image --name "$cluster" "$ref" 2>&1)" && return 0
+  if out="$out"$'\n'"$({ docker save --platform "$node_platform" -o "$archive" "$ref" &&
+    kind load image-archive --name "$cluster" "$archive"; } 2>&1)"; then
+    rm -f "$archive"
+    return 0
+  fi
+  rm -f "$archive"
+  printf '%s\n' "$out" | sed 's/^/      /' >&2
+  die "$ref: kind does not load it for $node_platform, not even as docker save --platform (Docker 28 or newer); $hint"
+}
 case "$registry" in
 localhost:* | 127.0.0.1:*)
-  info "images of $registry: pulled here and loaded into kind"
+  node_platform="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.operatingSystem}/{.items[0].status.nodeInfo.architecture}')"
+  info "images of $registry: pulled here and loaded into kind for $node_platform"
   for ref in "$backend_image" "$frontend_image"; do
-    docker image inspect "$ref" >/dev/null 2>&1 || docker pull -q "$ref" >/dev/null
-    kind load docker-image --name "$cluster" "$ref" >/dev/null
+    load_image "$ref"
   done
   ;;
 esac
@@ -409,9 +445,19 @@ check "the API serves the same content from the bucket" grep -qF "line 400 of th
 
 # --- metrics inside the cluster ------------------------------------------------------------------
 info "metrics inside the cluster"
+# in_cluster URL: the body of URL fetched by a pod of the namespace. Not
+# kubectl run -i: curl may end before kubectl attaches, and the logs it falls
+# back to are now and then empty. The pod runs to its end, then its logs.
 in_cluster() {
-  k run "curl-$RANDOM" --image=curlimages/curl:8.16.0 --restart=Never --rm -i --quiet \
-    --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"c","image":"curlimages/curl:8.16.0","args":["-s","'"$1"'"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' 2>/dev/null
+  local pod="curl-$RANDOM"
+  k run "$pod" --image=curlimages/curl:8.16.0 --restart=Never \
+    --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"c","image":"curlimages/curl:8.16.0","args":["-s","'"$1"'"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null 2>&1 || return 0
+  for _ in $(seq 1 90); do
+    case "$(k get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)" in Succeeded | Failed) break ;; esac
+    sleep 2
+  done
+  k logs "$pod" 2>/dev/null || true
+  k delete pod "$pod" --wait=false >/dev/null 2>&1 || true
 }
 check "the API serves cadence_* on :9090 inside the cluster" contains "$(in_cluster "http://$release-api:9090/metrics")" "cadence_"
 check "the worker serves cadence_worker_* on :9090 inside the cluster" contains "$(in_cluster "http://$release-worker-metrics:9090/metrics")" "cadence_worker_"
