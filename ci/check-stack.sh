@@ -37,6 +37,14 @@
 # 400 as docs/admin.md says (CLAB-252): clab server starter reads it with a
 # one-off alpine:3 container, prints no token and leaves no container.
 #
+# The routes of Caddy (CLAB-267): the admin API of Caddy lists the upstreams
+# of the Caddyfile of the package; a Caddyfile of the administrator routing
+# to ui:81, mounted by compose.override.yml, makes the site answer 502, and
+# wait_ready of ci/lib.sh refuses before its timeout. ./restore.sh refuses to
+# say ready with it, naming the upstream and the fix, with a clab of v0.16.0
+# or newer, or the clab of CHECK_CLAB_DIR; an older clab of the package skips
+# that with a note.
+#
 #   ci/check-stack.sh
 #
 #   CHECK_HTTP_PORT       host port of the stack, default 8080; a second
@@ -773,6 +781,12 @@ check "/ serves the UI" html
 webhook_code="$(http_code -X POST -H 'X-GitHub-Event: ping' -d '{}' "$base/webhooks/github")"
 check "/webhooks/github reaches the API and rejects an unsigned delivery ($webhook_code)" client_error "$webhook_code"
 check "caddy does not try ACME in proxy mode" lacks "$(docker compose logs caddy 2>&1 | tr '[:upper:]' '[:lower:]')" acme
+# The routes wait_ready and clab server (from v0.16.0) ask: the upstreams of
+# the loaded configuration, from the admin API of Caddy in its container
+# (CLAB-267). The Caddyfile of the package routes to api:8080 and ui:8080.
+upstreams="$(caddy_wget - "$CADDY_UPSTREAMS_URL" 2>/dev/null || true)"
+check "the admin API of Caddy lists the upstreams api:8080 and ui:8080 of the Caddyfile" \
+  [ "$(grep -o '"address":"[^"]*"' <<<"$upstreams" | sort -u | tr '\n' ' ')" = '"address":"api:8080" "address":"ui:8080" ' ]
 
 # --- agent kit and /docs --------------------------------------------------------------
 # clab setup takes the agent kit from the instance (since v0.12.0): an open
@@ -1069,6 +1083,60 @@ projects="$("$clab" --host "$base" project list --json)"
 check "after restore the project from before the backup is there" contains "$projects" '"CHECK"'
 check "after restore the project created after the backup is gone" lacks "$projects" '"AFTER"'
 check "/readyz answers 200 after restore" [ "$(http_code "$base/readyz")" = 200 ]
+
+# --- a route of Caddy to a port ui does not listen on (CLAB-267) -----------------------------------
+# A Caddyfile of the administrator routing to ui:81 (as one routing to ui:80
+# does on the images of v0.16.0, which listen on 8080 only; ui:81 is closed
+# on the images of any version), mounted by compose.override.yml as
+# docs/admin.md ("Local compose changes") says: the site answers 502, the
+# wait of ci/lib.sh refuses after three steps, and clab - from v0.16.0, or the clab of
+# CHECK_CLAB_DIR - refuses to say ready, naming the upstream and the fix.
+info "a route of Caddy to ui:81"
+cp compose.override.yml "$work/override.orig"
+sed 's/reverse_proxy ui:8080/reverse_proxy ui:81/' Caddyfile >Caddyfile.ui81
+cat >compose.override.yml <<'YAML'
+services:
+  caddy:
+    volumes:
+      - ./Caddyfile.ui81:/etc/caddy/Caddyfile:ro
+YAML
+docker compose up -d caddy >/dev/null 2>&1
+for _ in $(seq 1 20); do
+  [ "$(http_code "$base/")" = 502 ] && break
+  sleep 1
+done
+check "/ through the route to ui:81 answers 502" [ "$(http_code "$base/")" = 502 ]
+check "...while /readyz still answers 200" [ "$(http_code "$base/readyz")" = 200 ]
+# The wait counts its steps of 3 s, so a refusal sooner than the timeout by
+# the clock is the refusal after ROUTE_FAIL_STEPS, not the timeout.
+not_ready_fast() {
+  local start=$SECONDS err
+  err="$(wait_ready 600 2>&1 >/dev/null)" && return 1
+  [ $((SECONDS - start)) -lt 600 ] && contains "$err" "the upstream ui:81 of the loaded Caddy configuration does not answer" &&
+    contains "$err" "the route / through Caddy ($CADDY_ROOT_URL in the caddy container) answers 502"
+}
+check "wait_ready of ci/lib.sh refuses before its timeout, naming ui:81 and / answering 502" not_ready_fast
+if [ -z "${CHECK_CLAB_DIR:-}" ] && version_lt "$version" v0.16.0; then
+  info "VERSION is $version: clab server checks the routes of Caddy from v0.16.0, the refusal of clab is checked from it (or with CHECK_CLAB_DIR)"
+else
+  code=0
+  route_start=$SECONDS
+  out="$(restore_cmd --yes "$dump" </dev/null 2>&1)" || code=$?
+  check "./restore.sh with the route to ui:81 refuses to say ready: exit 1" [ "$code" = 1 ]
+  check "...before CADENCE_READY_TIMEOUT, 300 s of steps ($((SECONDS - route_start)) s with the restore)" [ $((SECONDS - route_start)) -lt 300 ]
+  check "...naming the upstream ui:81" contains "$out" "the upstream ui:81 of the loaded Caddy configuration does not answer"
+  check "...and / answering 502" contains "$out" "the route / through Caddy (http://localhost/ in the caddy container) answers 502"
+  check "...and the fix: the route at ui:8080" contains "$out" "point the route of your Caddyfile at ui:8080"
+  check "...then caddy reload" contains "$out" "caddy reload --config /etc/caddy/Caddyfile"
+  check "...and docs/admin.md, \"The UI on port 8080\"" contains "$out" '"The UI on port 8080"'
+  check "...and does not say restored" lacks "$out" "restored"
+  check "the site still answers 502: the refusal was true" [ "$(http_code "$base/")" = 502 ]
+fi
+cp "$work/override.orig" compose.override.yml
+rm -f Caddyfile.ui81
+docker compose up -d caddy >/dev/null 2>&1
+check "with the Caddyfile of the package back the stack is ready again" wait_ready 180
+check "...and / serves the UI" html
 
 # --- off-machine copy and verify (CLAB-132) --------------------------------------------
 # A stand-in bucket (ci/s3.sh) in the network of the installation: the copy
