@@ -53,6 +53,19 @@
 #          server images (the release after v0.14.1): for an older one it is
 #          skipped with a note
 #
+#   airgap-upgrade  the upgrade without network (ci/check-airgap.sh with
+#          CHECK_AIRGAP_FROM): the archives of FROM and VERSION, FROM
+#          installed without network - its get-cadence.sh from v0.15.0, clab
+#          server install of a newer clab for v0.13.0 to v0.14.1 after its
+#          get-cadence.sh has refused, as docs/admin.md says - then clab server
+#          upgrade to VERSION without network, a mark in the database kept and
+#          the move from PostgreSQL 17 to 18 when FROM is older than v0.15.0.
+#          On a release pull request (a branch release/*): FROM is VERSION of
+#          the base branch, the same VERSION is skipped with a notice. Run by
+#          hand, FROM is the input airgap_from (v0.13.0 or newer). Other pull
+#          requests and pushes to main do not run it; the job airgap stays the
+#          fresh installation of VERSION
+#
 #   upgrade  the upgrade between two versions (ci/check-upgrade.sh): FROM as
 #          installed, TO as the package of this commit. On a release pull
 #          request (a branch release/*) on its own: FROM is VERSION of the
@@ -72,6 +85,9 @@ on:
         required: false
       upgrade_to:
         description: "...to this version (vX.Y.Z)"
+        required: false
+      airgap_from:
+        description: "Also check the upgrade without network from this version (vX.Y.Z, v0.13.0+) to VERSION, empty to skip"
         required: false
 
 permissions:
@@ -279,6 +295,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: the closed network in Docker daemons of its own
+        run: ci/check-airgap.sh
+
+  # The upgrade without network (CLAB-276): with CHECK_AIRGAP_FROM the check
+  # installs FROM first, so it is a job of its own next to airgap.
+  airgap-upgrade:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.airgap_from != '') ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/'))
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: versions
+        name: version to upgrade from
+        env:
+          FROM_INPUT: ${{ inputs.airgap_from }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          to="$(tr -d '[:space:]' <VERSION)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            from="$(git show "origin/$BASE_REF:VERSION" | tr -d '[:space:]')"
+            if [ "$from" = "$to" ]; then
+              echo "::notice::VERSION of $BASE_REF and of the pull request is $to: no upgrade without network to check"
+              echo "skip=true" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            from="$FROM_INPUT"
+          fi
+          echo "upgrade without network $from -> $to"
+          {
+            echo "from=$from"
+            echo "skip=false"
+          } >>"$GITHUB_OUTPUT"
+      - name: the upgrade without network in Docker daemons of its own
+        if: steps.versions.outputs.skip != 'true'
+        env:
+          CHECK_AIRGAP_FROM: ${{ steps.versions.outputs.from }}
         run: ci/check-airgap.sh
 
   # The release pull request (release/vX.Y.Z, ci/release-pr.sh) moves VERSION:
