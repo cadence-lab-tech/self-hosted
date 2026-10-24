@@ -1391,7 +1391,9 @@ to install the CLI, not for the kit. A second run changes nothing that is
 already up to date, and files a developer edited after installation are
 kept with a warning (`--force` overwrites them). A server released before
 `clab setup` existed answers 404 there: `clab setup` then connects MCP only
-and names the server's version.
+and names the server's version. What the skills do with the model level
+the server recommends for a run is in
+[Recommended model level](#recommended-model-level).
 
 One configuration (`~/.config/clab`) holds several hosts. The one you signed
 in to last is the default; `--host` picks another for one command:
@@ -1509,6 +1511,170 @@ from reaching beyond its task by default; hard isolation of the agent's
 process is the job of a sandbox, which is not part of the runner yet.
 
 This is so from clab-runner v0.11.0.
+
+Which model the runner starts the agent with follows the level the server
+recommends for the run and the runner's table `SDLC_RUNNER_MODEL_LEVELS`:
+see [Recommended model level](#recommended-model-level), "The runner".
+
+### Recommended model level
+
+A task, a stage of a task and a role can carry a recommended model level:
+`low`, `medium` or `high`, or none at all. The server knows levels, not
+models: it accepts only these three values (anything else is a 400) and
+never names a model. Which model answers a level is decided by whoever runs
+the agent - the runner by its table, the `clab-run` skill by its own, a
+person by choice. This is so from v0.16.0.
+
+**Who sets levels.** Levels are optional: without them the cycle runs as
+before and every agent works on its own model. Which role sets the levels
+of stages and child tasks is a choice of your project - a role you give
+that work in its instruction, or nobody, and a person sets or changes them
+at any time, at an approval (`human_approval`) too. In the starter bundle
+the instructions of `analyst` and `orchestrator` do it, as an example (see
+[First cycle and roles](#first-cycle-and-roles)); a project without an
+analyst role loses nothing.
+
+**The level of a role** is the default for the stages of that role. It is a
+field of a role version, so a change is a new version, made by whoever
+makes role versions (maintainer and above; a task token cannot):
+
+- the UI: the role editor, the switch "Уровень модели" ("model level") with
+  `авто` ("auto", no level), `low`, `medium`, `high`; saving makes a new
+  version;
+- the CLI: `clab role put --key developer --name Developer --file developer.md --model-level high`.
+  A version is built whole from the flags, like the other fields of
+  `role put`: a version put without `--model-level` has no level, so pass
+  the old level again when you change something else (or edit the role in
+  a bundle, below);
+- MCP: `sdlc_put_role` with `model_level`;
+- a bundle: the field `model_level` of a role in `clab export` and
+  `clab import`.
+
+**The level of a task and of its stages:**
+
+- the UI: the task card, the switch "Уровень модели" ("model level") of the
+  task. The levels of stages are not edited in the UI yet;
+- the CLI: `clab create` and `clab edit` with `--model-level <level>` for
+  the whole task and `--model-level-for <status>=<level>` for a stage,
+  repeated for several stages. An empty value removes a level:
+  `--model-level ""`, `--model-level-for development=`;
+
+  ```bash
+  clab edit PLAT-12 --model-level-for development=high --model-level-for qa=low
+  clab create --parent PLAT-10 --title "Split the importer" --model-level-for analysis=low
+  ```
+
+- MCP: `sdlc_create_task` and `sdlc_update_task` with `model_level` and
+  `stage_settings`, for example `{"development": {"model_level": "high"}}`;
+  an update merges stages by status, `{"qa": {"model_level": ""}}` removes
+  one.
+
+The keys of stages are the statuses of the task's cycle that have an
+executing role; any other key is a 400 that lists the allowed ones. A
+maintainer and above may change the levels of any task; an agent with a
+task token only those of its own task and of its direct children (a 403
+otherwise).
+
+**Resolution.** At the claim the server picks the level of the run, first
+found wins, an empty place is skipped:
+
+1. the level of the task's stage (the status of the run);
+2. the level of the task;
+3. the level of the role version of the run;
+4. none: no level, the agent works on its own model - the person's, or
+   what the runner picks without a level (below).
+
+A review (a nested run of the same stage) goes the same way, with the
+reviewer role in the third step. The level and its source are stored on the
+run at the claim: changing a level later does not change a run that is
+already going, only the next claims.
+
+**Where the level shows.** The claim answer has
+`execution: {model_level, model_level_source}`; the source is `stage`,
+`task`, `role` or `none`. `none` means no level is set anywhere and the
+agent works on the user's own model. `clab claim` prints it as a line,
+quoted as it prints it:
+
+```
+Рекомендованный уровень: high (этап задачи)
+```
+
+("recommended level: high (task stage)"; the source reads `этап задачи`,
+`задача`, `роль` - task stage, task, role), or `Рекомендованный уровень: не задан`
+("not set"). `clab show` prints the levels currently set on the task.
+
+**The runner.** `SDLC_RUNNER_MODEL_LEVELS` is the table "level → model" of
+the runner, under the subscription of whoever runs it. For Claude Code:
+
+```bash
+SDLC_RUNNER_MODEL_LEVELS=low=haiku,medium=sonnet,high=opus SDLC_API_URL=https://<host>/v1 SDLC_TOKEN=<token> SDLC_PROJECT=PLAT clab-runner
+```
+
+Any entry may be left out, and an empty variable means no table. A
+malformed value - an unknown level, an entry without `=`, an empty model, a
+space inside a model name, a level given twice - stops the runner at start
+with an error naming the variable (exit code 2). The runner logs the table
+at start. For each run it picks the model in three steps:
+
+1. the entry of the table for the recommended level;
+2. otherwise the `model_hint` of the role, with a warning in the log
+   (`model_hint устарел, задайте SDLC_RUNNER_MODEL_LEVELS…` - "model_hint is
+   deprecated, set SDLC_RUNNER_MODEL_LEVELS");
+3. otherwise no model: `--model` is not passed and the agent runs on the
+   default model of its CLI.
+
+Against a server without levels (no `execution` in the claim answer) the
+runner goes straight to `model_hint`, without the warning, as older runners
+did. The model goes into `{model}` of the command (the default command has
+`--model {model}`, and an empty model drops the flag); your own
+`SDLC_RUNNER_COMMAND` without `{model}` ignores levels. The log line of the
+agent start and the output of `SDLC_RUNNER_DRY_RUN` carry `model_level`,
+`model_level_source`, `model` and `model_from` (`table`, `model_hint` or
+`none`); `model_level_source=absent` there means the server sent no
+`execution` - a server older than levels. The variable belongs to the
+runner, which lives outside the stack: nothing goes into `.env` or compose,
+and `.env.example` does not have it.
+
+**`model_hint` is deprecated.** It stays on role versions for `clab` and
+`clab-runner` of older versions and as the second step of the runner above;
+the UI no longer shows it. Set new things with levels and the runner's
+table.
+
+**The agent kit.** The skills of `clab setup` (see
+[Connecting developers](#connecting-developers)) read the same `execution`:
+
+- `/clab-run` starts the stage executor `clab-stage` on a model by its own
+  table: `low → haiku`, `medium → sonnet`, `high → opus`; with no level it
+  keeps the chat's model (`inherit`). It names its choice in the chat
+  before each start;
+- `/clab-work` and the MCP prompt `work_on_task` only say "recommended level
+  X, you are working on Y" when they differ; the person chooses the model.
+
+The table of `/clab-run` lives in the skill file
+(`.claude/skills/clab-run/SKILL.md` of the project, or of `~/.claude/` with
+`--scope user`); edit it for another provider. A second `clab setup` keeps
+a file you edited, with a warning.
+
+**Recommended and actual.** In the task card each run has a line such as
+`рекомендован high · фактически claude-opus-5-5` ("recommended high ·
+actually claude-opus-5-5"), `рекомендован: авто` ("recommended: auto") when
+no level was set, and `фактически: нет данных` ("actually: no data") until
+the cost of the run is reported. The actual model comes from the cost
+report of the run (`clab usage`, `sdlc_report_usage`). Over the API,
+`GET /v1/tasks/<KEY>` has `model_level`, `model_level_source` and `usage` in
+each of `stage_runs[]`.
+
+**Upgrading to v0.16.0.** The migration only adds columns and runs when the
+service starts: `./upgrade.sh` needs no manual step. Runs made before the
+upgrade have no stored level and no "recommended" line. `clab` and
+`clab-runner` of older versions keep working, the runner by `model_hint`.
+The other way round, a new `clab edit --model-level` against a server not
+yet upgraded says the level was not stored
+(`уровень модели не записан` - "the model level was not stored") and
+applies the rest of the change, and a bundle with `model_level` imported
+into an older server loses the field silently. After the upgrade run
+`clab setup` again on the developers' machines to get the skills that read
+levels.
 
 ## Embeddings
 
