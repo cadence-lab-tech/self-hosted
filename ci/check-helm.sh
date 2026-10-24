@@ -445,9 +445,19 @@ check "the API serves the same content from the bucket" grep -qF "line 400 of th
 
 # --- metrics inside the cluster ------------------------------------------------------------------
 info "metrics inside the cluster"
+# in_cluster URL: the body of URL fetched by a pod of the namespace. Not
+# kubectl run -i: curl may end before kubectl attaches, and the logs it falls
+# back to are now and then empty. The pod runs to its end, then its logs.
 in_cluster() {
-  k run "curl-$RANDOM" --image=curlimages/curl:8.16.0 --restart=Never --rm -i --quiet \
-    --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"c","image":"curlimages/curl:8.16.0","args":["-s","'"$1"'"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' 2>/dev/null
+  local pod="curl-$RANDOM"
+  k run "$pod" --image=curlimages/curl:8.16.0 --restart=Never \
+    --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"c","image":"curlimages/curl:8.16.0","args":["-s","'"$1"'"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null 2>&1 || return 0
+  for _ in $(seq 1 90); do
+    case "$(k get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)" in Succeeded | Failed) break ;; esac
+    sleep 2
+  done
+  k logs "$pod" 2>/dev/null || true
+  k delete pod "$pod" --wait=false >/dev/null 2>&1 || true
 }
 check "the API serves cadence_* on :9090 inside the cluster" contains "$(in_cluster "http://$release-api:9090/metrics")" "cadence_"
 check "the worker serves cadence_worker_* on :9090 inside the cluster" contains "$(in_cluster "http://$release-worker-metrics:9090/metrics")" "cadence_worker_"
