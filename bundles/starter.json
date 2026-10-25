@@ -398,6 +398,15 @@
                 ]
               },
               "blocking": true
+            },
+            {
+              "key": "attempts_limit",
+              "name": "At most 3 attempts in the target status",
+              "type": "attempts_limit",
+              "config": {
+                "max_attempts": 3
+              },
+              "blocking": true
             }
           ]
         },
@@ -418,6 +427,15 @@
                 ]
               },
               "blocking": true
+            },
+            {
+              "key": "attempts_limit",
+              "name": "At most 3 attempts in the target status",
+              "type": "attempts_limit",
+              "config": {
+                "max_attempts": 3
+              },
+              "blocking": true
             }
           ]
         },
@@ -436,6 +454,15 @@
                 "kinds": [
                   "problem.report"
                 ]
+              },
+              "blocking": true
+            },
+            {
+              "key": "attempts_limit",
+              "name": "At most 3 attempts in the target status",
+              "type": "attempts_limit",
+              "config": {
+                "max_attempts": 3
               },
               "blocking": true
             }
@@ -566,6 +593,15 @@
                 "kinds": [
                   "problem.report"
                 ]
+              },
+              "blocking": true
+            },
+            {
+              "key": "attempts_limit",
+              "name": "At most 3 attempts in the target status",
+              "type": "attempts_limit",
+              "config": {
+                "max_attempts": 3
               },
               "blocking": true
             }
