@@ -28,6 +28,11 @@ public address of your proxy in the `proxy` mode.
 - [GitHub App](#github-app)
 - [Single sign-on with OIDC](#single-sign-on-with-oidc)
 - [CLI and agents](#cli-and-agents)
+  ([cost of a run](#cost-of-a-run),
+  [usage policy](#usage-policy-of-a-project),
+  [runner failures](#runner-failures-and-the-subscription-limit),
+  [upgrading to v0.17.0](#upgrading-to-v0170))
+- [Stage limits](#stage-limits): reviews and the time of a stage
 - [Embeddings](#embeddings)
 - [Backups](#backups)
 - [Upgrades and rollback](#upgrades-and-rollback)
@@ -1675,6 +1680,413 @@ applies the rest of the change, and a bundle with `model_level` imported
 into an older server loses the field silently. After the upgrade run
 `clab setup` again on the developers' machines to get the skills that read
 levels.
+
+### Cost of a run
+
+From v0.17.0 the cost a project sees is more complete and says who paid
+for it. Nothing in this subsection needs a setting on the server: the
+runner and the agents report more, and the server keeps it apart.
+
+**One report per run under the runner.** Under `clab-runner` v0.17.0 only
+the runner reports the cost of a run. It starts the agent with the prompt
+`work_on_task` and the argument `usage=runner`, which tells the agent not to
+report the cost itself (no `sdlc_report_usage`, no `clab usage`), and
+reports it from the agent's output with its own token: a run gets one usage
+row, not two. The cost of an agent that failed is recorded too - Claude Code
+prints its result also when it exits with an error - and the runner reports
+it before it releases the task. The server takes a report from the
+principal that claimed the run also after the release and after the lease
+expired. A runner of v0.16.x does not pass `usage=runner`: its agent
+reports by itself, the rows of a run may double as before v0.17.0, and the
+cost of a failed agent is not recorded. Upgrade the runner (see
+[Upgrading to v0.17.0](#upgrading-to-v0170)).
+
+**Money or subscription.** A usage row carries `billing`:
+
+| `billing` | what the cost is | team budget |
+|---|---|---|
+| `api` | money: the agent ran on an API key | counted |
+| `subscription` | notional: Claude Code on a subscription prints the price of the run at API rates, though nothing beyond the subscription is paid | shown next to it, never counted |
+| not given | unknown, counted as money - like every row written before v0.17.0 | counted |
+
+It is given where the cost is reported:
+
+```bash
+clab usage PLAT-12 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 --billing subscription
+```
+
+`sdlc_report_usage` over MCP takes `billing`, and so does the body of
+`POST /v1/tasks/{KEY}/usage`; any other value is refused with the list of
+allowed ones. The runner takes it from `SDLC_RUNNER_BILLING` (`api` or
+`subscription`) and puts it on every row it reports. A misspelled value
+stops the runner at start with an error naming the variable (exit code 2);
+without the variable its rows carry no `billing`. The runner does not
+guess: Claude Code signed in through the Anthropic Console is billed by API
+too and looks the same from outside. Like the other `SDLC_RUNNER_*`
+variables it belongs to the runner, not to `.env`.
+
+The budget of a team (`clab team budget <team>`, the budget of a team in the
+UI) counts only money against its limit: `spent_usd` is the sum of `api`
+rows and rows without `billing`, and `subscription_usd` next to it is the
+notional cost of the same window, for information. The UI shows the two
+apart wherever cost appears - the metrics, the task card and the team
+budget - as "Деньги (API)" ("money (API)") and "Условно (подписка)"
+("notional (subscription)"); the budget marks the second "информативно, в
+бюджет не входит" ("for information, not counted in the budget").
+
+**Runs without a report.** Each run has a usage state, `usage.state` in
+`stage_runs[]` of `GET /v1/tasks/{KEY}`:
+
+- `reported` - at least one usage row, with or without a cost;
+- `missing` - someone claimed the run and nobody reported it: it is
+  finished, still going, or was released or lost its lease;
+- `not_applicable` - nobody claimed the run (a status without a role, a
+  stage not picked up yet); it says nothing about an agent.
+
+The task card labels them "учёт есть" ("reported"), "без учёта" ("not
+reported") and "учёт не ведётся" ("not tracked"). A sum over runs "без
+учёта" is a lower bound, not a low cost. The same `missing` is what the
+[usage policy](#usage-policy-of-a-project) of a project acts on.
+
+**Cost of a closed task.** The project metrics
+(`GET /v1/projects/{KEY}/metrics`) have a section `closed_cost`: what a
+closed task cost, by task type, for the tasks closed in the period (30 days
+by default). A row has the closed tasks; the incomplete ones, with at least
+one run `missing`, whose cost is a lower bound; the runs reported and not
+reported and the share of the latter; money and notional cost, each as a
+sum, an average and a median over the closed tasks of the type. The cost of
+a task is that of all its runs over its life, and an epic carries its whole
+subtree, so a task and its epic closed in the same period both carry the
+task's runs and the rows do not add up to the spend of the project.
+
+```bash
+clab metrics --closed-cost                  # the table
+clab metrics --closed-cost --period 90d
+```
+
+Without `--closed-cost`, `clab metrics` prints the JSON of the answer, as
+before. In the UI it is the section "Стоимость закрытой задачи" ("cost of a
+closed task") of the metrics page.
+
+### Usage policy of a project
+
+From v0.17.0 a project can refuse new work to an agent that does not report
+what its runs cost: the policy "захват без учёта запрещён" ("no claim without
+a usage report"). It is off by default. After the upgrade runners and
+agents work as before, and nothing in this subsection has to be done.
+
+```bash
+clab project settings PLAT                     # the policy and the window
+clab project set PLAT usage-policy required    # turn it on
+clab project set PLAT usage-grace 30           # the window in minutes; 0 - no window
+clab project set PLAT usage-grace default      # back to the default, 60 minutes
+clab project set PLAT usage-policy off         # turn it off
+```
+
+`clab project set` takes the key of the project explicitly. The API is
+`GET /v1/projects/{KEY}/usage-policy` (any member reads it) and
+`PATCH /v1/projects/{KEY}/usage-policy` with `{"mode": "required"}` or
+`{"grace_minutes": 30}` (`null` or `"default"` for the default). There is no
+switch in the UI.
+
+**Who changes it.** A person with the `admin` level of the project, or the
+system administrator. An agent does not, not even with the `admin` level,
+and neither does a task token: otherwise the agent it holds could lift it.
+Each change is in the [audit log](#audit-log) under
+`PATCH /v1/projects/:projectKey/usage-policy`, with the policy before and
+after.
+
+**Whom it holds.**
+
+- Only agent principals: tokens made with `clab token create --for agent:…`,
+  as an unattended runner or CI uses. A person under their own session,
+  their own AI with their personal token and a runner an employee runs with
+  their personal token are never refused.
+- Only a new claim. An agent that holds a lease keeps working, and its task
+  token confirms the lease as before.
+
+**A debt** is a stage run that this agent principal claimed, which finished
+(the task moved on) after the policy was turned on and longer ago than the
+window, and has no usage row at all. A run released
+back to the queue is not finished and is no debt. Runs finished before the
+policy was turned on never become debts, and turning it off and on again
+starts anew. The window - 60 minutes by default, from `0` (no window) to
+`10080` minutes (7 days) - is the time an agent has to report a finished
+run.
+
+A claim by an agent principal with debts is refused with the code
+`usage_report_required` (HTTP 409). The message names the debts and the
+command to pay them; `details` has `debts` (task, `stage_run_id`,
+`finished_at`; the first 20), `total` and `grace_minutes`. While the policy
+is on, a claim that succeeds tells the agent `usage_report: required`
+instead of `expected`.
+
+To pay a debt, report the run with a token of the same principal - for a
+runner, its own `SDLC_TOKEN`:
+
+```bash
+SDLC_API_URL=https://<host>/v1 SDLC_TOKEN=<token of the runner> \
+  clab usage PLAT-12 --run <stage run id> --model claude-sonnet-5 --cost 0.42
+```
+
+A row without `--cost` pays it too. If there is nothing to report, a
+project admin turns the policy off.
+
+**The runner.** `clab-runner` v0.17.0 on `usage_report_required` stops
+claiming for that poll (the debt is on its principal, every other claim
+would be refused the same way), does not count it as a failure of a run and
+logs an error, repeated only when the list of debts changes or after 10
+minutes:
+
+```
+захват отбит политикой учёта проекта: у принципала раннера прогоны без отчёта о стоимости; новых задач раннер не берёт, пока долг не погашен — отчитайтесь токеном раннера: clab usage <задача> --run <прогон> --model <модель> [--cost <доллары>], или администратор проекта выключит политику
+```
+
+("the claim is refused by the usage policy of the project: the runner's
+principal has runs without a cost report; the runner takes no new tasks
+until the debt is paid - report with the runner's token: ..., or a project
+administrator turns the policy off"), with `debts`, `total` and
+`grace_minutes`. A runner of v0.16.x does not know the code: it logs the
+warning `захват не удался` ("the claim failed") with
+`usage_report_required` for every task on every poll and does not say what
+to do. Upgrade the runners before turning the policy on.
+
+### Runner failures and the subscription limit
+
+From clab-runner v0.17.0 a failing run does not loop. When the agent exits
+with an error or is stopped on `SDLC_RUNNER_TIMEOUT`, or the runner cannot
+prepare the run (the worktree, the task token, the agent's directory), the
+runner releases the task and does not claim that run again at once:
+
+| variable | default | |
+|---|---|---|
+| `SDLC_RUNNER_RETRY_DELAY` | `1m` | the pause after the first failure of a run |
+| `SDLC_RUNNER_RETRY_DELAY_MAX` | `15m` | the pause doubles with each failure in a row, up to this |
+| `SDLC_RUNNER_MAX_FAILURES` | `3` | after this many failures in a row the run is skipped until the runner restarts |
+| `SDLC_RUNNER_LIMIT_PAUSE` | `1h` | the pause on the subscription limit when the agent did not say when it resets |
+
+Durations are written like `90s`, `1m`, `2h`; the count is an integer of at
+least 1. A malformed, zero or negative value, or
+`SDLC_RUNNER_RETRY_DELAY_MAX` below `SDLC_RUNNER_RETRY_DELAY`, stops the
+runner at start with an error naming the variable (exit code 2). From
+v0.17.0 the same holds for `SDLC_RUNNER_INTERVAL` and `SDLC_RUNNER_TIMEOUT`:
+zero or a negative value is refused at start.
+
+Failures are counted per run, not per task: a task that comes back to the
+status gets a new run and starts from zero, and a successful run clears the
+count. The pause starts from the release, and the reason of the release in
+the task's feed names the failure:
+
+```
+агент завершился с ошибкой; сбой 1 из 3, повторный захват не раньше чем через 1m
+агент завершился с ошибкой; сбой 3 из 3, пропускаю до перезапуска раннера
+```
+
+("the agent exited with an error; failure 1 of 3, claimed again not sooner
+than in 1m", "failure 3 of 3, skipped until the runner restarts"). A run
+this runner skips stays in the queue for other runners and for people.
+Stopping the runner is not a failure.
+
+**The subscription limit.** When the output of Claude Code says the
+subscription limit is reached, with any exit code, the runner reports the
+cost, releases the task and pauses all its slots: until the reset time
+Claude Code printed, or for `SDLC_RUNNER_LIMIT_PAUSE` when the time is not
+printed or cannot be read. While paused the runner does not poll the
+queue. Agents already running are not stopped; if one of them hits the
+limit too, the pause is extended to the later time, never shortened. A
+limit is not a failure of the run and does not count towards
+`SDLC_RUNNER_MAX_FAILURES`. The runner logs a warning with `resume_at`:
+
+- `лимит подписки агента исчерпан: раннер на паузе до сброса` ("the agent's
+  subscription limit is reached: the runner is paused until the reset");
+- `лимит подписки агента исчерпан, время сброса неизвестно: раннер на паузе SDLC_RUNNER_LIMIT_PAUSE`
+  ("... the reset time is unknown: the runner is paused for
+  SDLC_RUNNER_LIMIT_PAUSE"), with `limit_pause`;
+- `лимит подписки агента исчерпан ещё раз: пауза продлена` ("reached again:
+  the pause is extended");
+
+and when the pause is over, `пауза по лимиту подписки снята: раннер
+продолжает опрос` ("the pause on the subscription limit is over: the runner
+polls again"). The reason of the release in the task's feed reads
+`лимит подписки агента исчерпан, раннер на паузе до <time>` ("... the runner
+is paused until <time>").
+
+The limit is recognised in the output of Claude Code only: with your own
+`SDLC_RUNNER_COMMAND` that prints something else there is no pause on a
+limit, and an agent that exits with an error counts as a failure.
+
+**Lifting a pause early.** The pause and the failure counts live in the
+memory of the runner: restart it to lift a pause on the limit before the
+reset or to take a skipped run again.
+
+### Keeping a lease
+
+A claim gives a lease for `SDLC_LEASE_TTL` (30 minutes by default), the
+client renews it with heartbeats, and a task token lives as long as the
+lease (see [What the runner gives the agent](#what-the-runner-gives-the-agent)).
+From clab v0.17.0 `clab heartbeat` keeps a lease by itself:
+
+```bash
+clab heartbeat PLAT-12                        # one renewal, as before
+clab heartbeat PLAT-12 --every 5m --for 2h    # renew until the lease is gone, 2h pass or a signal
+clab heartbeat PLAT-12 -- make test-e2e       # renew while the command runs
+```
+
+Without `--every` the interval is the one the server names. With a command
+after `--` it renews while the command runs and exits with the command's
+code; the command keeps its input and output, and the lines of
+`clab heartbeat` go to stderr. If the lease is lost meanwhile, the command
+goes on and `clab heartbeat` warns that the work can no longer be submitted
+with the task token. `--for` does not go with a command.
+
+The server did not change for this: the lease, `SDLC_LEASE_TTL` and
+`SDLC_HEARTBEAT_INTERVAL` are as before, and the client keeps the lease.
+The skills of the agent kit (`/clab-run`, `/clab-work`) use these forms for
+long commands: run `clab setup` again after the upgrade to get them. The
+runner keeps the leases of its agents itself, as before.
+
+### Upgrading to v0.17.0
+
+`./upgrade.sh v0.17.0` (or `clab server upgrade`) needs no manual step.
+Three migrations run when the service starts, and all of them only add:
+
+- `000030` - the column `billing` of usage rows;
+- `000031` - the gate type `stage_time_limit`, two columns of stage runs
+  (the transition a stage was entered by, and when it went overdue) and an
+  index;
+- `000032` - a partial index on `task_events` for the claim events; writes
+  to the task feed wait while it is built, fractions of a second on
+  hundreds of thousands of events.
+
+There are no new variables in `.env` and no new services, ports or
+volumes. Runs reported before the upgrade have no `billing` and count as
+money. Stages entered before the upgrade have no transition of entry, so a
+[stage time limit](#stage-time-limit) does not apply to them. The usage
+policy is off and no cycle gets a limit: until someone turns them on,
+projects behave as before.
+
+After the upgrade:
+
+1. Upgrade `clab` on every machine that runs `clab-runner`: the runner comes
+   with it (`brew upgrade clab`, or the install script of the tap with
+   `CLAB_VERSION=v0.17.0`, see [CLI and agents](#cli-and-agents)), then
+   restart the runners. This is required before a project turns the
+   [usage policy](#usage-policy-of-a-project) on: a runner of v0.16.x
+   refused with `usage_report_required` logs `захват не удался` ("the claim
+   failed") on every poll for every task and does not say why. Under an old
+   runner the agent also reports the cost by itself, so the rows of a run
+   may double, and the cost of a failed agent is not recorded.
+2. Run `clab setup` again on the developers' machines for the skills of
+   v0.17.0.
+3. If you want: `SDLC_RUNNER_BILLING=subscription` for runners on a
+   subscription ([Cost of a run](#cost-of-a-run)), the usage policy, and the
+   [stage limits](#stage-limits) of your cycles.
+
+`clab` and `clab-runner` of v0.16.x keep working against a v0.17.0 server,
+with the limits above.
+
+## Stage limits
+
+From v0.17.0 a cycle can put two more limits on a stage: how many times a
+reviewer agent re-checks a result, and how long a stage stays open. Both
+are optional, neither is in the starter bundle, and a cycle without them
+works as before. Both are gates of the cycle and are edited like any gate:
+
+```bash
+clab export > my-bundle.json                  # add the gate or the field
+clab import --file my-bundle.json --dry-run   # the report, validation included
+clab import --file my-bundle.json             # a new draft of the cycle
+clab workflow activate <id of the new draft>
+```
+
+A malformed limit fails the validation of the draft: `clab import
+--dry-run` reports `workflow_validations[].valid` as `false` with the code
+of the problem, and activation is refused. Both limits are lifted only by a
+person with the `maintainer` level or above, with a `waived` decision; an
+agent's token and the task token of a stage executor are refused
+(`forbidden`).
+
+### Review limit
+
+A gate of type `agent_review` starts a nested run of the stage in which a
+reviewer role re-checks the result. From v0.17.0 its `config` takes an
+optional `max_attempts`:
+
+```json
+{"key": "review", "name": "Reviewed by an agent", "type": "agent_review",
+ "config": {"reviewer_role_key": "reviewer", "artifact_kind": "review.verdict",
+            "verdict_field": "verdict", "pass_on": "pass", "max_attempts": 2},
+ "blocking": true}
+```
+
+It counts the failed reviews of this gate in the current run of the stage.
+When they reach `max_attempts` and the last verdict is not a pass, the gate
+is `failed` and no new review is started, even for a reworked result. Its
+reason reads `перепроверок 2 из 2; новую не заведёт, снять может человек —
+решение waived по этому гейту` ("reviews 2 of 2; no new one is started, a
+person can lift it - a waived decision on this gate"), and its details
+carry `failed_reviews` and `max_attempts`; `clab gates PLAT-7` shows it.
+The way on is a person's:
+
+```bash
+clab decide PLAT-7 --transition dev_done --gate review --status waived
+```
+
+After the waiver the transition passes without a new review. A new
+submission of an artifact in the stage clears the waiver, and the gate
+holds again. Without `max_attempts` the gate works as before; a value that
+is not an integer of at least 1 fails validation with
+`review_limit_invalid`.
+
+### Stage time limit
+
+A gate of type `stage_time_limit` on the transition by which a task enters
+a status limits how long the stage in that status stays open:
+
+```json
+{"key": "time_limit", "name": "Development within 4 hours", "type": "stage_time_limit",
+ "config": {"max_duration": "4h"}, "blocking": true}
+```
+
+On `analysis_done` of "Starter" it would limit Development. On its own
+transition the gate always passes: it holds nothing there. The clock runs
+by wall time from the entry into the status; heartbeats, releases, new
+claims and expired leases do not reset it. `max_duration` is a duration in
+`s`, `m` or `h` (`"90m"`, `"4h"`, `"24h"`; there are no days), above zero
+and at most a year.
+
+When the time is up:
+
+- a new claim of the stage by an executor - an agent principal, a runner
+  with an agent token, any task token - is refused with
+  `stage_time_exceeded` (HTTP 409); the message names the limit, the time
+  passed and the decision that lifts it;
+- a person claiming under their own session (and a runner on an employee's
+  personal token) still gets the stage, the holder of a live lease goes on,
+  and reviews of the stage are not held;
+- the worker writes one `stage.overdue` event per run into the task's feed;
+- the task does not move: what next is a person's decision - lift the
+  limit, cancel the task, or move it on by a transition.
+
+`clab show`, `clab claim` and `clab gates` print a line `Предел этапа:`
+("stage limit:") with the limit, the transition of entry and the time left,
+for example `Предел этапа: 4h с входа переходом analysis_done, осталось 1h12m (до <time>)`
+("4h from the entry by analysis_done, 1h12m left"); an overdue stage gets
+the command that lifts the limit. Over MCP and the API it is `stage_limit`
+in the state of the task and in the claim answer.
+
+The limit is lifted on the transition of entry of the current run:
+
+```bash
+clab decide PLAT-7 --transition analysis_done --gate time_limit --status waived
+```
+
+The waiver holds until the end of this run of the stage; the next entry
+into the status starts a new clock. A decision on the gate of another
+transition is refused. The validation codes are `stage_time_limit_invalid`
+(a malformed `max_duration`), `stage_time_limit_terminal` (a transition
+into a terminal status: there is no stage there) and
+`stage_time_limit_duplicate` (a second one on the same transition).
 
 ## Embeddings
 
