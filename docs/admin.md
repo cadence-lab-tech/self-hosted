@@ -1147,13 +1147,16 @@ status; a transition to the next status is closed by gates:
 
 Every backward transition (back to analysis, back to development, QA
 failed) requires a `problem.report` artifact, so a task never goes back
-without a stated reason, and `cancel` is available from any status. A
+without a stated reason, and is capped: a task enters the status it goes
+back to at most three times (see [Attempts limit](#attempts-limit) below).
+`cancel` is available from any status. A
 task linked as blocked by another (`clab relate A --to B --rel blocks`, or
 the orchestrator's breakdown of an epic) cannot start until the blocking
 task is done or cancelled. Epics
 run on "Starter epics": Planning → Breakdown (`orchestrator` splits the epic
 into tasks, a human approves the breakdown) → In progress → Done, which is
-held until every child task is closed.
+held until every child task is closed; going back from In progress to
+Breakdown is capped the same way.
 
 The starter deliberately has no gates that need a GitHub App (CI status of
 the pull request, drift of the code base under the task): it works on an
@@ -1207,6 +1210,69 @@ clab decide PLAT-1 --transition analysis_done --gate human_approval
 ```
 
 Approvals are given by people, never by agents, in any configuration.
+
+### Attempts limit
+
+From v0.17.0 a cycle can cap how many times a task enters a status, so that a
+review loop ("back to development", "QA failed", again and again) does not
+run agents without end. The cap is a gate of type `attempts_limit` on a
+transition of the cycle, not a setting of a role:
+
+```json
+{"key": "attempts_limit", "name": "At most 3 attempts in the target status",
+ "type": "attempts_limit", "config": {"max_attempts": 3}, "blocking": true}
+```
+
+The starter puts it, with `max_attempts` 3, on every backward transition:
+`reject_to_analysis`, `reject_to_development` and `qa_failed` of "Starter",
+`replan` of "Starter epics". `max_attempts` counts the entries into the
+transition's target status, the first one included, whoever made them: the
+start, a forward transition, any way back, by hand or automatically. In
+"Starter" both `reject_to_development` and `qa_failed` lead to Development
+and share its count.
+
+**When it holds.** If the next entry would exceed `max_attempts`, the gate
+fails and the transition is blocked; the task stays where it is.
+`clab gates PLAT-7` shows the gate as `failed`; its reason names the attempt,
+the limit and the status, and its details carry `next_attempt`,
+`max_attempts`, `status` and `transition`. The task's activity feed in the UI
+gets a `gate.failed` event with the same numbers. An agent that hits the
+limit releases the task with the reason and stops: the decision is a
+person's.
+
+**Giving one more attempt.** A person with the `maintainer` level waives the
+gate on the task, then the transition is requested again:
+
+```bash
+clab gates PLAT-7 --transition qa_failed
+clab decide PLAT-7 --transition qa_failed --gate attempts_limit --status waived
+clab transition PLAT-7 --to qa_failed
+```
+
+Only a person can do it: an agent's token and the task token of a stage
+executor are refused (`forbidden`), and `--status passed` or `failed` is
+refused as invalid input, since the verdict is the server's. A waiver is good
+for one transition: the next time the task comes back, the gate counts again
+and needs a new decision. If you do not want another attempt, cancel the task
+or move it on by another transition.
+
+**Changing or removing it.** Edit the cycle: `clab export > my-bundle.json`,
+change `config.max_attempts` of the gate or delete the gate from the
+transition's `gates`, `clab import --file my-bundle.json`, then
+`clab workflow activate <id of the new draft>`. A transition without the gate
+has no limit. `max_attempts` must be an integer of at least 1, and the gate
+cannot stand on a transition into a terminal status (there is no second
+entry there): otherwise `clab import --dry-run` reports
+`workflow_validations[].valid` as `false` and activation is refused.
+
+**Existing installations.** Upgrading changes no cycle: projects set up with
+an older starter go on without a limit. To get it, apply the new starter by
+hand - `clab import --file bundles/starter.json --dry-run`, then
+`clab import --file bundles/starter.json` and `clab workflow activate` for
+each new draft. `clab server starter` stops on such a project ("another
+active cycle") and points at the same path. Tasks already in progress finish
+on the cycle version they started on; tasks nobody has picked up yet move to
+the new version.
 
 ## GitHub App
 

@@ -505,6 +505,17 @@ check "every artifact kind a gate requires is produced by a role" [ "$(jq -r '
   | [.workflows[].transitions[].gates[]? | select(.type == "artifacts_required") | .config.kinds[]]
   | map(select(. as $k | $kinds | index($k) | not)) | length' "$bundle")" = 0 ]
 check "every role of $bundle stands on a status" [ "$(jq -r '[.workflows[].statuses[].role // empty] as $used | [.roles[].key] | map(select(. as $r | $used | index($r) | not)) | length' "$bundle")" = 0 ]
+# Attempts limit (CLAB-217): every way back carries a cap on the attempts in
+# its target status, an integer of at least 1 - the starter protects a new
+# installation from an endless review loop by default.
+check "$bundle has reject transitions" [ "$(jq -r '[.workflows[].transitions[] | select(.kind == "reject")] | length' "$bundle")" -gt 0 ]
+while IFS=$'\t' read -r cycle transition limited; do
+  check "reject transition $transition of $cycle has an attempts_limit gate with an integer max_attempts >= 1" [ "$limited" = true ]
+done < <(jq -r '.workflows[] | .name as $cycle | .transitions[] | select(.kind == "reject")
+  | [$cycle, .key, (any(.gates[]?; .type == "attempts_limit"
+      and (.config.max_attempts | type) == "number"
+      and .config.max_attempts == (.config.max_attempts | floor)
+      and .config.max_attempts >= 1) | tostring)] | @tsv' "$bundle")
 
 info ".env.example"
 env_example="$(cat .env.example)"
