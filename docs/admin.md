@@ -1853,11 +1853,10 @@ to do. Upgrade the runners before turning the policy on.
 
 ### Runner failures and the subscription limit
 
-From clab-runner v0.17.0 a failing run does not loop. When the agent fails
-- exits with an error or is stopped on `SDLC_RUNNER_TIMEOUT` - or the runner
-cannot prepare the run (the worktree, the task token, the agent's
-directory), the runner releases the task and does not claim that run again
-at once:
+From clab-runner v0.17.0 a failing run does not loop. When the agent exits
+with an error or is stopped on `SDLC_RUNNER_TIMEOUT`, or the runner cannot
+prepare the run (the worktree, the task token, the agent's directory), the
+runner releases the task and does not claim that run again at once:
 
 | variable | default | |
 |---|---|---|
