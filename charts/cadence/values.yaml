@@ -116,6 +116,9 @@ config:
     SDLC_LOG_LEVEL: info
     SDLC_LEASE_TTL: 30m
     SDLC_HEARTBEAT_INTERVAL: 5m
+    # The largest file or artifact, in bytes (64 MiB; at least 524288). The
+    # API and the worker read the same value. docs/admin.md, "Attachments".
+    SDLC_BLOB_MAX_BYTES: "67108864"
     SDLC_GITHUB_API_URL: https://api.github.com
     SDLC_GITHUB_APP_ID: ""
     SDLC_EMBEDDINGS_PROVIDER: none
@@ -136,6 +139,11 @@ config:
     SDLC_OIDC_ISSUER: ""
     SDLC_OIDC_CLIENT_ID: ""
     SDLC_OIDC_GROUPS_CLAIM: groups
+    # How long the API takes to receive an uploaded file and to send one
+    # back; 0 is no limit. Raise them with SDLC_BLOB_MAX_BYTES, and the
+    # timeouts of your Ingress with them (docs/admin.md, "Attachments").
+    SDLC_UPLOAD_TIMEOUT: 10m
+    SDLC_DOWNLOAD_TIMEOUT: 10m
     # Traces of the API over OTLP/HTTP (docs/admin.md, "Tracing"); empty -
     # nothing is exported. The worker is not traced. The headers are a
     # secret: secrets.keys.OTEL_EXPORTER_OTLP_HEADERS.
@@ -186,6 +194,11 @@ api:
     periodSeconds: 5
     failureThreshold: 120
   resources: {}
+  # The size of the emptyDir mounted at /tmp of the API, where an upload is
+  # spooled before it goes to S3 (the root filesystem is read-only). Empty:
+  # no limit, the node's disk. A limit must hold SDLC_BLOB_MAX_BYTES for each
+  # upload at the same time, e.g. 1Gi (docs/admin.md, "Attachments").
+  tmpSizeLimit: ""
   nodeSelector: {}
   tolerations: []
   affinity: {}

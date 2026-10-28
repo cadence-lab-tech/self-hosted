@@ -16,7 +16,9 @@
 # API); the probes, the UI and the version through the Ingress; sign-in with
 # the token of the Secret, a team, a project, the starter bundle; MCP through
 # the Ingress, unbuffered; an artifact larger than the inline limit in the
-# bucket; the metrics inside the cluster only; Pod Security; no value of a
+# bucket; a file of 1 MiB uploaded through the Ingress (multipart, spooled to
+# the emptyDir of /tmp of the read-only API) and downloaded with its sha256
+# and name (CLAB-300); the metrics inside the cluster only; Pod Security; no value of a
 # secret in the values of the release or the manifests; a key missing in the
 # Secret; a refused upgrade keeps the pods; an upgrade with a changed value
 # keeps the data. CI runs it in the job "helm" of check.yml.
@@ -39,6 +41,11 @@
 #                     images by tag (images of a branch)
 #   CHECK_IMAGE_TAG   tag of the images (image.tag), default VERSION
 #   CLAB_BIN          clab to use; default: the CLI of VERSION from the tap
+#   CHECK_ATTACHMENTS=1
+#                     run the scenario of a file through the Ingress on images
+#                     of a branch built under the tag of VERSION before
+#                     v0.18.0 (the published images of those have no
+#                     attachments, and the scenario is skipped for them)
 #   CHECK_KEEP=1      leave the cluster and the stand-ins after the check
 #
 # Images in a local registry (localhost:*) are not reachable from the nodes
@@ -262,7 +269,7 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-body-size: 64m
+    nginx.ingress.kubernetes.io/proxy-body-size: 129m
 database:
   url: "$(db_url cadence)"
 blobs:
@@ -411,7 +418,7 @@ check "the controller has the server $host" [ -n "$server_conf" ]
 check "...each location keeps a stream for 3600s (proxy_read_timeout)" \
   [ "$(grep -E 'proxy_read_timeout' <<<"$server_conf" | awk '{print $2}' | sort -u)" = "3600s;" ]
 check "...and does not buffer it (proxy_buffering off)" [ "$(grep -E 'proxy_buffering' <<<"$server_conf" | awk '{print $2}' | sort -u)" = "off;" ]
-check "...and takes 64m (client_max_body_size)" contains "$server_conf" 'client_max_body_size                    64m;'
+check "...and takes 129m (client_max_body_size): a file of the limit of the service in multipart" contains "$server_conf" 'client_max_body_size                    129m;'
 
 # --- an artifact in the bucket -----------------------------------------------------------------
 info "artifact content in the bucket"
@@ -442,6 +449,40 @@ after="$(s3_keys helm/ | grep -c . || true)"
 check "the brief is an object under helm/ in the bucket ($before -> $after)" [ "$after" -gt "$before" ]
 artifact_content >"$work/brief.out" 2>&1 || true
 check "the API serves the same content from the bucket" grep -qF "line 400 of the brief" "$work/brief.out"
+
+# --- a file through the Ingress (CLAB-300) -----------------------------------------------------
+# The root filesystem of the API is read-only, and a file above the inline
+# limit (4096 bytes here) is spooled to /tmp before it goes to the bucket:
+# this upload fails (500) on a chart without the emptyDir of /tmp. It is a
+# multipart body through the Ingress, which takes 129m, and comes back with
+# the same sha256 and its name in Content-Disposition.
+# Attachments are in the images of v0.18.0 (CLAB-296): the published images of
+# an older VERSION have no such route, so the scenario is skipped for them;
+# CHECK_ATTACHMENTS=1 runs it on images of a branch built under the tag of an
+# older VERSION.
+if [ "${CHECK_ATTACHMENTS:-}" = 1 ] || ! version_lt "$version" v0.18.0; then
+  info "a file through the Ingress"
+  file_name="helm-model.bin"
+  head -c 1048576 /dev/urandom >"$work/model.bin"
+  file_sha="$(sha256_of "$work/model.bin")"
+  before="$(s3_keys helm/ | grep -c . || true)"
+  file_code="$(curl -s -o "$work/file.json" -w '%{http_code}' "${auth[@]}" -F "title=Helm model" \
+    -F "file=@$work/model.bin;filename=$file_name;type=application/octet-stream" "$base/v1/tasks/CHECK-1/attachments")"
+  check "a file of 1 MiB through the Ingress: 201 (got $file_code)" [ "$file_code" = 201 ]
+  file_id="$(jq -r '.id // empty' "$work/file.json" 2>/dev/null || true)"
+  if [ -n "$file_id" ]; then pass "the answer names the artifact $file_id"; else
+    fail "the answer names the artifact"
+    sed 's/^/      /' "$work/file.json" >&2 || true
+  fi
+  after="$(s3_keys helm/ | grep -c . || true)"
+  check "the file is an object under helm/ in the bucket ($before -> $after)" [ "$after" -gt "$before" ]
+  file_code="$(curl -s -o "$work/model.out" -D "$work/model.hdr" -w '%{http_code}' "${auth[@]}" "$base/v1/artifacts/${file_id:-none}/content")"
+  check "the file downloads through the Ingress: 200 (got $file_code)" [ "$file_code" = 200 ]
+  check "...with the sha256 it was uploaded with" [ "$(sha256_of "$work/model.out")" = "$file_sha" ]
+  check "...and its name in Content-Disposition" grep -qi "^content-disposition:.*filename=\"$file_name\"" "$work/model.hdr"
+else
+  info "VERSION is $version: attachments come with v0.18.0, the scenario is skipped (CHECK_ATTACHMENTS=1 runs it on images of a branch)"
+fi
 
 # --- metrics inside the cluster ------------------------------------------------------------------
 info "metrics inside the cluster"
