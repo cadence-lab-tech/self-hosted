@@ -74,8 +74,11 @@ x-shared-env: &shared-env
   SDLC_LEASE_TTL: ${SDLC_LEASE_TTL:-30m}
   SDLC_HEARTBEAT_INTERVAL: ${SDLC_HEARTBEAT_INTERVAL:-5m}
   # Artifact content: an S3 bucket, or the `blobs` volume when the bucket is
-  # empty.
+  # empty. SDLC_BLOB_MAX_BYTES is the largest file or artifact the API takes
+  # (the worker checks the same limit when it indexes); the upload and
+  # download time limits of the API are set in its own block below.
   SDLC_BLOB_DIR: /blobs
+  SDLC_BLOB_MAX_BYTES: ${SDLC_BLOB_MAX_BYTES:-67108864}
   SDLC_BLOB_S3_BUCKET: ${SDLC_BLOB_S3_BUCKET:-}
   SDLC_BLOB_S3_ENDPOINT: ${SDLC_BLOB_S3_ENDPOINT:-}
   SDLC_BLOB_S3_REGION: ${SDLC_BLOB_S3_REGION:-}
@@ -199,6 +202,10 @@ services:
       SDLC_OIDC_ISSUER: ${SDLC_OIDC_ISSUER:-}
       SDLC_OIDC_CLIENT_ID: ${SDLC_OIDC_CLIENT_ID:-}
       SDLC_OIDC_GROUPS_CLAIM: ${SDLC_OIDC_GROUPS_CLAIM:-groups}
+      # How long the API takes to receive an uploaded file and to send one
+      # back (since v0.18.0); 0 is no limit. docs/admin.md, "Attachments".
+      SDLC_UPLOAD_TIMEOUT: ${SDLC_UPLOAD_TIMEOUT:-10m}
+      SDLC_DOWNLOAD_TIMEOUT: ${SDLC_DOWNLOAD_TIMEOUT:-10m}
       # Traces of the API requests over OTLP/HTTP to your collector (since
       # v0.12.0): the standard OpenTelemetry variables, all empty by default,
       # and the API exports nothing until an endpoint is set. The worker is

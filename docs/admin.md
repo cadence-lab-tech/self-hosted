@@ -31,9 +31,12 @@ public address of your proxy in the `proxy` mode.
   ([cost of a run](#cost-of-a-run),
   [usage policy](#usage-policy-of-a-project),
   [runner failures](#runner-failures-and-the-subscription-limit),
-  [upgrading to v0.17.0](#upgrading-to-v0170))
+  [upgrading to v0.17.0](#upgrading-to-v0170),
+  [upgrading to v0.18.0](#upgrading-to-v0180))
 - [Stage limits](#stage-limits): reviews and the time of a stage
 - [Embeddings](#embeddings)
+- [Attachments](#attachments): the file limit, time limits, your proxy,
+  growth and what is not checked
 - [Backups](#backups)
 - [Upgrades and rollback](#upgrades-and-rollback)
   ([releases and mirrors](#releases-and-mirrors),
@@ -319,7 +322,13 @@ terminates TLS and forwards everything for `<host>` there. It must:
   with server-sent events, and a buffered stream hangs. Allow long-lived
   responses (minutes);
 - let GitHub reach `https://<host>/webhooks/github` from the internet if you
-  connect a GitHub App, even if the rest of the instance is internal-only.
+  connect a GitHub App, even if the rest of the instance is internal-only;
+- **take a request body of `2 x SDLC_BLOB_MAX_BYTES + 1 MiB`** and keep a
+  slow upload and download open: nginx stops a body above
+  `client_max_body_size` (1 MiB unless set) with `413` and a connection that
+  sends or reads nothing for `proxy_send_timeout` / `proxy_read_timeout`
+  (60 s) with `504`, before the request reaches the service. The numbers are
+  worked out in [Attachments](#attachments).
 
 nginx, for example:
 
@@ -329,7 +338,8 @@ server {
     server_name cadence.example.com;
     # ssl_certificate ...;
 
-    client_max_body_size 64m;
+    # 2 x SDLC_BLOB_MAX_BYTES + 1 MiB: 129m for the default 64 MiB
+    client_max_body_size 129m;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -338,7 +348,10 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_http_version 1.1;
         proxy_buffering off;
+        # a file goes through in one piece, not through a file of nginx
+        proxy_request_buffering off;
         proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
     }
 }
 ```
@@ -754,7 +767,8 @@ the UI as three Deployments — on your PostgreSQL and your S3 bucket, with
 the secrets in Secrets of the cluster; the Ingress of the cluster takes the
 place of the Caddy of the package. The settings are the `SDLC_*` variables
 of `docker-compose.yml` with the same defaults. The chart has no database,
-no Caddy and no volumes.
+no Caddy and no persistent volumes (the API gets one scratch directory,
+[`/tmp`](#attachments)).
 
 ### What you need
 
@@ -763,8 +777,10 @@ no Caddy and no volumes.
 - **An ingress controller** that passes a stream through: MCP answers with
   server-sent events. The controller must not buffer the responses of
   `/mcp`, must keep a request open for an hour, and must take a request
-  body of 64 MiB (the largest artifact). For ingress-nginx the annotations
-  of the example below do it; for another controller set its equivalents.
+  body of `2 x SDLC_BLOB_MAX_BYTES + 1 MiB` (129 MiB for the default limit of
+  64 MiB: the API's own limit on a request, see [Attachments](#attachments)).
+  For ingress-nginx the annotations of the example below do it; for another
+  controller set its equivalents.
 - **PostgreSQL with pgvector**, as for an
   [external database](#server-extensions-and-the-role): the role, the
   extensions and `sslmode`. The pods reach it from the cluster.
@@ -887,7 +903,7 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-body-size: 64m
+    nginx.ingress.kubernetes.io/proxy-body-size: 129m
 database:
   url: postgres://cadence@db.internal:5432/cadence?sslmode=verify-full&sslrootcert=/secrets/cadence/db-ca.pem
 blobs:
@@ -965,7 +981,17 @@ helm upgrade cadence oci://ghcr.io/cadence-lab-tech/charts/cadence --version 0.1
   version does not come up, restore the database and the bucket from the
   backup made before the upgrade, then `helm rollback cadence -n cadence`
   (or install the chart of the version of the backup). A chart older than
-  the schema must not run on it.
+  the schema must not run on it. The same holds for the migration of
+  attachments (v0.18.0): going back to a version without them takes the
+  database and the bucket of the backup, see
+  [Upgrading to v0.18.0](#upgrading-to-v0180).
+- **`/tmp` of the API.** The chart gives the container of the API an
+  `emptyDir` at `/tmp` (the root filesystem stays read-only): an upload to
+  the bucket is written there before it goes on. It is the disk of the node
+  and is emptied when the pod restarts; `api.tmpSizeLimit` caps it, e.g.
+  `1Gi`. A cap must hold `SDLC_BLOB_MAX_BYTES` for every upload that runs
+  at the same time, or the upload fails with a full disk and the pod may be
+  evicted; see [Attachments](#attachments).
 - Changing only the values (`--set config.shared.SDLC_LOG_LEVEL=debug`,
   the replicas) on the same version recreates the pods; the data stays.
 - **From the chart 0.13.0 to 0.14.0 or newer, Pod Security.** A namespace
@@ -2051,6 +2077,52 @@ After the upgrade:
 `clab` and `clab-runner` of v0.16.x keep working against a v0.17.0 server,
 with the limits above.
 
+### Upgrading to v0.18.0
+
+The upgrade (`./upgrade.sh v0.18.0`, or `clab server upgrade`) needs no
+manual step. One migration runs when the service starts, `000033`, and it
+only adds: four columns on artifacts (the mark of an attachment, the name
+and the type of a file, when the indexer passed it), two checks and a
+partial index. No rows are rewritten, so it takes fractions of a second even
+on a large database. There are no new services, ports, volumes or required
+variables in `.env`: the three variables of
+[Attachments](#attachments) have defaults, and an installation upgraded
+without them in `.env` takes files of up to 64 MiB, in 10 minutes. The
+worker passes once over the artifacts of the earlier versions in the
+background, to mark what it has indexed.
+
+Check your proxy before people attach files: its default limits (1 MiB of a
+body in nginx) refuse them, and the example of `client_max_body_size 64m`
+in earlier versions of this guide refuses a file of 64 MiB too. The numbers
+are in [Attachments](#attachments), "Your proxy". The Caddy of the package
+needs nothing.
+
+**Rolling back is not an upgrade to the old version.** `./upgrade.sh` does
+not go to an older version, and the schema of `000033` stays in the
+database: a service of v0.17.0 or older does not know its columns, and code
+older than its schema is not promised to run. The way back is the backup
+made before the upgrade, with the package of the old version:
+
+```
+tar -xpzf backups/package-v0.17.0-<date>.tar.gz   # package files of v0.17.0
+./restore.sh --yes backups/cadence-v0.17.0-<date>.sql.gz   # data as of the backup, starts v0.17.0
+```
+
+The upgrade takes that backup itself and prints these two lines with the
+exact names if the new version does not become ready; otherwise find the
+files in `backups/`. Whatever was done after the backup is lost: tasks,
+artifacts and the rows of attachments. The files of such attachments stay in
+the volume `blobs` or in your bucket with no row that points at them: they
+cost disk, nothing serves them, and you may delete them when you are sure no
+one needs them. With a bucket, restore the bucket to the moment of the backup
+if you want it to match. In Helm the same holds: the database and the bucket
+from the backup, then the chart of the old version
+([Upgrades and rollback](#upgrades-and-rollback)).
+
+`clab` of v0.17.x works against a v0.18.0 server, but it does not attach
+files. Upgrade `clab` as for any release, see
+[CLI and agents](#cli-and-agents).
+
 ## Stage limits
 
 From v0.17.0 a cycle can put two more limits on a stage: how many times a
@@ -2220,6 +2292,121 @@ worker logs the failures (its log messages are in Russian):
 docker compose logs worker | grep 'досчёт эмбеддингов'
 docker compose logs worker | grep 'эмбеддинги не посчитаны'
 ```
+
+## Attachments
+
+From v0.18.0 a task carries files next to its artifacts: a mock-up, a log, a
+3D model. A small file lives in the database; one above 256 KiB lives in the
+`blobs` volume or, with `SDLC_BLOB_S3_BUCKET` set, in your S3 bucket, like
+the content of a large artifact. This section is what you decide about
+them: the size of a file, the time it may take, your proxy, the disk, and
+what the service does not do.
+
+### The limit of a file and the time limits
+
+| Variable | Default | What it is | Set in |
+|---|---|---|---|
+| `SDLC_BLOB_MAX_BYTES` | `67108864` (64 MiB) | The largest file, or artifact content, the service takes, in bytes. The API and the worker read the same value. | `.env`; Helm `config.shared` |
+| `SDLC_UPLOAD_TIMEOUT` | `10m` | How long one upload may take, from the first byte to the answer. `0` is no limit. | `.env`; Helm `config.api` |
+| `SDLC_DOWNLOAD_TIMEOUT` | `10m` | How long one download may take. `0` is no limit. | `.env`; Helm `config.api` |
+
+None of them has to be in `.env`: the defaults of `docker-compose.yml` and of
+the chart apply, so an installation upgraded without the lines behaves as a
+new one. `.env.example` lists them commented out. After a change,
+`docker compose up -d` recreates `api` and `worker`; in Helm, `helm upgrade`
+does.
+
+A file above the limit is refused with `413`, whole: nothing is stored. The
+minimum of `SDLC_BLOB_MAX_BYTES` is `524288` (512 KiB): it may not be below
+the largest file the indexer reads (`SDLC_INDEX_MAX_FILE_BYTES`, 512 KiB),
+and `api` and `worker` do not start with a smaller value, naming both
+variables in the log.
+
+Choose them by the files and the link:
+
+- **Markdown and other text:** keep the defaults. 64 MiB is a great deal of
+  text.
+- **Large models, archives, videos:** raise `SDLC_BLOB_MAX_BYTES` to the
+  largest file you want, with some room; keep the content in an S3 bucket
+  (below); and raise the time limits to the largest file over the slowest
+  link of your people: 500 MiB over 20 Mbit/s is about 3.5 minutes, over
+  5 Mbit/s about 14, so `10m` suits the first and `30m` the second. The time
+  limit is per request.
+- **Memory** is not the limit: the API streams a file to the volume or the
+  bucket and does not hold it. The disk is.
+
+The request body that `/v1` and `/mcp` take is `2 x SDLC_BLOB_MAX_BYTES +
+1 MiB` (129 MiB for 64 MiB): a text artifact in JSON can double under
+escaping. That is the number your proxy needs, not the limit of the file.
+
+### S3 for large files
+
+With `SDLC_BLOB_S3_BUCKET` empty, files live in the `blobs` volume of the
+host, which the backup archives. For large files, or when the disk of the
+host is small, set the bucket (`SDLC_BLOB_S3_*` in `.env.example`, `blobs.s3`
+in Helm): the files go there, and the bucket is yours to back up and to size.
+Helm requires the bucket.
+
+An upload is first written to a temporary file, then stored. With the
+`blobs` volume the file is in the volume, next to its final place. With a
+bucket it is in `/tmp` of the `api` container, then sent. In compose that is
+the writable layer of the container, so the disk of the host needs
+`SDLC_BLOB_MAX_BYTES` free for every upload that runs at the same time. In Helm the root filesystem is read-only,
+and the chart mounts an `emptyDir` at `/tmp` of the API instead: the disk of
+the node, emptied when the pod restarts. `api.tmpSizeLimit` caps it (empty by
+default: no cap); a cap, like `1Gi`, must hold `SDLC_BLOB_MAX_BYTES` for each
+simultaneous upload, or an upload fails and the kubelet evicts the pod.
+
+### Your proxy
+
+The Caddy of the package sets no limit on the body and no time limit of its
+own, so in the `tls` mode there is nothing to do. Behind
+[your reverse proxy](#behind-your-reverse-proxy) in the `proxy` mode, and
+behind an Ingress, the limits of the proxy come first and its defaults are
+small:
+
+| | nginx | ingress-nginx annotation | Needs |
+|---|---|---|---|
+| The body | `client_max_body_size` (1 MiB) | `proxy-body-size` | not less than `2 x SDLC_BLOB_MAX_BYTES + 1 MiB`: `129m` for the default |
+| Sending to the API | `proxy_send_timeout` (60 s) | `proxy-send-timeout` (seconds) | not less than `SDLC_UPLOAD_TIMEOUT` |
+| Waiting for the API | `proxy_read_timeout` (60 s) | `proxy-read-timeout` (seconds) | not less than both time limits |
+
+With `proxy_request_buffering off` (`proxy-request-buffering: "off"`) the
+file goes to the API as it arrives and nginx writes nothing to its own disk;
+the examples of this guide set it. A request the proxy stops is answered by
+the proxy, `413` for a body and `504` for a time, and the log of the API has
+no line for it. The API logs its own limits on start
+(`docker compose logs api | grep upload_timeout`).
+
+The `grace_period 10s` of the Caddy of the package ends, with a broken
+connection, an upload or a download that is still running 10 seconds after
+Caddy reloads its configuration. Caddy reloads when you run the upgrade of
+the package or `docker compose exec caddy caddy reload --config
+/etc/caddy/Caddyfile`: do that when nobody is moving a large file, and the
+person whose transfer broke repeats it.
+
+### Disk, backups, and what is not checked
+
+- **Growth.** The volume `blobs` and, with every backup, the archive
+  `cadence-<version>-<date>.blobs.tar.gz` grow with the files. A backup
+  writes a complete archive each time and keeps `KEEP_DAYS` (14) days of
+  them, so the disk holds about the volume times the backups of that time:
+  watch `docker system df -v` and the size of `backups/`, or keep the content
+  in a bucket and back up the database alone. See [Backups](#backups).
+- **No quotas.** There is no limit per project, per team or in total, only
+  the size of one file. A person who may attach files can fill the disk or
+  the bucket; watching it is yours.
+- **No scanning.** Uploaded files are not checked for malicious content, by
+  an antivirus or otherwise. The service stores them and serves them back
+  unchanged: as downloads, except images, PDF and plain text, with
+  `X-Content-Type-Options: nosniff` and a sandboxing policy; it never
+  opens them. If your people open attachments on their
+  machines, scan the volume or the bucket with the tool of your company.
+
+If an upload fails: a `413` or `504` page that is not JSON comes from your
+proxy, see the limits above; a `413` with a JSON error comes from the service:
+the file or the request is above `SDLC_BLOB_MAX_BYTES`; a connection broken after minutes is a time limit of
+the proxy, of the link, or `SDLC_UPLOAD_TIMEOUT`.
 
 ## Backups
 
@@ -2557,6 +2744,17 @@ example:
   tar -xpzf backups/package-v0.6.0-20261008-030000.tar.gz   # package files of v0.6.0
   ./restore.sh --yes backups/cadence-v0.6.0-20261008-030000.sql.gz   # data as of the backup, starts v0.6.0
 ```
+
+**A rollback is a restore.** Migrations only go forward and the upgrade does
+not go to an older version, so after an upgrade that went through — the new
+version came up and people worked in it — `./upgrade.sh <old version>`
+refuses, and the old code is not promised to run on the new schema. The way
+back is the two lines above with the backup made before the upgrade, at the
+cost of what was done after it. A release that adds a migration is the
+example: `000033` of v0.18.0 (attachments), with what stays in the volume or
+the bucket, in [Upgrading to v0.18.0](#upgrading-to-v0180). Keep the backup
+until you are sure of the new version. With the Helm chart the same: restore
+the database and the bucket, then install the chart of the old version.
 
 Releases are published as GitHub Releases of this repository; watch it
 (Releases and Security alerts) to hear about them and about security fixes

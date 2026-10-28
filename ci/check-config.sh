@@ -697,6 +697,57 @@ for v in $otel_vars; do
 done
 check "docs/admin.md says OTLP over gRPC is not supported" contains "$admin" "Only OTLP over HTTP with protobuf is supported"
 
+# Attachments (since v0.18.0, CLAB-300): the limit of a file goes to the API
+# and the worker, the upload and download times to the API only. All three
+# have defaults in compose, so an .env written before them still works;
+# .env.example documents them commented out, and docs/admin.md describes
+# each and the numbers a proxy needs.
+info "attachments (SDLC_BLOB_MAX_BYTES, SDLC_UPLOAD_TIMEOUT, SDLC_DOWNLOAD_TIMEOUT)"
+attach_vars="SDLC_BLOB_MAX_BYTES SDLC_UPLOAD_TIMEOUT SDLC_DOWNLOAD_TIMEOUT"
+attach_config() {
+  env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST -u SDLC_BLOB_MAX_BYTES -u SDLC_UPLOAD_TIMEOUT -u SDLC_DOWNLOAD_TIMEOUT \
+    "$@" POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --format json
+}
+for mode in tls proxy; do
+  attach="$(attach_config COMPOSE_FILE="docker-compose.yml:compose.$mode.yml")"
+  check "[$mode] api gets SDLC_BLOB_MAX_BYTES=67108864, SDLC_UPLOAD_TIMEOUT=10m, SDLC_DOWNLOAD_TIMEOUT=10m without .env" \
+    [ "$(jq -r '.services.api.environment | "\(.SDLC_BLOB_MAX_BYTES) \(.SDLC_UPLOAD_TIMEOUT) \(.SDLC_DOWNLOAD_TIMEOUT)"' <<<"$attach")" = "67108864 10m 10m" ]
+  check "[$mode] worker gets SDLC_BLOB_MAX_BYTES=67108864 and neither time limit" \
+    [ "$(jq -r '.services.worker.environment | "\(.SDLC_BLOB_MAX_BYTES) \(.SDLC_UPLOAD_TIMEOUT // "-") \(.SDLC_DOWNLOAD_TIMEOUT // "-")"' <<<"$attach")" = "67108864 - -" ]
+done
+attach_set="$(attach_config SDLC_BLOB_MAX_BYTES=268435456 SDLC_UPLOAD_TIMEOUT=30m SDLC_DOWNLOAD_TIMEOUT=0 |
+  jq -r '"\(.services.api.environment.SDLC_BLOB_MAX_BYTES) \(.services.worker.environment.SDLC_BLOB_MAX_BYTES) \(.services.api.environment.SDLC_UPLOAD_TIMEOUT) \(.services.api.environment.SDLC_DOWNLOAD_TIMEOUT)"')"
+check "the three variables of .env reach the containers" [ "$attach_set" = "268435456 268435456 30m 0" ]
+for v in $attach_vars; do
+  check ".env.example documents $v, commented out" grep -qE "^# $v=" .env.example
+  check ".env.example does not set $v" lacks "$(grep -v '^#' <<<"$env_example")" "$v="
+  check "docs/admin.md describes $v" grep -qF "\`$v\`" docs/admin.md
+done
+check ".env.example gives the defaults 67108864 and 10m" \
+  [ "$(grep -cxE '# SDLC_BLOB_MAX_BYTES=67108864|# SDLC_UPLOAD_TIMEOUT=10m|# SDLC_DOWNLOAD_TIMEOUT=10m' .env.example)" = 3 ]
+# The numbers of the proxy in the documentation follow the limit of the
+# service, 2 x SDLC_BLOB_MAX_BYTES + 1 MiB = 129 MiB for 64 MiB; the values
+# the docs and the checks used to carry (64m) are gone.
+check "docs/admin.md: the proxy takes 129m (client_max_body_size and proxy-body-size)" \
+  [ "$(grep -cE 'client_max_body_size 129m;|proxy-body-size: 129m' docs/admin.md)" = 2 ]
+check "docs/admin.md: no 64m body limit of a proxy left" lacks "$admin" "body-size: 64m"
+check "docs/admin.md: no 64m client_max_body_size directive left" lacks "$admin" "client_max_body_size 64m;"
+check "docs/admin.md: the proxy sets proxy_send_timeout and proxy-send-timeout" \
+  [ "$(grep -cE 'proxy_send_timeout 1h;|proxy-send-timeout: "3600"' docs/admin.md)" = 2 ]
+check "the Caddyfile has grace_period 10s" grep -qF 'grace_period 10s' Caddyfile
+check "docs/admin.md names grace_period 10s" contains "$admin" 'grace_period 10s'
+check "docs/admin.md says uploaded files are not checked for malicious content" \
+  contains "$admin" "Uploaded files are not checked for malicious content"
+check "docs/admin.md says there are no quotas" contains "$admin" "There is no limit per project, per team or in total"
+check "docs/admin.md has Upgrading to v0.18.0" contains "$admin" "### Upgrading to v0.18.0"
+check "...with the restore of the backup as the way back" contains "$admin" "Rolling back is not an upgrade to the old version"
+check "...and the commands the upgrade prints: tar -xpzf and ./restore.sh --yes" \
+  contains "$admin" "./restore.sh --yes backups/cadence-v0.17.0-"
+check "...and the section Upgrades and rollback says a rollback is a restore" contains "$admin" "**A rollback is a restore.**"
+# The Caddy of the package sets no limit on a body or a time of its own.
+check "Caddyfile sets no request_body limit and no timeouts of its own" \
+  [ -z "$(grep -nE 'request_body|max_size|read_timeout|write_timeout|timeouts' Caddyfile || true)" ]
+
 # The example alert rules of docs/admin.md ("Monitoring") are what an
 # administrator copies into Prometheus: they must load.
 info "alert rules (docs)"
@@ -1166,6 +1217,34 @@ check "Service cadence-ui: port 80 to the port http" \
 check "templates/ui.yaml no longer says the image runs as root" lacks "$(cat charts/cadence/templates/ui.yaml)" "runs as root"
 check "every pod mounts no service account token" \
   [ "$(jq -r '[.[] | .spec.template.spec // empty | .automountServiceAccountToken] | unique | join(",")' <<<"$min_json")" = false ]
+# Attachments (CLAB-300): the root filesystem of the API is read-only, and an
+# upload to the bucket is spooled to /tmp first (os.TempDir): an emptyDir
+# there, on the API only. Without it the first upload of a file fails.
+api_spec="$(jq -c '.[] | select(.kind == "Deployment" and .metadata.name == "cadence-api") | .spec.template.spec' <<<"$min_json")"
+check "api: an emptyDir mounted at /tmp" \
+  [ "$(jq -r '. as $s | [.containers[0].volumeMounts[] | select(.mountPath == "/tmp") | .name as $v | [$s.volumes[] | select(.name == $v) | has("emptyDir")] | first] | join(",")' <<<"$api_spec")" = true ]
+check "api: the emptyDir of /tmp has no sizeLimit by default" \
+  [ "$(jq -r '[.volumes[] | select(.name == "tmp") | .emptyDir | has("sizeLimit")] | join(",")' <<<"$api_spec")" = false ]
+check "api: the container keeps readOnlyRootFilesystem and runAsNonRoot" \
+  [ "$(jq -r '.containers[0].securityContext | "\(.readOnlyRootFilesystem) \(.runAsNonRoot)"' <<<"$api_spec")" = "true true" ]
+check "api: api.tmpSizeLimit caps the emptyDir of /tmp" \
+  [ "$(render_json -f "$dist/min-values.yaml" --set api.tmpSizeLimit=1Gi | jq -r '.[] | select(.kind == "Deployment" and .metadata.name == "cadence-api") | .spec.template.spec.volumes[] | select(.name == "tmp") | .emptyDir.sizeLimit')" = 1Gi ]
+check "api: the /tmp and the secrets volumes are both there with every key set" \
+  [ "$(jq -r '.[] | select(.kind == "Deployment" and .metadata.name == "cadence-api") | .spec.template.spec | [.volumes[].name] | sort | join(",")' <<<"$all_json")" = "secrets,tmp" ]
+check "worker and ui get no volume at /tmp" \
+  [ "$(jq -r '[.[] | select(.kind == "Deployment" and (.metadata.name == "cadence-worker" or .metadata.name == "cadence-ui")) | .spec.template.spec.containers[].volumeMounts[]? | select(.mountPath == "/tmp")] | length' <<<"$min_json")" = 0 ]
+for v in SDLC_BLOB_MAX_BYTES SDLC_UPLOAD_TIMEOUT SDLC_DOWNLOAD_TIMEOUT; do
+  case "$v" in SDLC_BLOB_MAX_BYTES) readers="api worker" ;; *) readers=api ;; esac
+  for r in api worker; do
+    has="$(jq -r --arg k "$v" 'has($k)' <<<"$(chart_env "$min_json" "$r")")"
+    case " $readers " in
+    *" $r "*) check "[$r] the chart passes $v" [ "$has" = true ] ;;
+    *) check "[$r] the chart does not pass $v" [ "$has" = false ] ;;
+    esac
+  done
+done
+check "docs/admin.md says what api.tmpSizeLimit caps" contains "$admin" "\`api.tmpSizeLimit\` caps it"
+
 check "api and worker are Recreate" \
   [ "$(jq -r '[.[] | select(.kind == "Deployment" and (.metadata.name | test("api|worker"))) | .spec.strategy.type] | unique | join(",")' <<<"$min_json")" = Recreate ]
 probes="$(jq -r '.[] | select(.metadata.name == "cadence-api" and .kind == "Deployment") | .spec.template.spec.containers[0] | "\(.startupProbe.httpGet.path) \(.readinessProbe.httpGet.path) \(.livenessProbe.httpGet.path)"' <<<"$min_json")"
