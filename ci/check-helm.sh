@@ -41,6 +41,11 @@
 #                     images by tag (images of a branch)
 #   CHECK_IMAGE_TAG   tag of the images (image.tag), default VERSION
 #   CLAB_BIN          clab to use; default: the CLI of VERSION from the tap
+#   CHECK_ATTACHMENTS=1
+#                     run the scenario of a file through the Ingress on images
+#                     of a branch built under the tag of VERSION before
+#                     v0.18.0 (the published images of those have no
+#                     attachments, and the scenario is skipped for them)
 #   CHECK_KEEP=1      leave the cluster and the stand-ins after the check
 #
 # Images in a local registry (localhost:*) are not reachable from the nodes
@@ -451,25 +456,33 @@ check "the API serves the same content from the bucket" grep -qF "line 400 of th
 # this upload fails (500) on a chart without the emptyDir of /tmp. It is a
 # multipart body through the Ingress, which takes 129m, and comes back with
 # the same sha256 and its name in Content-Disposition.
-info "a file through the Ingress"
-file_name="helm-model.bin"
-head -c 1048576 /dev/urandom >"$work/model.bin"
-file_sha="$(sha256_of "$work/model.bin")"
-before="$(s3_keys helm/ | grep -c . || true)"
-file_code="$(curl -s -o "$work/file.json" -w '%{http_code}' "${auth[@]}" -F "title=Helm model" \
-  -F "file=@$work/model.bin;filename=$file_name;type=application/octet-stream" "$base/v1/tasks/CHECK-1/attachments")"
-check "a file of 1 MiB through the Ingress: 201 (got $file_code)" [ "$file_code" = 201 ]
-file_id="$(jq -r '.id // empty' "$work/file.json" 2>/dev/null || true)"
-if [ -n "$file_id" ]; then pass "the answer names the artifact $file_id"; else
-  fail "the answer names the artifact"
-  sed 's/^/      /' "$work/file.json" >&2 || true
+# Attachments are in the images of v0.18.0 (CLAB-296): the published images of
+# an older VERSION have no such route, so the scenario is skipped for them;
+# CHECK_ATTACHMENTS=1 runs it on images of a branch built under the tag of an
+# older VERSION.
+if [ "${CHECK_ATTACHMENTS:-}" = 1 ] || ! version_lt "$version" v0.18.0; then
+  info "a file through the Ingress"
+  file_name="helm-model.bin"
+  head -c 1048576 /dev/urandom >"$work/model.bin"
+  file_sha="$(sha256_of "$work/model.bin")"
+  before="$(s3_keys helm/ | grep -c . || true)"
+  file_code="$(curl -s -o "$work/file.json" -w '%{http_code}' "${auth[@]}" -F "title=Helm model" \
+    -F "file=@$work/model.bin;filename=$file_name;type=application/octet-stream" "$base/v1/tasks/CHECK-1/attachments")"
+  check "a file of 1 MiB through the Ingress: 201 (got $file_code)" [ "$file_code" = 201 ]
+  file_id="$(jq -r '.id // empty' "$work/file.json" 2>/dev/null || true)"
+  if [ -n "$file_id" ]; then pass "the answer names the artifact $file_id"; else
+    fail "the answer names the artifact"
+    sed 's/^/      /' "$work/file.json" >&2 || true
+  fi
+  after="$(s3_keys helm/ | grep -c . || true)"
+  check "the file is an object under helm/ in the bucket ($before -> $after)" [ "$after" -gt "$before" ]
+  file_code="$(curl -s -o "$work/model.out" -D "$work/model.hdr" -w '%{http_code}' "${auth[@]}" "$base/v1/artifacts/${file_id:-none}/content")"
+  check "the file downloads through the Ingress: 200 (got $file_code)" [ "$file_code" = 200 ]
+  check "...with the sha256 it was uploaded with" [ "$(sha256_of "$work/model.out")" = "$file_sha" ]
+  check "...and its name in Content-Disposition" grep -qi "^content-disposition:.*filename=\"$file_name\"" "$work/model.hdr"
+else
+  info "VERSION is $version: attachments come with v0.18.0, the scenario is skipped (CHECK_ATTACHMENTS=1 runs it on images of a branch)"
 fi
-after="$(s3_keys helm/ | grep -c . || true)"
-check "the file is an object under helm/ in the bucket ($before -> $after)" [ "$after" -gt "$before" ]
-file_code="$(curl -s -o "$work/model.out" -D "$work/model.hdr" -w '%{http_code}' "${auth[@]}" "$base/v1/artifacts/${file_id:-none}/content")"
-check "the file downloads through the Ingress: 200 (got $file_code)" [ "$file_code" = 200 ]
-check "...with the sha256 it was uploaded with" [ "$(sha256_of "$work/model.out")" = "$file_sha" ]
-check "...and its name in Content-Disposition" grep -qi "^content-disposition:.*filename=\"$file_name\"" "$work/model.hdr"
 
 # --- metrics inside the cluster ------------------------------------------------------------------
 info "metrics inside the cluster"

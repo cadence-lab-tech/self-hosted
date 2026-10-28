@@ -37,6 +37,10 @@
 # 400 as docs/admin.md says (CLAB-252): clab server starter reads it with a
 # one-off alpine:3 container, prints no token and leaves no container.
 #
+# Attachments (CLAB-300): a file of 1 MiB through Caddy and back, in the
+# images of v0.18.0 and later; CHECK_ATTACHMENTS=1 runs it on images of a
+# branch built under the tag of an older VERSION.
+#
 # The routes of Caddy (CLAB-267): the admin API of Caddy lists the upstreams
 # of the Caddyfile of the package; a Caddyfile of the administrator routing
 # to ui:81, mounted by compose.override.yml, makes the site answer 502, and
@@ -942,25 +946,40 @@ check "the start of a blocked task is held by dependencies_closed" contains "$bl
 # of attachments (the command comes with v0.18.0). It comes back with the same
 # sha256 and its own name in Content-Disposition: now, and after the restore
 # below.
-info "an attachment through Caddy"
-attach_name="check-model.bin"
-head -c 1048576 /dev/urandom >"$work/attach.bin"
-attach_sha="$(sha256_of "$work/attach.bin")"
-attach_code="$(curl -s -o "$work/attach.json" -w '%{http_code}' "${auth[@]}" -F "title=Check model" \
-  -F "file=@$work/attach.bin;filename=$attach_name;type=application/octet-stream" "$base/v1/tasks/CHECK-1/attachments")"
-check "a file of 1 MiB uploaded through Caddy: 201 (got $attach_code)" [ "$attach_code" = 201 ]
-attach_id="$(jq -r '.id // empty' "$work/attach.json" 2>/dev/null || true)"
-check "...the answer names the artifact ($attach_id) and 1048576 bytes" \
-  [ "$(jq -r 'select(.id != null) | .size_bytes' "$work/attach.json" 2>/dev/null)" = 1048576 ]
-# attachment_is_back WHEN: the download through Caddy is the file that went up.
-attachment_is_back() {
+# Attachments are in the images of v0.18.0 (CLAB-296): the published images of
+# an older VERSION have no such route, so the scenario is skipped for them;
+# CHECK_ATTACHMENTS=1 runs it on images of a branch built under the tag of an
+# older VERSION (the header of this file: images of a branch in a local registry).
+attach_on=false
+attach_id=""
+# attachment_is_back_or_fail WHEN: the download through Caddy is the file that went up.
+attachment_is_back_or_fail() {
   local when="$1" code
+  if [ -z "$attach_id" ]; then
+    fail "$when: no artifact id, nothing to download"
+    return 0
+  fi
   code="$(curl -s -o "$work/attach.out" -D "$work/attach.hdr" -w '%{http_code}' "${auth[@]}" "$base/v1/artifacts/$attach_id/content")"
   check "$when: the attachment downloads through Caddy: 200 (got $code)" [ "$code" = 200 ]
   check "$when: ...with the sha256 it was uploaded with" [ "$(sha256_of "$work/attach.out")" = "$attach_sha" ]
   check "$when: ...and its name in Content-Disposition" grep -qi "^content-disposition:.*filename=\"$attach_name\"" "$work/attach.hdr"
 }
-if [ -n "$attach_id" ]; then attachment_is_back "before the backup"; else fail "no artifact id: nothing to download"; fi
+if [ "${CHECK_ATTACHMENTS:-}" = 1 ] || ! version_lt "$version" v0.18.0; then attach_on=true; fi
+if [ "$attach_on" = true ]; then
+  info "an attachment through Caddy"
+  attach_name="check-model.bin"
+  head -c 1048576 /dev/urandom >"$work/attach.bin"
+  attach_sha="$(sha256_of "$work/attach.bin")"
+  attach_code="$(curl -s -o "$work/attach.json" -w '%{http_code}' "${auth[@]}" -F "title=Check model" \
+    -F "file=@$work/attach.bin;filename=$attach_name;type=application/octet-stream" "$base/v1/tasks/CHECK-1/attachments")"
+  check "a file of 1 MiB uploaded through Caddy: 201 (got $attach_code)" [ "$attach_code" = 201 ]
+  attach_id="$(jq -r '.id // empty' "$work/attach.json" 2>/dev/null || true)"
+  check "...the answer names the artifact ($attach_id) and 1048576 bytes" \
+    [ "$(jq -r 'select(.id != null) | .size_bytes' "$work/attach.json" 2>/dev/null)" = 1048576 ]
+else
+  info "VERSION is $version: attachments come with v0.18.0, the scenario is skipped (CHECK_ATTACHMENTS=1 runs it on images of a branch)"
+fi
+if [ "$attach_on" = true ]; then attachment_is_back_or_fail "before the backup"; fi
 
 if [ "$db" = bundled ]; then
   info "docker compose down and up -d, without -v"
@@ -970,7 +989,7 @@ if [ "$db" = bundled ]; then
   check "the stack is ready again" wait_ready 180
   check "...with the tasks created before" contains "$(env SDLC_PROJECT=CHECK "$clab" --host "$base" show CHECK-3 --json 2>/dev/null)" '"Second task"'
   bundled_db_checks "after down and up"
-  if [ -n "$attach_id" ]; then attachment_is_back "after down and up"; fi
+  if [ "$attach_on" = true ]; then attachment_is_back_or_fail "after down and up"; fi
 fi
 
 # --- clab server -------------------------------------------------------------------------------------
@@ -1113,7 +1132,7 @@ check "after restore the project created after the backup is gone" lacks "$proje
 check "/readyz answers 200 after restore" [ "$(http_code "$base/readyz")" = 200 ]
 # The file went up before the backup: its row comes back with the dump and its
 # content with the archive of the blobs volume (or stays in the bucket).
-if [ -n "$attach_id" ]; then attachment_is_back "after restore"; else fail "no artifact id: nothing to download after restore"; fi
+if [ "$attach_on" = true ]; then attachment_is_back_or_fail "after restore"; fi
 
 # --- a route of Caddy to a port ui does not listen on (CLAB-267) -----------------------------------
 # A Caddyfile of the administrator routing to ui:81 (as one routing to ui:80
