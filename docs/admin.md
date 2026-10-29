@@ -2033,6 +2033,30 @@ code; the command keeps its input and output, and the lines of
 goes on and `clab heartbeat` warns that the work can no longer be submitted
 with the task token. `--for` does not go with a command.
 
+**The command runs without the credentials of `clab`.** From the release
+after v0.18.0 the wrapper does not hand the command the environment of the
+agent that holds the lease: `SDLC_TOKEN`, `SDLC_API_URL`, `SDLC_PROJECT` and
+`SDLC_ACTOR` are removed, and `CLAB_CONFIG_DIR` points to an empty temporary
+directory that is deleted when the command exits. The rest of the
+environment (`PATH`, `HOME`, `GH_*`, `DOCKER_*`) goes through as it is.
+A `clab` run by the command, a build of `clab` from a branch, a check
+script or a `make` target that calls the CLI therefore has no host
+("host is not configured") and cannot reach the instance with the task
+token by accident; it needs an address and a token of its own. The wrapper
+itself renews the lease with its own credentials, and prints one line to
+stderr saying that the credentials were left out. To pass them on, for a
+`clab` inside the wrapper that has to act with the task token, add
+`--with-credentials`:
+
+```bash
+clab heartbeat PLAT-12 --with-credentials -- clab attach PLAT-12 big.bin
+```
+
+`--with-credentials` goes only with a command: without `--` it is an error.
+An older client rejects the flag before it starts the command, so upgrade
+the client together with the agent kit (the setup command fetches the new
+skills).
+
 The server did not change for this: the lease, `SDLC_LEASE_TTL` and
 `SDLC_HEARTBEAT_INTERVAL` are as before, and the client keeps the lease.
 The skills of the agent kit (`/clab-run`, `/clab-work`) use these forms for
