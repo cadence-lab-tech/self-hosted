@@ -3693,8 +3693,16 @@ links it to the log of the `api` container.
 **What is not written.** Successful reads; responses; the content of
 artifacts and documents and any string longer than 4 KB — only its size and
 sha256; tokens, sign-in codes, invite links, passwords and other secrets
-(`[redacted]`); requests without a token at all (scanners); the worker's own
-passes. A failed write to the log never fails the call: it is logged at
+(`[redacted]`); credentials inside URLs (from the release after v0.18.1) —
+the `user:password@` part of any link, also one pasted into a description,
+becomes `[redacted]@`, and the values of query or fragment parameters such
+as `token`, `access_token`, `key`, `sig`, `signature` and every `X-Amz-*`
+become `[redacted]`, while the host, the path and the other parameters stay
+(the repository and the document themselves keep the URL as given);
+requests without a token at all (scanners); the worker's own passes.
+Entries written before the upgrade stay as they were until retention
+removes them: rotate a token that was ever part of a repository clone URL
+or a document link. A failed write to the log never fails the call: it is logged at
 `error` by the `api` container and counted by
 `cadence_audit_write_failures_total` ([Monitoring](#monitoring)).
 
