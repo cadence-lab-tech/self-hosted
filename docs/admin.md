@@ -3695,10 +3695,14 @@ artifacts and documents and any string longer than 4 KB — only its size and
 sha256; tokens, sign-in codes, invite links, passwords and other secrets
 (`[redacted]`); credentials inside URLs (from the release after v0.18.1) —
 the `user:password@` part of any link, also one pasted into a description,
-becomes `[redacted]@`, and the values of query or fragment parameters such
-as `token`, `access_token`, `key`, `sig`, `signature` and every `X-Amz-*`
+one without a scheme (`user:password@host/path`) or a percent-encoded one
+inside another link, becomes `[redacted]@`, and the values of query or
+fragment parameters such as `token`, `access_token`, `api-key`, `key`,
+`sig`, `signature`, `pass`, `jwt`, `AWSAccessKeyId` and every `X-Amz-*`
 become `[redacted]`, while the host, the path and the other parameters stay
-(the repository and the document themselves keep the URL as given);
+(the repository and the document themselves keep the URL as given; text
+without credentials, such as an email address or `host:port`, is kept
+byte for byte);
 requests without a token at all (scanners); the worker's own passes.
 Entries written before the upgrade stay as they were until retention
 removes them: rotate a token that was ever part of a repository clone URL
