@@ -463,6 +463,9 @@ for image in $PIN_IMAGES; do
 done
 check "docs/admin.md names the issuer" contains "$admin" "$PIN_ISSUER"
 check "docs/admin.md has the known scanner findings with GO-2026-5932" contains "$admin" "GO-2026-5932"
+for id in GO-2026-6860 GO-2026-6866; do
+  check "docs/admin.md names the golang.org/x/net finding $id" contains "$admin" "$id"
+done
 for f in README.md docs/admin.md; do
   check "$f no longer says signatures are planned" lacks "$(cat "$f")" "are planned"
 done
