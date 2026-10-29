@@ -3697,12 +3697,31 @@ sha256; tokens, sign-in codes, invite links, passwords and other secrets
 the `user:password@` part of any link, also one pasted into a description,
 one without a scheme (`user:password@host/path`) or a percent-encoded one
 inside another link, becomes `[redacted]@`, and the values of query or
-fragment parameters such as `token`, `access_token`, `api-key`, `key`,
-`sig`, `signature`, `pass`, `jwt`, `AWSAccessKeyId` and every `X-Amz-*`
-become `[redacted]`, while the host, the path and the other parameters stay
-(the repository and the document themselves keep the URL as given; text
-without credentials, such as an email address or `host:port`, is kept
-byte for byte);
+fragment parameters with a secret name become `[redacted]`, while the host,
+the path and the other parameters stay (the repository and the document
+themselves keep the URL as given; text without credentials, such as an
+email address or `host:port`, is kept byte for byte). A name is secret
+when it is `key`, `sig`, `pass`, `pwd`, `auth`, `code`, `session`, `sid`,
+`otp` or `hmac` as a whole, any `X-Amz-*`, or when one of its words is
+`token`, `secret`, `password`, `passwd`, `pass`, `pwd`, `signature`,
+`credential(s)`, `jwt` or `bearer`, or its words join into `apikey`,
+`accesskey`, `privatekey`, `secretkey`, `authkey`, `sessionid`, `accesstoken`
+and the like — so `token`, `access_token`, `api-key`, `ApiKey`,
+`AWSAccessKeyId`, `GITHUB_TOKEN`, `PHPSESSID` are cut, while `tokens`,
+`max_tokens`, `tokenizer`, `passport` and `key_id` are not. A query without a
+scheme is cleaned only after a host or a path (a dot or `/` before `?`):
+prose such as `what?key=1` stays as is. Cleaning takes time linear in the
+length of the entry — a link inside a link and percent-encoding inside
+percent-encoding are followed six levels deep, and a deeper part that holds
+`@`, `=` or `%` is replaced by `[redacted]` as a whole — so a large request
+body does not make the log a way to load the server, even on a 401. Known
+gaps, left as they are: `user:password@host` with no scheme, path or port;
+a password of digits followed by `/` (`https://u:12/34@h`, read as a port);
+a password with `@` followed later by `/` (`https://u:p/a@b/c@h` keeps
+`b/c`); a space inside a password; a percent-encoded name outside a link
+(`%74oken=…` in text); `host:port?token=…` with no scheme, dot or `/`; a
+glued name outside the list (`dbpassword`). Do not rely on the log to hide
+such strings — keep credentials out of URLs;
 requests without a token at all (scanners); the worker's own passes.
 Entries written before the upgrade stay as they were until retention
 removes them: rotate a token that was ever part of a repository clone URL
