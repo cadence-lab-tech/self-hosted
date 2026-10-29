@@ -1540,9 +1540,11 @@ The runner's own token (`SDLC_TOKEN`) stays with the runner: it polls the
 queue, claims tasks, keeps the lease alive, releases tasks and reports the
 cost of a run. The agent it starts gets a **task token** instead: after the
 claim the runner issues a token bound to the claimed stage run of that task
-(`POST /v1/tasks/<KEY>/task-token`). With it the agent writes only to its
-own task and run and reads only around that task, whatever the runner's
-token or a person's session may do. The token
+(`POST /v1/tasks/<KEY>/task-token`). With it the agent reads the whole
+project - any task, its artifacts and the search over all of the project's
+repositories - but writes only to its own task and run, whatever the
+runner's token or a person's session may do; other projects stay closed.
+The token
 lives as long as the lease: it stops working on the transition, on release
 and when the lease expires, and when the agent exits - successfully, with an
 error, on `SDLC_RUNNER_TIMEOUT` or because the runner is stopping - the
