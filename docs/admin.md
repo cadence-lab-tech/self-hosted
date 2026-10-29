@@ -3899,6 +3899,19 @@ trivy image --vex openvex-backend.json ghcr.io/cadence-lab-tech/sdlc-pipeline-ba
 grype ghcr.io/cadence-lab-tech/sdlc-pipeline-backend:"$v" --vex openvex-backend.json
 ```
 
+**`golang.org/x/net` in the images up to v0.18.0.** The images of the
+releases up to and including v0.18.0 contain `golang.org/x/net` v0.61.0 in
+`/api` of the backend image and v0.60.0 in `/usr/bin/caddy` of the frontend
+image, and a scanner that matches by module version reports
+[GO-2026-6860](https://pkg.go.dev/vuln/GO-2026-6860) and
+[GO-2026-6866](https://pkg.go.dev/vuln/GO-2026-6866) in them (both are fixed
+in v0.62.0). They are not in the table above because they are fixed, not
+suppressed: the affected functions of `golang.org/x/net/html` (`html.Parse`,
+`html.Render`) are not called by the service or by Caddy, but the cure is an
+upgrade, not a VEX statement. From the release after v0.18.0 both images
+carry `golang.org/x/net` v0.62.0 and the findings are gone; run
+`./upgrade.sh` to get them.
+
 **The backend image.** The operating system layer has no known findings:
 from the release after v0.11.0 the image is built on
 `gcr.io/distroless/static-debian13:nonroot`. Up to v0.11.0 it was built on
