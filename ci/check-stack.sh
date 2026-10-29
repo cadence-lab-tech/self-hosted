@@ -226,6 +226,7 @@ fresh() {
 }
 
 cleanup() {
+  [ -z "${verify_watcher:-}" ] || kill "$verify_watcher" 2>/dev/null || true
   [ "${CHECK_KEEP:-}" != 1 ] || { info "kept: $work/cadence${second_up:+ and $work/second}${starter_up:+ and $work/starter}"; return; }
   # The stand-in bucket sits in the network of the installation: it goes
   # first, or compose could not remove that network.
@@ -1210,11 +1211,97 @@ live_counts() {
   fi
 }
 # verify_left: what a verify of this installation could leave - containers
-# and networks with its label, and dangling volumes.
+# and networks with its label, and the volumes that were mounted into such a
+# container while verify_watch ran (the anonymous volume of the PostgreSQL
+# image carries no label of its own, so it is found through its container) or
+# carry the label themselves. A volume of anyone else - another check, a task
+# stack - is not in the answer, whatever the machine does meanwhile.
 verify_left() {
+  local v
   docker ps -a -q --filter "label=com.cadence.verify=$name"
   docker network ls -q --filter "label=com.cadence.verify=$name"
-  docker volume ls -q --filter dangling=true | sort
+  {
+    docker volume ls -q --filter "label=com.cadence.verify=$name"
+    if [ -s "$work/verify-volumes" ]; then
+      sort -u "$work/verify-volumes" | while read -r v; do
+        docker volume ls -q --filter "name=^${v}\$"
+      done
+    fi
+  } | sort -u
+}
+# verify_watch / verify_unwatch: while it runs, the volumes of the containers
+# with the label of verify of this installation are noted in
+# $work/verify-volumes, once a tenth of a second (a verify container lives for
+# as long as pg_isready waits). docker events would do without polling, but
+# cannot filter a mount by the label of its container.
+verify_watch() {
+  : >"$work/verify-volumes"
+  (
+    local ids
+    while :; do
+      ids="$(docker ps -a -q --filter "label=com.cadence.verify=$name" 2>/dev/null || true)"
+      if [ -n "$ids" ]; then
+        # shellcheck disable=SC2086 # ids are hex words
+        docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' $ids >>"$work/verify-volumes" 2>/dev/null || true
+      fi
+      sleep 0.1
+    done
+  ) &
+  verify_watcher=$!
+}
+verify_unwatch() {
+  [ -z "${verify_watcher:-}" ] || kill "$verify_watcher" 2>/dev/null || true
+  [ -z "${verify_watcher:-}" ] || wait "$verify_watcher" 2>/dev/null || true
+  verify_watcher=
+}
+# verify_probe: the watch itself, without a verify. A container with the
+# label that is removed without -v leaves its volume: verify_left must name
+# it; removed with -v, or a volume of a stranger (named, or anonymous of an
+# unlabeled container), must not show. Probes are removed by exact name.
+verify_probe() {
+  local image c v foreign="$name-probe-foreign" found=
+  image="$(docker inspect -f '{{.Image}}' "$(docker compose ps -q | head -n 1)")"
+  [ -n "$image" ] || return 1
+  # Never started: Mounts of a created container are enough.
+  c="$(docker create --label "com.cadence.verify=$name" -v /probe "$image")"
+  v="$(docker inspect -f '{{range .Mounts}}{{.Name}}{{end}}' "$c")"
+  for _ in $(seq 1 50); do
+    if grep -qxF -- "$v" "$work/verify-volumes"; then found=1; break; fi
+    sleep 0.1
+  done
+  docker rm -f "$c" >/dev/null
+  if [ -n "$found" ] && grep -qxF -- "$v" <<<"$(verify_left)"; then
+    pass "the watch of verify names the volume of a container removed without -v"
+  else
+    fail "the watch of verify did not name the volume of a container removed without -v"
+  fi
+  docker volume rm "$v" >/dev/null 2>&1 || true
+
+  c="$(docker create --label "com.cadence.verify=$name" -v /probe "$image")"
+  v="$(docker inspect -f '{{range .Mounts}}{{.Name}}{{end}}' "$c")"
+  found=
+  for _ in $(seq 1 50); do
+    if grep -qxF -- "$v" "$work/verify-volumes"; then found=1; break; fi
+    sleep 0.1
+  done
+  docker rm -f -v "$c" >/dev/null
+  if [ -n "$found" ] && ! grep -qxF -- "$v" <<<"$(verify_left)"; then
+    pass "...and no volume of a container removed with -v"
+  else
+    fail "...and no volume of a container removed with -v: the watch is blind or names a removed volume"
+  fi
+
+  docker volume create "$foreign" >/dev/null
+  c="$(docker create -v /probe "$image")"
+  v="$(docker inspect -f '{{range .Mounts}}{{.Name}}{{end}}' "$c")"
+  sleep 0.3
+  docker rm -f "$c" >/dev/null
+  if [ -z "$(verify_left)" ]; then
+    pass "...nor the dangling volumes of a stranger, named or anonymous"
+  else
+    fail "...nor the dangling volumes of a stranger, named or anonymous: $(verify_left)"
+  fi
+  docker volume rm "$foreign" "$v" >/dev/null 2>&1 || true
 }
 # with_ps CMD...: CMD with every command line of the machine sampled into
 # $work/ps.log (the secret of the bucket must be in none of them).
@@ -1332,6 +1419,8 @@ else
   expected="$(live_counts)"
   read -r e_projects e_tasks e_artifacts <<<"$expected"
   started_before="$(started "$work/cadence")"
+  verify_watch
+  verify_probe
   left_before="$(verify_left)"
   (while :; do http_code "$base/readyz"; echo; sleep 0.5; done) >"$work/readyz.log" &
   poller=$!
@@ -1377,6 +1466,7 @@ else
   check "...with the error of psql" contains "$out" "psql"
   check "...and says it does not restore" contains "$out" "does not restore"
   check "...and leaves nothing behind" [ "$(verify_left)" = "$left_before" ]
+  verify_unwatch
   s3_put "$work/good.sql.gz" "nightly/$newest.sql.gz"
   s3_put "$work/good.sha256" "nightly/$newest.sha256"
 
