@@ -321,6 +321,13 @@ terminates TLS and forwards everything for `<host>` there. It must:
 - **not buffer responses on `/mcp/`**: agents talk MCP over streamable HTTP
   with server-sent events, and a buffered stream hangs. Allow long-lived
   responses (minutes);
+- **keep responses on `/v1/` open for at least 30 seconds, unbuffered**:
+  `clab wait` and the agent plugin long-poll the events of a task or a
+  project, and the API holds such a response for up to 25 seconds before it
+  answers with an empty list (see
+  [Waiting for an approval](#waiting-for-an-approval)). A proxy that cuts
+  earlier loses nothing — the client asks again — but it makes more
+  requests;
 - let GitHub reach `https://<host>/webhooks/github` from the internet if you
   connect a GitHub App, even if the rest of the instance is internal-only;
 - **take a request body of `2 x SDLC_BLOB_MAX_BYTES + 1 MiB`** and keep a
@@ -780,7 +787,9 @@ no Caddy and no persistent volumes (the API gets one scratch directory,
   body of `2 x SDLC_BLOB_MAX_BYTES + 1 MiB` (129 MiB for the default limit of
   64 MiB: the API's own limit on a request, see [Attachments](#attachments)).
   For ingress-nginx the annotations of the example below do it; for another
-  controller set its equivalents.
+  controller set its equivalents. The annotations apply to every path of
+  the Ingress, `/v1` included, where the long poll of events
+  (`clab wait`) holds a response for up to 25 seconds.
 - **PostgreSQL with pgvector**, as for an
   [external database](#server-extensions-and-the-role): the role, the
   extensions and `sslmode`. The pods reach it from the cluster.
@@ -2062,6 +2071,64 @@ The server did not change for this: the lease, `SDLC_LEASE_TTL` and
 The skills of the agent kit (`/clab-run`, `/clab-work`) use these forms for
 long commands: run `clab setup` again after the upgrade to get them. The
 runner keeps the leases of its agents itself, as before.
+
+### Waiting for an approval
+
+From the release after v0.18.1 an agent does not stop the chat to ask for
+an approval and wait for the answer. It waits on the server, and the human
+approves wherever it suits them: in the chat, on the task card, in the
+plugin panel or with `clab decide`. The agent kit (`/clab-run`,
+`/clab-work`, after `clab setup`) does it with `clab wait`:
+
+```bash
+clab wait PLAT-12 --gate human_approval [--transition <key>] [--timeout 8h] [--json]
+clab heartbeat PLAT-12 --with-credentials -- clab wait PLAT-12 --gate human_approval --timeout 8h
+```
+
+`clab wait` returns as soon as a gate of a transition from the current
+status stops being `pending`, or the task changes its status or its stage
+run. `--gate` matches the gate type or its key, so `--gate human_approval`
+works on any transition of any cycle; `--transition` narrows the wait to
+one transition; without `--gate` the command waits only for a change of
+status. Without `--timeout` it waits with no limit. It prints one line at
+the end — the outcome, the transition and the gate, who decided and when,
+the reason of a return — or, with `--json`, one object with `outcome`,
+`task`, `status` (`from`, `to`), `transition`, `gate` (`key`, `type`,
+`status`), `transition_done`, `allowed`, `reason`, `actor`, `decided_at`
+and `mode` (`events` or `poll`). The exit code is the outcome:
+
+| Code | Outcome | When |
+|---|---|---|
+| 0 | `passed` | the gate is `passed` or `waived`, or the task left by the awaited `advance` transition |
+| 3 | `returned` | the gate is `failed` (the reason of the decision), or the task left by a `reject` transition (its comment) |
+| 4 | `status_changed` | the task left otherwise: cancelled, reassigned, another `advance`; the stage run changed |
+| 5 | `timeout` | `--timeout` ran out |
+| 1 | error | `401`, `403`, an unknown task |
+| 2 | nothing to wait for | no such gate or transition from the current status, wrong flags |
+
+`clab wait` does not renew the lease: a stage that must stay claimed while
+it waits runs it inside `clab heartbeat <key> --with-credentials --`, which
+exits with the code of `clab wait`.
+
+**How it waits.** The CLI long-polls `GET /v1/tasks/<key>/events?after=<cursor>&wait=25`
+(and the plugin `GET /v1/projects/<key>/events`): the API answers at once
+when there are events after the cursor and otherwise holds the response for
+up to `min(25 s, SDLC_REQUEST_TIMEOUT − 5 s)` and answers with an empty
+list. An event only wakes the client: the outcome is read from the task
+itself, so `min_approvals` and an approval made stale by a later submission
+are respected. A waiting request holds no database connection; one short
+indexed query per second per API replica, while anyone waits on it, wakes
+all its waiting requests. On a network error or a `502`/`503`/`504` (an
+upgrade of the API) the client tries again with a growing pause, and the
+outcome does not change. Against a server without the events endpoint the
+CLI falls back to reading the task every 15 seconds (`mode: poll`).
+
+Nothing to configure: no new variables, the Caddy of the package passes
+long responses as they are. Your own proxy must keep `/v1/` open for 30
+seconds without buffering ([Behind your reverse proxy](#behind-your-reverse-proxy)).
+If you copied the alert `CadenceApiSlow` from [Monitoring](#monitoring)
+earlier, add the filter `route!~".*/events"` to it: waiting requests are
+slow on purpose.
 
 ### Upgrading to v0.17.0
 
@@ -3491,9 +3558,11 @@ groups:
         annotations:
           summary: "More than 5% of API requests fail with 5xx"
       - alert: CadenceApiSlow
+        # The long poll of events holds a response for up to 25 s by design:
+        # without the filter waiting agents alone push p95 above 2 s.
         expr: |
           histogram_quantile(0.95,
-            sum by (le) (rate(cadence_http_request_duration_seconds_bucket[5m]))) > 2
+            sum by (le) (rate(cadence_http_request_duration_seconds_bucket{route!~".*/events"}[5m]))) > 2
         for: 10m
         annotations:
           summary: "The 95th percentile of API requests is above 2 seconds"
