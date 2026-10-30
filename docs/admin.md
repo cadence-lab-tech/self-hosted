@@ -25,6 +25,8 @@ public address of your proxy in the `proxy` mode.
 - [First sign-in with the administrator token](#first-sign-in-with-the-administrator-token)
 - [Teams, projects and invites](#teams-projects-and-invites)
 - [First cycle and roles](#first-cycle-and-roles)
+  ([attempts limit](#attempts-limit),
+  [optional stages](#optional-stages))
 - [GitHub App](#github-app)
 - [Single sign-on with OIDC](#single-sign-on-with-oidc)
 - [CLI and agents](#cli-and-agents)
@@ -32,7 +34,8 @@ public address of your proxy in the `proxy` mode.
   [usage policy](#usage-policy-of-a-project),
   [runner failures](#runner-failures-and-the-subscription-limit),
   [upgrading to v0.17.0](#upgrading-to-v0170),
-  [upgrading to v0.18.0](#upgrading-to-v0180))
+  [upgrading to v0.18.0](#upgrading-to-v0180),
+  [upgrading to v0.19.0](#upgrading-to-v0190))
 - [Stage limits](#stage-limits): reviews and the time of a stage
 - [Embeddings](#embeddings)
 - [Attachments](#attachments): the file limit, time limits, your proxy,
@@ -1300,6 +1303,194 @@ active cycle") and points at the same path. Tasks already in progress finish
 on the cycle version they started on; tasks nobody has picked up yet move to
 the new version.
 
+### Optional stages
+
+From v0.19.0 a cycle can mark a status as an **optional stage**: a stage that
+not every task needs, a design review or a documentation pass, for instance.
+The cycle says which statuses are optional; each task says which of them it
+goes through. A stage that is off for a task is skipped without a run of an
+agent, so the project does not pay for work nobody needs. A cycle without
+marks, the starter included, behaves as before: every task goes through
+every status.
+
+**Marking a status.** A maintainer marks a status in the draft of a cycle.
+An initial or a final status cannot be optional: a draft that marks one
+does not activate (see the validator below). In the cycle editor, the dialog
+of a status has two switches (labelled in
+Russian in the interface): «Необязательный» ("Optional") and, once it is on,
+«Включён по умолчанию» ("Enabled by default"), which says whether a new task
+goes through the stage when its author names no choice. Through the API it is
+the same pair of fields on a status of a draft:
+
+```bash
+# <id> is the draft of the cycle (clab workflow list); the token is a maintainer's
+curl -X PATCH https://<host>/v1/workflows/<id>/statuses/design \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"is_optional": true, "enabled_by_default": true}'
+```
+
+`POST /v1/workflows/:id/statuses` takes the fields for a new status, `PATCH
+/v1/workflows/:id/statuses/:key` for an existing one. The mark is data of a
+cycle version, like any other field of a status, so only a draft takes it:
+an active or retired version answers `409`. To change an active cycle make a
+new draft of it, in the editor, or with the bundle as in
+[Attempts limit](#attempts-limit): `clab export`, the mark in the status
+(`"is_optional": true`, and `"enabled_by_default": false` for a stage that is
+off by default), `clab import`, `clab workflow activate`. In a bundle
+`is_optional` is written only for an optional status and
+`enabled_by_default` only when it is `false`: no field means required and
+enabled. `enabled_by_default: false` on a status that is not optional is
+refused (`400`); unmarking a status puts the default back to enabled.
+
+**What the validator holds.** A skipped stage is passed by its **bypass**:
+the one outgoing transition of kind `advance` from the stage itself (a
+transition "from any status" does not count). The validator checks that a
+task gets from the first status to a final one with any set of stages
+switched off: for every set it folds the graph, sending each `advance` into
+a disabled stage to the end of its chain of bypasses and removing the
+transitions of other kinds into it. Problems hold the activation of the
+draft; warnings are reported and do not:
+
+| Code | Kind | When |
+|---|---|---|
+| `optional_initial` | problem | the initial status is marked optional |
+| `optional_terminal` | problem | a final status is marked optional |
+| `optional_no_bypass` | problem | the stage has no outgoing `advance` of its own |
+| `optional_bypass_ambiguous` | problem | it has two or more of them |
+| `optional_bypass_cycle` | problem | the bypasses of optional stages close into a ring, so switching them all off never ends the skip |
+| `optional_breaks_path` | problem | with some set of stages off no final status is reachable, or a status is left with no way out; without a status in the report it says that the task does not reach a final status |
+| `optional_too_many` | problem | more than 10 optional stages in one version (every set is checked, 2^N of them) |
+| `optional_reject_target` | warning | a `reject` or `reassign` leads into an optional stage: while the stage is off for a task, that transition is unavailable |
+| `optional_bypass_gates` | warning | the bypass carries gates: they are not checked when the stage is off |
+
+An optional initial or final status is one problem per status: no bypass is
+searched for it, and the graph is not folded while it, or any other problem
+of bypasses, holds. The other statuses are checked as usual.
+`optional_breaks_path` is also reported for the empty set ("even without
+disabled stages"): then the cycle itself is broken, whatever you switch off.
+See the problems and warnings before activating with `clab workflow validate
+<id>`; `clab import --dry-run` reports `workflow_validations[].valid` for the draft
+an import would make, and the refusal of `clab workflow activate` names the
+problems.
+
+**Who chooses the stages of a task.** The choice is part of the task's
+brief, edited like its title:
+
+- a person with the `maintainer` level or higher: any task (an AI with a
+  person's own token acts as that person);
+- an agent with the `agent` level: the task whose stage it holds by a lease,
+  and the children of that task;
+- the task token of a stage executor: only the children of its own task,
+  when it creates them and when it edits them. On its **own** task it is
+  refused, `403`, with the text "выбор этапов своей задачи — решение
+  человека" ("the stages of its own task are a person's decision"), and
+  nothing of the request is applied. The check is on the presence of the
+  field, before it is parsed: any value of `optional_stages` other than
+  `null` gets `403`, `{}` and a wrong key included; `null` and no field are
+  as before.
+  Otherwise an executor could switch off the next stage that checks its own
+  work.
+
+An analyst of a task proposes the set in the artifact `analysis.breakdown`
+and a person sets it when approving; an analyst of an epic sets the choice
+of the children it creates.
+
+**Choosing.** The choice is stored as a full set, a key for every optional
+stage of the cycle: when a task is created, the stages its author does not
+name take the default of the cycle, and a later change of a default does not
+touch tasks that already exist. Only optional stages can be named; any
+other key is refused with `400` and the list of the valid keys
+(`details.allowed`), and the task is not created. The keys of a cycle are in
+`workflows[].optional_stages[]` of the MCP tool `sdlc_whoami` and in the
+bundle of the cycle (`is_optional`).
+
+```bash
+clab create --title "Export to CSV" --repos acme/api --stage design=off
+clab edit ACME-7 --stage design=on --stage docs=off     # flag repeats; the stages not named do not change
+```
+
+Every command that shows a task (`clab create`, `edit`, `show`, `claim`)
+prints the line `Выбор этапов: design выкл, docs вкл` (stages by key, "off"
+and "on"), and no line for a cycle without optional stages. In the web
+interface the form of a new task has the block «Необязательные этапы»
+("Optional stages") for the cycle of the chosen task type, and the card of a
+task has the row «Выбор этапов» ("Stage choice") in its details; a switch is
+saved at once. The row is locked, with a hint: «этап идёт сейчас» (the stage
+is the current one), «задача закрыта» (the task is closed) and, for a person
+who is not a maintainer, «этапы задачи выбирает сопровождающий проекта»
+("the stages of a task are chosen by a maintainer of the project"). The
+server has the last word: switching off the current stage, or changing the
+choice of a closed task, is `409`. An example of the whole path: mark
+`design` optional and off by default in a draft, `clab workflow validate`,
+activate it, then `clab create … --stage design=on` for a task that needs a
+design and no flag for one that does not.
+
+**What a skip looks like.** A task asks for a transition of kind `advance`
+into a stage that is off for it, and it goes on by the bypasses to the first
+stage that is on or mandatory:
+
+- the gates of the transition that was asked for are checked, the gates of
+  the bypasses are not; the skipped stage opens no run and no attempt, an
+  agent is not called and the `wip_limit` of the stage does not count the task;
+- the feed of the task gets `task.advanced` (`to` is the real status,
+  `skips` the skipped keys) and a `stage.skipped` for each skipped stage;
+- `clab gates` and `clab claim` show the transition as
+  `→ development (пропуск: design)` ("skipping design") before it is made,
+  and `clab transition` prints `пропущено: design` after it; `clab show`
+  does not print the feed;
+- on the scheme of the cycle in the interface a stage the task has passed by
+  is «пропущен» ("skipped") and a stage that is off but not yet passed is
+  «выключен» ("off"), with a legend and the lines about transitions with a
+  skip under the scheme; in the actions of the card the transition reads
+  `→ <status key> (пропуск: …)`. The interface reads "skipped" from the last
+  500 events of the feed, so on a very long task an event pushed out of them
+  shows the stage as "off".
+
+A way **back** into a stage that is off, a `reject` or `reassign`, is not
+available: `clab gates` says `недоступен: этап design выключен у задачи`
+("the stage design is off for the task"), and a request is refused with
+`409 transition_not_allowed`. A person switches the stage on and asks for
+the transition again; an agent that needs it releases the task with the
+reason. A stage that is off keeps its model levels and applies them when it
+is switched on.
+
+Two limits meet skips. An `attempts_limit` on the transition that was asked
+for counts the entries into its target stage, which is off, so it passes;
+put the limit on the transition the task really enters by. A
+`stage_time_limit` on a bypass acts on the stage the task lands in. The text
+of a `stage_time_limit` gate on the requested transition still names the
+target status of the cycle («предел этапа в статусе design», "stage limit in
+the status design") even though
+no run of it opens when it is skipped: a known limitation, the text of the
+gate has not changed.
+
+**Tasks that move to a new version.** When a cycle is activated, the tasks
+nobody has picked up move to the new version, and the choice follows: a key
+that is still optional keeps its value, a new one takes the default of the
+new version, a vanished one is dropped, and a stage the task moves into is
+switched on. A task already started finishes on its own version with its own
+choice. A task with an empty choice on a cycle that has optional stages (one
+that predates the choice) takes the default of every optional stage, and
+its first edit writes the full set.
+
+**A bundle into an older server.** A server older than v0.19.0 does not know
+`is_optional` and `enabled_by_default` and drops unknown fields of a bundle
+without a word. A bundle with marks, imported into it, makes a cycle with
+**no optional stages**, and the output does not say that the marks were
+lost; that is expected until the server is upgraded. Upgrade the server,
+then import the same bundle again: the marks differ from the active cycle,
+so the import makes a new draft with them.
+
+**The CLI against an older server.** `clab` of v0.19.0 or newer with
+`--stage` against a server older than v0.19.0 does not hide the loss. `clab
+create --stage` creates the task **with the defaults of the cycle** (it does
+exist, with its key) and then exits with code 1 and the error `выбор этапов
+не записан` ("the choice of stages is not stored"). `clab edit --stage`
+applies the rest of the edit and exits with the same error (`остальная
+правка … применена`, "the rest of the edit … is applied"). Upgrade the
+server and repeat the flag. `clab` and `clab-runner` of earlier versions
+against a v0.19.0 server work and see neither the choice nor the skips.
+
 ## GitHub App
 
 Without a GitHub App the instance works — tasks, artifacts, the cycle, gates
@@ -2183,6 +2374,49 @@ from the backup, then the chart of the old version
 `clab` of v0.17.x works against a v0.18.0 server, but it does not attach
 files. Upgrade `clab` as for any release, see
 [CLI and agents](#cli-and-agents).
+
+### Upgrading to v0.19.0
+
+The upgrade (`./upgrade.sh v0.19.0`, or `clab server upgrade`) needs no
+manual step. Two migrations run when the service starts, and both only add:
+
+- `000034_optional_stages` - two columns on the statuses of cycle versions
+  (the mark of an optional stage and its default) and a check that ties them;
+- `000035_task_optional_stages` - one column on tasks, the choice of optional
+  stages, with an empty object as the default and a check that it is an
+  object.
+
+No rows are rewritten, and **existing workflows keep every stage required**:
+every status of every cycle version is mandatory after the upgrade, every
+task has an empty choice, and tasks go through every status as before. There
+are no new services, ports, volumes or variables in `.env`.
+
+Nothing changes until someone marks a status in a new draft of a cycle: see
+[Optional stages](#optional-stages). The starter bundle has no optional
+stages and is not changed by this release. `clab` and `clab-runner` of
+earlier versions keep working against a v0.19.0 server; they do not show the
+choice or the skips, and `--stage` comes with `clab` of v0.19.0. Upgrade
+`clab` as for any release, see [CLI and agents](#cli-and-agents). A bundle
+with marks must not be imported into a server older than v0.19.0: the marks
+are lost without a word (see [Optional stages](#optional-stages)).
+
+**Rolling back is not an upgrade to the old version.** `./upgrade.sh` does
+not go to an older version, and the schema of both migrations stays in the
+database: a service of v0.18.x does not know its columns, and code older than
+its schema is not promised to run. The way back is the backup made before
+the upgrade, with the package of the old version, as for v0.18.0:
+
+```
+tar -xpzf backups/package-<previous version>-<date>.tar.gz   # package files of the previous version
+./restore.sh --yes backups/cadence-<previous version>-<date>.sql.gz   # data as of the backup, starts it
+```
+
+The upgrade takes that backup itself and prints these two lines with the
+exact names if the new version does not become ready; otherwise find the
+files in `backups/`. Whatever was done after the backup is lost, the choices
+of stages made on tasks included. In Helm the same holds: the database from
+the backup, then the chart of the old version
+([Upgrades and rollback](#upgrades-and-rollback)).
 
 ## Stage limits
 
