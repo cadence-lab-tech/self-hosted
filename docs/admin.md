@@ -1466,12 +1466,14 @@ is switched on.
 Two limits meet skips. An `attempts_limit` on the transition that was asked
 for counts the entries into its target stage, which is off, so it passes;
 put the limit on the transition the task really enters by. A
-`stage_time_limit` on a bypass acts on the stage the task lands in. The text
-of a `stage_time_limit` gate on the requested transition still names the
-target status of the cycle («предел этапа в статусе design», "stage limit in
-the status design") even though
-no run of it opens when it is skipped: a known limitation, the text of the
-gate has not changed.
+`stage_time_limit` on a bypass acts on the stage the task lands in. A
+`stage_time_limit` on the requested transition does not act when a stage is
+skipped, because no run of the skipped stage opens, and its gate says so: the
+verdict stays `passed`, the text starts with «предел не действует» ("the limit
+does not apply"), names the skipped stages, the status the task lands in and
+the limit set there by the last bypass (or that there is none), and the
+`details` carry `applies: false`, `lands_in`, `via` and, when it exists,
+`effective_max_duration`. Without a skip the gate reads as before.
 
 **Tasks that move to a new version.** When a cycle is activated, the tasks
 nobody has picked up move to the new version, and the choice follows: a key
