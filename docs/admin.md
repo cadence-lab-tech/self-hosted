@@ -2447,13 +2447,19 @@ files. Upgrade `clab` as for any release, see
 ### Upgrading to v0.19.0
 
 The upgrade (`./upgrade.sh v0.19.0`, or `clab server upgrade`) needs no
-manual step. Two migrations run when the service starts, and both only add:
+manual step. Three migrations run when the service starts, and all of them
+only add:
 
 - `000034_optional_stages` - two columns on the statuses of cycle versions
   (the mark of an optional stage and its default) and a check that ties them;
 - `000035_task_optional_stages` - one column on tasks, the choice of optional
   stages, with an empty object as the default and a check that it is an
-  object.
+  object;
+- `000036_task_events_cursor` - an index on task events by time, which the
+  long poll of `clab wait` and the plugin reads. The migrator runs in a
+  transaction, so the index is not built concurrently: while it is built,
+  writes of task events wait. On 440 thousand events it takes a fraction of
+  a second; on a large installation, plan the upgrade for a quiet moment.
 
 No rows are rewritten, and **existing workflows keep every stage required**:
 every status of every cycle version is mandatory after the upgrade, every
