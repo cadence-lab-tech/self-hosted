@@ -1760,11 +1760,11 @@ here as they appear, with the English in quotes, as for
 submitted at each stage of the cycle where the task had runs: the runs, with
 re-checks and returns, and the artifacts by kind, with their versions. A
 long artifact is cut at 60 lines or 8 KB, with a link «Открыть полностью»
-("Open in full") to the task in the web interface; to download an artifact,
-run the line the panel prints, `clab artifact <id> -o ./`. Attachments are
-shown by their data and a link to the task. «В чат» ("To chat") puts the
-full text into the input field of the chat and sends nothing - the person
-sends it; «Копировать» ("Copy") copies it. Browsing stages is reading only:
+("Open in full") to the task in the web interface. An artifact that is a file
+and the attachments of the task are shown by their data and a link to the
+task, with the line to download them, `clab artifact <id> -o ./`. «В чат»
+("To chat") puts the full text into the input field of the chat and sends
+nothing - the person sends it; «Копировать» ("Copy") copies it. Browsing stages is reading only:
 it moves no task between stages.
 
 **Decisions from the card.** A task that waits for a person shows its gate
@@ -2575,9 +2575,9 @@ checklist gate.
 `failed` on a gate of the type `checklist` - «Не пройден» ("Not passed") in
 the panel of the plugin, or `clab decide <KEY> --transition <name> --gate
 <gate> --status failed --details '{"reason":"…"}'` - used to leave the gate
-`pending` while required items were unchecked, as if nobody had decided. Now the gate is `failed`, with the
-text from `details.reason` in its verdict, until the checklist is marked
-again: the transition is held explicitly, and `clab gates`, the task card
+`pending` while required items were unchecked, as if nobody had decided. Now
+the gate is `failed`, with the text from `details.reason` in its verdict,
+until the checklist is marked again: the transition is held explicitly, and `clab gates`, the task card
 and MCP show why. A new decision `passed` with `details.checked` brings
 back the usual rule: the gate passes when every required item is checked.
 The starter bundle has no gate of the type `checklist`, so only your own
