@@ -15,7 +15,11 @@ This repository is everything a company needs to run Cadence Lab on its own
 machine: a Docker Compose stack, install, upgrade, backup and restore scripts,
 and the [administrator guide](docs/admin.md). Each release publishes them as
 one package; installing and upgrading need no git. Agents connect to your
-instance from developers' machines over MCP; nothing goes through us.
+instance from developers' machines over MCP; nothing goes through us. An
+agent that reaches a human approval waits for it on the server with
+`clab wait`, without holding the chat: approve in the chat, on the task
+card or with `clab decide`, and it goes on
+([waiting for an approval](docs/admin.md#waiting-for-an-approval)).
 
 A Kubernetes cluster takes the Helm chart `charts/cadence` instead (from
 v0.13.0): the same images and settings on your PostgreSQL and S3 bucket,

@@ -41,6 +41,10 @@
 # images of v0.18.0 and later; CHECK_ATTACHMENTS=1 runs it on images of a
 # branch built under the tag of an older VERSION.
 #
+# Events by long poll (CLAB-323): GET /v1/tasks/CHECK-1/events?wait=3 through
+# Caddy answers 200 with a cursor after 3-5 s, in the images of v0.19.0 and
+# later and on images of a branch (a pin variable set).
+#
 # The routes of Caddy (CLAB-267): the admin API of Caddy lists the upstreams
 # of the Caddyfile of the package; a Caddyfile of the administrator routing
 # to ui:81, mounted by compose.override.yml, makes the site answer 502, and
@@ -981,6 +985,25 @@ else
   info "VERSION is $version: attachments come with v0.18.0, the scenario is skipped (CHECK_ATTACHMENTS=1 runs it on images of a branch)"
 fi
 if [ "$attach_on" = true ]; then attachment_is_back_or_fail "before the backup"; fi
+
+# --- events by long poll through Caddy (CLAB-323) -------------------------------------------------
+# clab wait and the agent plugin long-poll GET /v1/tasks/:key/events: with no
+# event after the cursor the API holds the answer for wait seconds, and the
+# Caddy of the package has to pass it as it is, neither cut nor buffered. The
+# images before v0.19.0 have no such route; images of a branch (a pin
+# variable set) are checked whatever VERSION says.
+info "events by long poll"
+if version_lt "$version" v0.19.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+  info "skipped: the images of $version have no events endpoint (v0.19.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+else
+  feed_cursor="$(curl -sf "${auth[@]}" "$base/v1/tasks/CHECK-1/events" | jq -r '.cursor // empty' 2>/dev/null || true)"
+  check "the handshake of GET /v1/tasks/CHECK-1/events names a cursor" [ -n "$feed_cursor" ]
+  read -r feed_code feed_took < <(curl -s -o "$work/events.json" -w '%{http_code} %{time_total}\n' "${auth[@]}" \
+    --get --data-urlencode "after=$feed_cursor" --data wait=3 "$base/v1/tasks/CHECK-1/events" || echo "000 0")
+  check "a long poll with wait=3 through Caddy: 200 (got $feed_code)" [ "$feed_code" = 200 ]
+  check "...an object with events and a cursor" [ "$(jq -r 'has("events") and (.cursor | type == "string")' "$work/events.json" 2>/dev/null)" = true ]
+  check "...held for 3-5 s (took $feed_took s)" awk -v t="$feed_took" 'BEGIN { exit !(t >= 2.9 && t <= 5) }'
+fi
 
 if [ "$db" = bundled ]; then
   info "docker compose down and up -d, without -v"
