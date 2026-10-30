@@ -35,7 +35,8 @@ public address of your proxy in the `proxy` mode.
   [runner failures](#runner-failures-and-the-subscription-limit),
   [upgrading to v0.17.0](#upgrading-to-v0170),
   [upgrading to v0.18.0](#upgrading-to-v0180),
-  [upgrading to v0.19.0](#upgrading-to-v0190))
+  [upgrading to v0.19.0](#upgrading-to-v0190),
+  [upgrading to v0.20.0](#upgrading-to-v0200))
 - [Stage limits](#stage-limits): reviews and the time of a stage
 - [Embeddings](#embeddings)
 - [Attachments](#attachments): the file limit, time limits, your proxy,
@@ -1694,9 +1695,11 @@ and names the server's version. What the skills do with the model level
 the server recommends for a run is in
 [Recommended model level](#recommended-model-level).
 
-**The Claude plugin.** `clab-plugin` shows, next to a Claude Code or Claude
-Desktop chat, the tasks that chat works on and their status. It is installed
-per machine, not per project, with its own command:
+**The Claude plugin.** `clab-plugin` is a panel next to a Claude Code or
+Claude Desktop chat: it shows the tasks that chat works on, what in the
+project waits for a person's decision and the tasks of the project, and a
+maintainer can approve, return or tick a checklist from it (see below). It
+is installed per machine, not per project, with its own command:
 
 ```bash
 clab setup --plugin                         # the plugin, for this user, in Claude
@@ -1723,11 +1726,76 @@ The plugin uses the developer's own sign-in (`clab auth login`; it asks
 `clab auth token` for the token and keeps it only in memory) and the
 instance and project of `clab whoami` in the session's folder, otherwise
 the plugin's settings in Claude (`/config`: address, project key, path to
-`clab`). In a chat it opens with `/clab-plugin`, or `/clab-plugin <KEY>`;
-it never changes a task or the conversation by itself, and it does nothing
-in sessions without a window (`claude -p`, `clab-runner`, stage
-executors). It needs no server setting: against a server without some
-of its features it shows what the server has.
+`clab`). In a chat it opens with `/clab-plugin`, or `/clab-plugin <KEY>`
+(which also adds the task to the chat); `/clab-plugin tasks` and
+`/clab-plugin approvals` open those tabs, and `/clab-plugin remove <KEY>`
+takes a task out of the chat. It changes a task only on a person's click
+(see below), writes nothing into the conversation, and does nothing in
+sessions without a window (`claude -p`, `clab-runner`, stage executors). It
+needs no server setting: against a server without some of its features it
+shows what the server has.
+
+**What the panel does.** Its labels are in Russian only, so they are given
+here as they appear, with the English in quotes, as for
+[optional stages](#optional-stages). The panel has three tabs:
+
+- «Этот чат» ("This chat"): a card for each task the chat works on, of any
+  type - its status among the stages of the cycle, the gates of the
+  transitions with their verdicts, nested tasks and their progress, pull
+  requests. A task gets here by `/clab-plugin <KEY>` or by a click on its
+  row in «Задачи».
+- «Ждут меня» ("Waiting for me"): the gates of the project that a person
+  closes and that wait for a decision now - `human_approval` and
+  `checklist`, whatever the task. A checklist of a stage run whose executor
+  still holds the lease is not listed: the executor ticks it. The list is
+  one server query, `GET /v1/projects/<key>/approvals` (REST only; the CLI
+  and MCP do not need it).
+- «Задачи» ("Tasks"): the tasks and epics of the project in the segments
+  «В работе» ("In progress"), «Можно забрать» ("Can be taken"), «Бэклог»
+  ("Backlog") and «Готово» ("Done"), ten on a page, with a search by key or
+  title and filters by type and assignee. A click on a row opens its card
+  and adds the task to «Этот чат».
+
+**Artifacts of the stages.** In a card, the view of the stages shows what was
+submitted at each stage of the cycle where the task had runs: the runs, with
+re-checks and returns, and the artifacts by kind, with their versions. A
+long artifact is cut at 60 lines or 8 KB, with a link «Открыть полностью»
+("Open in full") to the task in the web interface. An artifact that is a file
+and the attachments of the task are shown by their data and a link to the
+task, with the line to download them, `clab artifact <id> -o ./`. «В чат»
+("To chat") puts the full text into the input field of the chat and sends
+nothing - the person sends it; «Копировать» ("Copy") copies it. Browsing stages is reading only:
+it moves no task between stages.
+
+**Decisions from the card.** A task that waits for a person shows its gate
+with the actions «Апрув» ("Approve"), «Вернуть с причиной» ("Return with a
+reason": the return transition to choose and a required reason) and, for a
+checklist, «Отметить…» ("Mark…") with «Отметить пройденным» ("Mark as
+passed") or «Не пройден» ("Not passed", with a reason). Each takes two
+clicks, the action and its confirmation, and before writing the panel reads
+the task again: if the result of the stage changed after the person saw it
+(a new artifact was submitted), nothing is written and the panel says
+«Решение не записано» ("The decision is not written") - look at the stage
+again. An approval moves the task only if the transition is allowed after it
+(other gates may still hold it); a checklist mark never moves it. The
+decision is recorded in the person's name, and an agent that waits with
+`clab wait` learns the outcome from the server.
+
+**Rights.** The panel works with the person's own sign-in (`clab auth login`),
+not a task token, and sees and does what the person's membership in the
+project allows. The buttons of decisions are for the level `maintainer` and
+above; below it «Ждут меня» is empty with the caption «нужен уровень
+сопровождающего» ("the maintainer level is needed"), and a refusal of the
+server (`403`) is shown as it is. The model in the chat cannot change a task
+through the panel: it has no tool that changes a task, and the panel writes
+nothing into the conversation.
+
+**Older servers.** `clab` of v0.20.0 against a server of v0.19.x hides
+«Ждут меня» (the server answers `404` to its query) and reads the list in
+«Задачи» in one request, without server pages, paging it itself; approval,
+return and checklist marks from a card work there too. Against a server
+older than that, the panel shows what the server has. After `clab` is
+upgraded, run `clab setup --plugin` again to update the plugin.
 
 One configuration (`~/.config/clab`) holds several hosts. The one you signed
 in to last is the default; `--host` picks another for one command:
@@ -2492,6 +2560,43 @@ files in `backups/`. Whatever was done after the backup is lost, the choices
 of stages made on tasks included. In Helm the same holds: the database from
 the backup, then the chart of the old version
 ([Upgrades and rollback](#upgrades-and-rollback)).
+
+### Upgrading to v0.20.0
+
+The upgrade (`./upgrade.sh v0.20.0`, or `clab server upgrade`) needs no
+manual step. There are no migrations in this release, and no new services,
+ports, volumes or variables in `.env`; the starter bundle is not changed.
+What changes is the Claude plugin (see [The Claude plugin](#cli-and-agents):
+the artifacts of the stages, decisions from the card, «Ждут меня» and
+«Задачи»), the page `/docs` of the interface, and one behaviour of the
+checklist gate.
+
+**A checklist marked "not passed" now holds the transition.** A decision
+`failed` on a gate of the type `checklist` - «Не пройден» ("Not passed") in
+the panel of the plugin, or `clab decide <KEY> --transition <name> --gate
+<gate> --status failed --details '{"reason":"…"}'` - used to leave the gate
+`pending` while required items were unchecked, as if nobody had decided. Now
+the gate is `failed`, with the text from `details.reason` in its verdict,
+until the checklist is marked again: the transition is held explicitly, and `clab gates`, the task card
+and MCP show why. A new decision `passed` with `details.checked` brings
+back the usual rule: the gate passes when every required item is checked.
+The starter bundle has no gate of the type `checklist`, so only your own
+cycles with a checklist are touched, and only where `failed` was marked on
+it. If a script of yours marks a checklist `failed` and then expects the
+transition to be open, change it to mark the checklist again.
+
+For the API the release only adds: the query
+`GET /v1/projects/<key>/approvals` (REST only), the optional field
+`seen_artifact_id` in the decision on a gate (the server answers `409` with
+`stage_result_changed` if the stage got a newer artifact since), and
+parameters and fields in the list of tasks. `clab` and `clab-runner` of
+earlier versions keep working against a v0.20.0 server. Developers upgrade
+`clab` as for any release, see [CLI and agents](#cli-and-agents), and run
+`clab setup --plugin` again to update the plugin.
+
+There is nothing to roll back in the schema, so the way back is the general
+one, [Upgrades and rollback](#upgrades-and-rollback): take the backup before
+the upgrade.
 
 ## Stage limits
 
