@@ -154,7 +154,9 @@ production: when the evaluation is over, deploy on a server.
 `clab auth login --host http://127.0.0.1:8080` signs it in, and `clab setup`
 in a local clone connects it to a project: MCP and the agent skills, from
 the instance itself ([connecting developers](docs/admin.md#connecting-developers),
-or `/docs` in the UI). When done,
+or `/docs` in the UI). `clab setup --plugin` adds the Claude plugin
+`clab-plugin`, which ships inside `clab` - no GitHub needed, only Claude
+Code (`--dry-run` shows what it would do). When done,
 `docker compose down -v` in `cadence-lab` removes the containers and the data.
 
 ## What is in here

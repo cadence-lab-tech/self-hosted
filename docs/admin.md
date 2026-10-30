@@ -1683,6 +1683,41 @@ and names the server's version. What the skills do with the model level
 the server recommends for a run is in
 [Recommended model level](#recommended-model-level).
 
+**The Claude plugin.** `clab-plugin` shows, next to a Claude Code or Claude
+Desktop chat, the tasks that chat works on and their status. It is installed
+per machine, not per project, with its own command:
+
+```bash
+clab setup --plugin                         # the plugin, for this user, in Claude
+clab setup --plugin --dry-run               # the folder, the version and the claude commands, changing nothing
+```
+
+The plugin ships inside `clab` and has its version: the `clab` of the
+package (`bin/clab-<os>-<arch>`) or from the tap gives the plugin of your
+release. Nothing is downloaded and nothing comes from the instance, so it
+installs without GitHub and inside a closed network; it needs Claude Code
+(`claude` in `PATH`). `clab setup --plugin` writes the plugin as a local
+marketplace into the data folder of `clab` - `CLAB_DATA_DIR`, else
+`$XDG_DATA_HOME/clab`, else `~/.local/share/clab` (`%LOCALAPPDATA%\clab` on
+Windows) - and runs `claude plugin marketplace add` and
+`claude plugin install clab-plugin@cadence-lab --scope user`. It needs no
+sign-in, project or network, and does not combine with `--project`,
+`--scope`, `--agent`, `--name` or `--force`. A second run of the same
+version changes nothing; after a new `clab` it updates the plugin and asks
+to restart Claude. Without `claude` it writes the folder, prints the two
+commands to run by hand and exits with code 1. To remove the plugin:
+`claude plugin uninstall clab-plugin@cadence-lab`.
+
+The plugin uses the developer's own sign-in (`clab auth login`; it asks
+`clab auth token` for the token and keeps it only in memory) and the
+instance and project of `clab whoami` in the session's folder, otherwise
+the plugin's settings in Claude (`/config`: address, project key, path to
+`clab`). In a chat it opens with `/clab-plugin`, or `/clab-plugin <KEY>`;
+it never changes a task or the conversation by itself, and it does nothing
+in sessions without a window (`claude -p`, `clab-runner`, stage
+executors). It needs no server setting: against a server without some
+of its features it shows what the server has.
+
 One configuration (`~/.config/clab`) holds several hosts. The one you signed
 in to last is the default; `--host` picks another for one command:
 
