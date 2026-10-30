@@ -1314,7 +1314,9 @@ marks, the starter included, behaves as before: every task goes through
 every status.
 
 **Marking a status.** A maintainer marks a status in the draft of a cycle.
-In the cycle editor, the dialog of a status has two switches (labelled in
+An initial or a final status cannot be optional: a draft that marks one
+does not activate (see the validator below). In the cycle editor, the dialog
+of a status has two switches (labelled in
 Russian in the interface): «Необязательный» ("Optional") and, once it is on,
 «Включён по умолчанию» ("Enabled by default"), which says whether a new task
 goes through the stage when its author names no choice. Through the API it is
@@ -1356,14 +1358,14 @@ draft; warnings are reported and do not:
 | `optional_no_bypass` | problem | the stage has no outgoing `advance` of its own |
 | `optional_bypass_ambiguous` | problem | it has two or more of them |
 | `optional_bypass_cycle` | problem | the bypasses of optional stages close into a ring, so switching them all off never ends the skip |
-| `optional_breaks_path` | problem | with some set of stages off no final status is reachable, or a status is left with no way out; without a status in the report it is "the final status is unreachable" |
+| `optional_breaks_path` | problem | with some set of stages off no final status is reachable, or a status is left with no way out; without a status in the report it says that the task does not reach a final status |
 | `optional_too_many` | problem | more than 10 optional stages in one version (every set is checked, 2^N of them) |
 | `optional_reject_target` | warning | a `reject` or `reassign` leads into an optional stage: while the stage is off for a task, that transition is unavailable |
 | `optional_bypass_gates` | warning | the bypass carries gates: they are not checked when the stage is off |
 
-An optional initial or final status is one problem per status, and nothing
-else is looked for until it is fixed: no bypass is searched for it and the
-graph is not folded while it, or any other problem of bypasses, holds.
+An optional initial or final status is one problem per status: no bypass is
+searched for it, and the graph is not folded while it, or any other problem
+of bypasses, holds. The other statuses are checked as usual.
 `optional_breaks_path` is also reported for the empty set ("even without
 disabled stages"): then the cycle itself is broken, whatever you switch off.
 See the problems and warnings before activating with `clab workflow validate
@@ -1383,8 +1385,9 @@ brief, edited like its title:
   refused, `403`, with the text "выбор этапов своей задачи — решение
   человека" ("the stages of its own task are a person's decision"), and
   nothing of the request is applied. The check is on the presence of the
-  field, before it is parsed: any non-empty `optional_stages`, `{}` included
-  and a wrong key too, gets `403`; `null` and no field are as before.
+  field, before it is parsed: any value of `optional_stages` other than
+  `null` gets `403`, `{}` and a wrong key included; `null` and no field are
+  as before.
   Otherwise an executor could switch off the next stage that checks its own
   work.
 
@@ -1456,7 +1459,8 @@ for counts the entries into its target stage, which is off, so it passes;
 put the limit on the transition the task really enters by. A
 `stage_time_limit` on a bypass acts on the stage the task lands in. The text
 of a `stage_time_limit` gate on the requested transition still names the
-target status of the cycle ("stage limit in the status design") even though
+target status of the cycle («предел этапа в статусе design», "stage limit in
+the status design") even though
 no run of it opens when it is skipped: a known limitation, the text of the
 gate has not changed.
 
