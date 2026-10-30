@@ -9,8 +9,8 @@ apiVersion: v2
 name: cadence
 description: Cadence Lab - the development cycle for teams of people and agents, on your PostgreSQL and S3 bucket.
 type: application
-version: 0.18.1
-appVersion: v0.18.1
+version: 0.19.0
+appVersion: v0.19.0
 kubeVersion: ">=1.27.0-0"
 home: https://github.com/cadence-lab-tech/self-hosted
 sources:
