@@ -393,7 +393,7 @@ k get secret cadence -o go-template='{{index .data "admin-token" | base64decode}
 check "clab whoami is admin" contains "$("$clab" --host "$base" whoami 2>&1)" "admin"
 check "clab team create" "$clab" --host "$base" team create check --name "Helm check"
 check "clab project create" "$clab" --host "$base" project create CHECK --name "Helm check" --team check
-check "clab import of the starter bundle" "$clab" --host "$base" import --project CHECK --file bundles/starter.json
+check "clab import of the starter bundle" "$clab" --host "$base" import --project CHECK --file "$(starter_for_server "$version" "$work/starter-format1.json")"
 for id in $("$clab" --host "$base" workflow list --project CHECK --json |
   jq -r '(if type == "array" then . else (.workflows // .items) end)[] | select(.state == "draft") | .id'); do
   check "clab workflow activate $id" "$clab" --host "$base" workflow activate "$id" --project CHECK

@@ -1117,7 +1117,11 @@ who has already signed in can be added directly, without an invite:
 A new project is empty: no cycle, no roles. Tasks cannot be created and
 agents cannot be given a role until a maintainer sets them up. The package
 ships a starter: `bundles/starter.json`, a bundle of five roles and two
-cycles.
+cycles. A role is made of documents (from v0.21.0): the starter gives each
+of its roles one, `main.md`, with the instruction of the role - see
+[Roles are documents](#roles-are-documents) below. The bundle is in format 3;
+a server of v0.20.0 or older does not take it (see
+[Upgrading to v0.21.0](#upgrading-to-v0210)).
 
 **One command (from v0.14.0).** The installer sets the starter up for you
 with `--with-starter` (see [Install](#install)):
@@ -1204,14 +1208,55 @@ pull request, which the agent sets (`clab link`, or `sdlc_link_repo_ref`
 over MCP).
 
 **Making it yours.** Roles and cycles are data of the project, not code.
-Edit them in the UI (Roles, Cycle editor: a draft is edited and then
-activated as a new version) or round-trip them through the CLI:
+Edit them in the UI, on the page «Пайплайн» ("Pipeline", `/p/<key>/pipeline`;
+the interface is labelled in Russian): the roles and the cycle are on one
+page, and a draft of the cycle is edited and then activated as a new version.
+The page replaced «Роли» and «Цикл» in v0.21.0; the old addresses `/roles` and
+`/workflow` lead to it. Or round-trip them through the CLI:
 
 ```bash
 clab export > my-bundle.json        # repositories, roles, documents, the active cycles
 # edit my-bundle.json
 clab import --file my-bundle.json   # new role versions and a new draft of the cycle
 ```
+
+A bundle can also be a directory, one file per document, which reads well in
+a diff and in git:
+
+```bash
+clab export --dir rules/            # rules/bundle.json and rules/roles/<role>/ ...
+# edit rules/roles/analyst/main.md
+clab import --dir rules/ --dry-run  # the report
+clab import --dir rules/            # new role versions and a new draft of the cycle
+```
+
+Both forms need a server of v0.21.0 or newer (see
+[Roles are documents](#roles-are-documents)).
+
+#### Roles are documents
+
+From v0.21.0 the instruction of a role is not one string but an ordered set of
+**documents**: markdown files with a name (`main.md`, `checklist.md`) and a
+kind (`instructions`, `checklist`, `reference`; the kind is data, the list is
+not closed). A version of a role is immutable together with its documents:
+changing one document makes a new version of the role with the whole set. The
+starter has one document per role, `main.md`, with the same text as before.
+
+In a bundle of format 3 a role has `documents` (`name`, `kind`, `content`)
+where a bundle of format 1 and 2 has the string `instructions`; a role has
+one of the two, never both. A bundle of format 1 or 2 still imports: its
+string becomes `main.md`. `clab export --dir` writes a directory of a bundle:
+`bundle.json` and, for every role, `roles/<key>/role.json` (the fields of the
+role and the list of its documents in order) next to `<name>.md`.
+`clab role put --dir roles/analyst` puts one role from such a directory.
+
+An agent gets the documents with the claim of a stage. `clab claim <KEY>`
+prints them one after another, each under a line with its name, kind and
+size. `clab claim <KEY> --instructions-dir dir/` lays them out as files
+`dir/<name>` instead of printing them, and `--instructions-file role.md`
+writes the instruction as one file. For a role of one document that file is
+the text of `main.md` byte for byte; for a role of several, the documents
+joined, each after a marker line `<!-- document: name -->`.
 
 A bundle also carries project documents (conventions, architecture notes,
 glossaries) that agents read as context, and it can be applied to several
@@ -1325,7 +1370,7 @@ every status.
 
 **Marking a status.** A maintainer marks a status in the draft of a cycle.
 An initial or a final status cannot be optional: a draft that marks one
-does not activate (see the validator below). In the cycle editor, the dialog
+does not activate (see the validator below). On the page «Пайплайн», the dialog
 of a status has two switches (labelled in
 Russian in the interface): «Необязательный» ("Optional") and, once it is on,
 «Включён по умолчанию» ("Enabled by default"), which says whether a new task
@@ -1942,7 +1987,7 @@ analyst role loses nothing.
 field of a role version, so a change is a new version, made by whoever
 makes role versions (maintainer and above; a task token cannot):
 
-- the UI: the role editor, the switch "Уровень модели" ("model level") with
+- the UI: the role editor on the page «Пайплайн», the switch "Уровень модели" ("model level") with
   `авто` ("auto", no level), `low`, `medium`, `high`; saving makes a new
   version;
 - the CLI: `clab role put --key developer --name Developer --file developer.md --model-level high`.
@@ -2597,6 +2642,62 @@ earlier versions keep working against a v0.20.0 server. Developers upgrade
 There is nothing to roll back in the schema, so the way back is the general
 one, [Upgrades and rollback](#upgrades-and-rollback): take the backup before
 the upgrade.
+
+### Upgrading to v0.21.0
+
+The upgrade (`./upgrade.sh v0.21.0`, or `clab server upgrade`) needs no
+manual step: no new services, ports, volumes or variables in `.env`. Two
+migrations, both additive, run when the service starts. `000038` creates the
+table of the documents of roles and moves the instruction of every version
+of every role into it as the document `main.md` (kind `instructions`); the
+column the instructions were in stays and is still written. `000037` mends
+the type of tasks that lost it when their scope was switched (the property
+`type` is restored from the cycle a task runs on, where the cycle leaves no
+doubt). Nothing is lost.
+
+**What the agent gets does not change.** The claim of a role hands the
+instruction as it did, byte for byte: the same text, now read from the
+document `main.md`. `clab` and `clab-runner` of v0.20.0 and earlier keep
+working against a v0.21.0 server and see the instruction as one string. A
+role with several documents, which only appears once somebody puts it, reaches
+them as the documents joined, each after a marker line
+`<!-- document: name -->`. Developers upgrade `clab` as for any release, see
+[CLI and agents](#cli-and-agents); the new `clab claim` also takes
+`--instructions-dir` and `--instructions-file`.
+
+**The pages «Роли» and «Цикл» are one page, «Пайплайн».** The roles and the
+cycle of a project are edited together on `/p/<key>/pipeline`; the old
+addresses `/roles` and `/workflow` (with their `?role=` and `?workflow=`)
+lead to it. Nothing in the data moved.
+
+**The starter bundle is in format 3.** Each of its five roles has one
+document, `main.md`, with the text of v0.20.0 unchanged; the two cycles are
+unchanged too. You do nothing: a project set up from the starter of an older
+version keeps its roles, and running `clab server starter` or
+`clab import --file bundles/starter.json` over it changes nothing - the roles
+and cycles report `unchanged`, because the text is the same. A role you edited
+by hand is not overwritten, as before.
+
+**Bundles of format 3 and older servers.** A bundle exported by v0.21.0
+(`clab export`, `clab export --dir`) is in format 3, which a server of v0.20.0
+or older refuses with "bundle of version 3 is newer than supported 2",
+applying nothing. The other way works: a bundle of format 1 or 2 imports into
+v0.21.0. The new `clab` against an older server: `clab import --file` of a
+bundle of format 2 works, of format 3 is refused as above, and
+`clab export --dir` and `clab import --dir` do not work (the old server has no
+documents of roles to write or read); `clab export > bundle.json` still gives
+a bundle of format 2.
+
+**Rolling back.** The way back is the general one, [Upgrades and
+rollback](#upgrades-and-rollback): the database from the backup and the
+package of the old version. What was written after the backup is lost, the
+roles put as documents included, and a bundle exported by v0.21.0 does not
+import into the old version. To keep your rules through a rollback, export
+them before the upgrade:
+
+```bash
+clab export > before-upgrade.json     # on v0.20.0: a bundle of format 2
+```
 
 ## Stage limits
 

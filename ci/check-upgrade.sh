@@ -81,6 +81,18 @@
 #     runs it has the reminder: always for a clone (it runs the scripts of
 #     this checkout), for a package once FROM is a release with it; "nothing
 #     to do", the refusals and the failed upgrades do not remind
+#   - the roles carry their documents over the upgrade (TO is v0.21.0 or
+#     newer, the release that has them, CLAB-350): the claim of a role taken
+#     on FROM and taken again after the upgrade hands the instructions with
+#     the same sha256, byte for byte, to the clab of FROM; the clab of TO sees them as the one document main.md, and lays
+#     it out by claim --instructions-dir as the same bytes; a role of two
+#     documents reads as one string, with the markers, to the clab of FROM
+#   - the starter bundle of FROM, imported into a project before the upgrade,
+#     is left unchanged by the starter bundle of TO (import and clab server
+#     starter: roles and cycles unchanged), and a role edited by hand stops
+#     clab server starter; the clab of TO against the server of FROM: a bundle
+#     of format 3 is refused and applies nothing, a bundle of format 2 and
+#     export go through, export --dir does not
 #   - ./upgrade.sh with no version on the latest release: nothing to do
 #   - going down is refused, and restore.sh of a FROM backup refuses, each
 #     with a hint that needs no git
@@ -326,7 +338,7 @@ main() {
   "roles": [{
     "key": "upgrade",
     "name": "Upgrade check",
-    "instructions": "Write a note.",
+    "instructions": "Write a note.\n\n- Cyrillic: заметка, a tab:\t|, a quote \" and a backslash \\.\n- A trailing blank line follows.\n\n",
     "output_contract": [{"kind": "upgrade.note", "title": "Note", "format": "markdown", "required": true}]
   }],
   "workflows": [{
@@ -339,11 +351,16 @@ main() {
   }]
 }
 JSON
-  local workflow_id task_key artifact_id
+  local workflow_id task_key artifact_id instructions_sha
   workflow_id="$(SDLC_PROJECT=UPG "$clab" --host "$base" import --file "$work/bundle.json" --json | jq -r '.workflows[0].id')"
   SDLC_PROJECT=UPG "$clab" --host "$base" workflow activate "$workflow_id" >/dev/null
   task_key="$(SDLC_PROJECT=UPG "$clab" --host "$base" create --title "Upgrade check task" --json | jq -r '.key')"
-  SDLC_PROJECT=UPG "$clab" --host "$base" claim "$task_key" >/dev/null
+  # What the claim hands the agent on FROM, byte for byte: after the upgrade the
+  # claim of the same role must hand the same bytes (CLAB-350).
+  SDLC_PROJECT=UPG "$clab" --host "$base" claim "$task_key" --json >"$work/claim-before.json"
+  jq -j '.role.instructions // empty' "$work/claim-before.json" >"$work/instructions-before.md"
+  [ -s "$work/instructions-before.md" ] || die "the claim of $task_key on $from carries no instructions of the role"
+  instructions_sha="$(sha256_of "$work/instructions-before.md")"
   printf 'Artifact written on %s before the upgrade.\n' "$from" >"$work/note.md"
   artifact_id="$(SDLC_PROJECT=UPG "$clab" --host "$base" submit "$task_key" --kind upgrade.note \
     --title "Upgrade check note" --file "$work/note.md" --json | jq -r '.artifact.id // .id')"
@@ -351,6 +368,86 @@ JSON
   /* | */ | null/* | */null) die "could not create the task and its artifact on $from" ;;
   esac
   info "task $task_key with artifact $artifact_id on $from"
+
+  # The starter bundle of FROM, as an administrator who installed $from has it
+  # (a project UPS with the starter roles and both cycles active): after the
+  # upgrade the starter bundle of TO must find nothing to change in it. A
+  # package of FROM that is this checkout (CHECK_FROM=checkout) has the bundle
+  # in format 3, which a server of FROM refuses: format 1 copy.
+  local starter_from="" starter_roles=""
+  if [ -f bundles/starter.json ]; then
+    starter_from="$(starter_for_server "$from" "$work/starter-from.json")"
+    "$clab" --host "$base" project create UPS --name "Upgrade check, starter" --team upgrade >/dev/null
+    SDLC_PROJECT=UPS "$clab" --host "$base" import --file "$starter_from" >/dev/null
+    local draft
+    for draft in $(SDLC_PROJECT=UPS "$clab" --host "$base" workflow list --json |
+      jq -r '(if type == "array" then . else (.workflows // .items) end)[] | select(.state == "draft") | .id'); do
+      SDLC_PROJECT=UPS "$clab" --host "$base" workflow activate "$draft" >/dev/null
+    done
+    starter_roles="$(jq -r '[.roles[].key] | sort | join(" ")' "$starter_from")"
+    info "the starter bundle of $from imported into UPS: $starter_roles"
+  else
+    info "$from has no bundles/starter.json: the starter bundle is not checked"
+  fi
+
+  # The clab of TO, from its package, against the server of FROM (CLAB-350,
+  # AC-S9): a bundle of format 3 is not for a server that takes up to 2 - it
+  # answers that the bundle is newer than it supports and applies nothing -
+  # and a directory of roles is not made by a server that has no documents;
+  # a bundle of format 2 goes through.
+  local platform to_clab_bin="" to_pkg="$work/to-package"
+  case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64 | Linux/amd64) platform=linux-amd64 ;;
+  Linux/aarch64 | Linux/arm64) platform=linux-arm64 ;;
+  Darwin/x86_64) platform=darwin-amd64 ;;
+  Darwin/arm64) platform=darwin-arm64 ;;
+  *) platform=unknown ;;
+  esac
+  mkdir -p "$to_pkg"
+  tar -xzf "$releases/download/$to/$(package_name "$to")" -C "$to_pkg"
+  to_clab_bin="$(find "$to_pkg" -type f -name "clab-$platform" | head -n 1)"
+  if [ -z "$to_clab_bin" ]; then
+    info "the package of $to has no clab for $platform: the clab of $to against $from is not checked"
+  elif ! version_lt "$from" "$STARTER_FORMAT3_FIRST"; then
+    info "$from takes bundles of format 3: the clab of $to against it needs no refusals (ci/lib.sh, STARTER_FORMAT3_FIRST)"
+  elif [ "$("$to_clab_bin" version 2>/dev/null | head -n 1)" != "clab $to" ]; then
+    info "the clab of the package is not clab $to ($("$to_clab_bin" version 2>/dev/null | head -n 1)): not checked against $from"
+  elif ! grep -qF -- "--dir" <<<"$("$to_clab_bin" import --help 2>&1)"; then
+    info "the clab of $to has no import --dir: not checked against $from"
+  else
+    info "the clab of $to against the server of $from"
+    local format3="$repo/bundles/starter.json" refusal code
+    [ "$(jq -r .version "$format3")" = 3 ] || die "bundles/starter.json of this checkout is not in bundle format 3"
+    # The refusal is in the report ("error"); the exit code of clab import is
+    # not part of the check (it is 0 for a refusal of the server in v0.21.0).
+    refusal="$(SDLC_PROJECT=UPG "$to_clab_bin" --host "$base" import --file "$format3" 2>&1)" && code=0 || code=$?
+    if grep -qiE "новее|newer" <<<"$refusal" && grep -qF "3" <<<"$refusal"; then
+      pass "import of a bundle of format 3 into the server of $from is refused as newer than it supports (exit $code)"
+    else
+      fail "import of a bundle of format 3 into the server of $from is not refused: exit $code, $refusal"
+    fi
+    if SDLC_PROJECT=UPG "$to_clab_bin" --host "$base" role show analyst >/dev/null 2>&1; then
+      fail "the refused bundle of format 3 left the role analyst in UPG: nothing may be applied"
+    else
+      pass "...and applied nothing: UPG has no role analyst"
+    fi
+    if SDLC_PROJECT=UPG "$to_clab_bin" --host "$base" import --file "$work/bundle.json" --dry-run >/dev/null 2>&1; then
+      pass "import of a bundle of format 2 into the server of $from goes through"
+    else
+      fail "import of a bundle of format 2 into the server of $from failed"
+    fi
+    if SDLC_PROJECT=UPG "$to_clab_bin" --host "$base" export --dir "$work/export-from" >/dev/null 2>&1; then
+      fail "export --dir from the server of $from must be refused: it has no documents of roles"
+    else
+      pass "export --dir from the server of $from is refused"
+    fi
+    if SDLC_PROJECT=UPG "$to_clab_bin" --host "$base" export >"$work/export-from.json" 2>/dev/null &&
+      [ "$(jq -r .version "$work/export-from.json")" = 2 ]; then
+      pass "export of the server of $from works: a bundle of format 2, as before-upgrade.json of docs/admin.md"
+    else
+      fail "export of the server of $from failed or is not of format 2"
+    fi
+  fi
 
   # The bundled database (docs/admin.md, "PostgreSQL 18"): FROM on 17 and TO
   # on 18 make the upgrades below move the data.
@@ -837,6 +934,132 @@ JSON
   else
     fail "the content of the artifact differs or is gone"
   fi
+  # --- roles after the upgrade (CLAB-350): documents, byte for byte ------------------
+  # The migration of TO carries the instructions of every version of a role
+  # into the document main.md. What the agent is handed must not change by
+  # a byte: the claim of the role on $from, taken before the upgrade, and the
+  # claim of the same role now - with the clab of $from, as agents have it
+  # until they update - are compared by sha256, and so is the text the clab
+  # of $to lays out as a file.
+  info "the roles after the upgrade: the instructions byte for byte"
+  local claim_after="$work/claim-after.json"
+  SDLC_PROJECT=UPG "$clab" --host "$base" claim "$task_key" --json >"$claim_after" 2>"$work/claim-after.err" || cat "$work/claim-after.err" >&2
+  jq -j '.role.instructions // empty' "$claim_after" >"$work/instructions-after.md"
+  if [ -s "$work/instructions-after.md" ] && [ "$(sha256_of "$work/instructions-after.md")" = "$instructions_sha" ]; then
+    pass "the claim of the role upgrade hands the same instructions as on $from: sha256 $instructions_sha"
+  else
+    fail "the claim of the role upgrade differs from $from: sha256 $instructions_sha before, $(sha256_of "$work/instructions-after.md") after"
+  fi
+  local printed
+  printed="$(SDLC_PROJECT=UPG "$clab" --host "$base" claim "$task_key" 2>&1 || true)"
+  if grep -qF -- "- Cyrillic: заметка, a tab:"$'\t'"|, a quote \" and a backslash \\." <<<"$printed"; then
+    pass "clab $from prints the instructions of the role as it did on $from"
+  else
+    fail "clab $from does not print the instructions of the role: $printed"
+  fi
+  if [ -z "$to_clab_bin" ]; then
+    info "no clab of $to for $platform: the documents of the role are not checked"
+  else
+    local role_after
+    role_after="$(SDLC_PROJECT=UPG "$to_clab_bin" --host "$base" role show upgrade --json 2>/dev/null || true)"
+    if [ "$(jq -r '[.. | objects | select(.name? == "main.md" and .kind? == "instructions")] | length' <<<"$role_after")" -ge 1 ] &&
+      [ "$(jq -r '[.. | objects | select(.name? == "main.md") | .sha256] | unique | join(" ")' <<<"$role_after")" = "$instructions_sha" ]; then
+      pass "clab $to: the role upgrade has the document main.md of the kind instructions, sha256 $instructions_sha"
+    else
+      fail "clab $to: the role upgrade has no main.md of the kind instructions with sha256 $instructions_sha: $role_after"
+    fi
+    if [ "$(jq -r '[.versions[]?] | length' <<<"$role_after")" = 1 ]; then
+      pass "...and it has the one version it had on $from"
+    else
+      fail "the role upgrade has more versions than on $from: $role_after"
+    fi
+    rm -rf "$work/role-docs"
+    if SDLC_PROJECT=UPG "$to_clab_bin" --host "$base" claim "$task_key" --instructions-dir "$work/role-docs" >/dev/null 2>&1 &&
+      [ "$(ls "$work/role-docs")" = main.md ] && cmp -s "$work/role-docs/main.md" "$work/instructions-before.md"; then
+      pass "claim --instructions-dir of clab $to lays out main.md, the instructions of $from byte for byte"
+    else
+      fail "claim --instructions-dir of clab $to: main.md is not the instructions of $from, or the claim failed"
+    fi
+  fi
+
+  # The starter bundle of $from, in UPS, against the bundle of $to (format 3),
+  # and a role of two documents for the clab of $from.
+  if [ -z "$to_clab_bin" ]; then
+    info "no clab of $to for $platform: the starter bundle and the roles of two documents are not checked"
+  else
+    if [ -n "$starter_roles" ] && [ -f bundles/starter.json ]; then
+      info "the starter bundle of $from in UPS, against the one of $to"
+      local again starter_out starter_code
+      again="$(SDLC_PROJECT=UPS "$to_clab_bin" --host "$base" import --file bundles/starter.json --json 2>&1 || true)"
+      if [ "$(jq -r '[.roles[].outcome] | unique | join(",")' <<<"$again" 2>/dev/null)" = unchanged ] &&
+        [ "$(jq -r '[.roles[].key] | sort | join(" ")' <<<"$again" 2>/dev/null)" = "$starter_roles" ]; then
+        pass "the starter bundle of $to (format 3) leaves every role of $from unchanged: $starter_roles"
+      else
+        fail "the starter bundle of $to changes the roles of $from: $again"
+      fi
+      if [ "$(jq -r '[.workflows[].outcome] | unique | join(",")' <<<"$again" 2>/dev/null)" = unchanged ]; then
+        pass "...and the cycles are unchanged"
+      else
+        fail "the starter bundle of $to changes the cycles of $from: $again"
+      fi
+      starter_out="$("$to_clab_bin" server starter --dir "$dir" --team upgrade --project UPS 2>&1)" && starter_code=0 || starter_code=$?
+      if [ "$starter_code" = 0 ] && [ "$(grep -o 'unchanged, already active' <<<"$starter_out" | wc -l | tr -d ' ')" = 2 ]; then
+        pass "clab server starter of $to after the upgrade changes nothing in UPS: both cycles unchanged, already active"
+      else
+        fail "clab server starter of $to after the upgrade: exit $starter_code, $starter_out"
+      fi
+      if grep -qF "$admin_token" <<<"$starter_out"; then fail "clab server starter prints the token"; fi
+      # A role edited by hand is not overwritten: the command refuses and
+      # leaves the roles as they are.
+      printf 'A role edited by hand after the upgrade.\n' >"$work/edited-analyst.md"
+      SDLC_PROJECT=UPS "$to_clab_bin" --host "$base" role put --key analyst --name Analyst --file "$work/edited-analyst.md" >/dev/null
+      starter_out="$("$to_clab_bin" server starter --dir "$dir" --team upgrade --project UPS 2>&1)" && starter_code=0 || starter_code=$?
+      if [ "$starter_code" != 0 ]; then
+        pass "clab server starter refuses over a role edited by hand (exit $starter_code)"
+      else
+        fail "clab server starter must refuse over a role edited by hand: $starter_out"
+      fi
+      if [ "$(SDLC_PROJECT=UPS "$to_clab_bin" --host "$base" role show analyst --json 2>/dev/null |
+        jq -r '[.. | objects | select(.name? == "main.md") | .sha256] | first // ""')" = "$(sha256_of "$work/edited-analyst.md")" ]; then
+        pass "...and the role edited by hand is still the current one"
+      else
+        fail "the role edited by hand is not the current one after clab server starter"
+      fi
+    else
+      info "the starter bundle is not checked: $from has none, or the bundle of $to is gone"
+    fi
+
+    # A role of two documents reads as one string to the clab of $from: the
+    # documents joined, each after the marker <!-- document: name -->.
+    info "a role of two documents for the clab of $from"
+    mkdir -p "$work/role-two"
+    cp "$work/instructions-before.md" "$work/role-two/main.md"
+    printf -- '- A checklist item.\n' >"$work/role-two/checklist.md"
+    cat >"$work/role-two/role.json" <<'JSON'
+{
+  "key": "upgrade",
+  "name": "Upgrade check",
+  "output_contract": [{"kind": "upgrade.note", "title": "Note", "format": "markdown", "required": true}],
+  "documents": [{"name": "main.md", "kind": "instructions"}, {"name": "checklist.md", "kind": "checklist"}]
+}
+JSON
+    if SDLC_PROJECT=UPG "$to_clab_bin" --host "$base" role put --dir "$work/role-two" >/dev/null 2>&1; then
+      # A claim in progress keeps the version of the role it began with: a
+      # second task begins with the new one.
+      local task_two
+      task_two="$(SDLC_PROJECT=UPG "$clab" --host "$base" create --title "Upgrade check task, two documents" --json | jq -r '.key')"
+      printed="$(SDLC_PROJECT=UPG "$clab" --host "$base" claim "$task_two" --json 2>/dev/null | jq -r '.role.instructions // empty' || true)"
+      if grep -qF '<!-- document: main.md -->' <<<"$printed" && grep -qF '<!-- document: checklist.md -->' <<<"$printed" &&
+        grep -qF -- '- A checklist item.' <<<"$printed" && grep -qF "A trailing blank line follows." <<<"$printed"; then
+        pass "clab $from reads a role of two documents as one string: the documents after the markers <!-- document: name -->"
+      else
+        fail "clab $from does not get the joined documents of a role of two: $printed"
+      fi
+    else
+      fail "clab $to could not put a role of two documents (role put --dir)"
+    fi
+  fi
+
   if [ "$moves" = true ]; then
     info "the database after the move"
     if [ "$(pg_major)" = 18 ] && dc exec -T postgres cat /etc/debian_version | grep -q '^13\.'; then

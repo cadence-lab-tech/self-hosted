@@ -42,6 +42,28 @@ version_lt() {
   [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" = "${1#v}" ]
 }
 
+# The starter bundle is in bundle format 3 (roles carry documents, CLAB-350),
+# which the server takes from STARTER_FORMAT3_FIRST on; a server of an older
+# version refuses it ("bundle of version 3 is newer than supported 2"). Up
+# to that release the checks of a package import the same bundle in format 1
+# - each role's main.md as the instructions string, the cycles as they are.
+STARTER_FORMAT3_FIRST=v0.21.0
+
+# starter_for_server VERSION OUT: prints the path of the starter bundle a
+# server of VERSION imports: bundles/starter.json, or - for a server older
+# than STARTER_FORMAT3_FIRST - its format 1 copy written to OUT (a bundles/
+# starter.json of an older package is in format 1 already and is given as is).
+starter_for_server() {
+  if ! version_lt "$1" "$STARTER_FORMAT3_FIRST" || [ "$(jq -r .version bundles/starter.json)" != 3 ]; then
+    printf '%s\n' bundles/starter.json
+    return
+  fi
+  jq --indent 2 '.version = 1 | .roles |= map(to_entries | map(
+      if .key == "documents" then {key: "instructions", value: .value[0].content} else . end) | from_entries)' \
+    bundles/starter.json >"$2" || return 1
+  printf '%s\n' "$2"
+}
+
 # load_env exports .env of the installation in the current directory into
 # the check, so that docker compose of the check works with that
 # installation - the rules of clab server (cmd/clab/server_name.go).
