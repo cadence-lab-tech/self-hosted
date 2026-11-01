@@ -499,8 +499,24 @@ check "ci/lib.sh: the identity of an image is the one ci/pins.sh pins with" \
 info "bundles/starter.json"
 bundle=bundles/starter.json
 check "$bundle exists" [ -f "$bundle" ]
-check "$bundle is JSON of bundle version 1" [ "$(jq -r .version "$bundle")" = 1 ]
+check "$bundle is JSON of bundle version 3" [ "$(jq -r .version "$bundle")" = 3 ]
 check "$bundle has no repositories, documents or project of ours" [ "$(jq -r '[.repositories, .documents, .project] | map(select(. != null)) | length' "$bundle")" = 0 ]
+# Role documents (CLAB-350, bundle version 3): a role is its documents. The
+# server refuses a role that carries both "instructions" and "documents", or
+# neither, and checks the name and kind of a document; the form is the
+# server's (internal/workflow/roledocs.go): a name up to 64 characters with
+# ".md", a kind up to 32. The lengths are tested apart from the pattern, since
+# bash would expand a {n,m} quantifier in a quoted jq program.
+check "no role of $bundle carries the instructions string next to its documents" [ "$(jq -r '[.roles[] | select(has("instructions"))] | length' "$bundle")" = 0 ]
+check "every role of $bundle has at least one document" [ "$(jq -r '[.roles[] | select((.documents // []) | length == 0)] | length' "$bundle")" = 0 ]
+check "every document of $bundle has a name of the server's form, unique within its role" [ "$(jq -r '
+  [.roles[] | (.documents // []) as $d
+   | select(any($d[]; (.name | type) != "string" or (.name | test("^[a-z0-9][a-z0-9._-]*\\.md$") | not) or (.name | length) > 64)
+            or (($d | map(.name) | unique | length) != ($d | length)))] | length' "$bundle")" = 0 ]
+check "every document of $bundle has a kind of the server's form and a non-empty content" [ "$(jq -r '
+  [.roles[].documents[]? | select((.kind | type) != "string" or (.kind | test("^[a-z][a-z0-9_-]*$") | not) or (.kind | length) > 32
+                                  or (.content | type) != "string" or (.content | length) == 0)] | length' "$bundle")" = 0 ]
+check "every role of $bundle has an instructions document" [ "$(jq -r '[.roles[] | select(any(.documents[]?; .kind == "instructions") | not)] | length' "$bundle")" = 0 ]
 check "$bundle has a cycle for task and one for epic" [ "$(jq -r '[.workflows[].task_types[]] | sort | join(" ")' "$bundle")" = "epic task" ]
 check "every status role of $bundle is a role of the bundle" [ "$(jq -r '[.roles[].key] as $roles | [.workflows[].statuses[].role // empty] | map(select(. as $r | $roles | index($r) | not)) | length' "$bundle")" = 0 ]
 check "every artifact kind a gate requires is produced by a role" [ "$(jq -r '

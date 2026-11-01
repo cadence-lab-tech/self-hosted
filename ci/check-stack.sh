@@ -905,10 +905,31 @@ if "$clab" --host "$base" token create --project CHECK --name before-bundle --fo
 else
   pass "a token with --roles on a project without roles is refused"
 fi
-check "clab import --dry-run reports the bundle" "$clab" --host "$base" import --project CHECK --file bundles/starter.json --dry-run
-check "clab import applies the bundle" "$clab" --host "$base" import --project CHECK --file bundles/starter.json
+# The bundle is in format 3 (roles carry documents, CLAB-350). A server older
+# than STARTER_FORMAT3_FIRST takes up to format 2: it is given the format 1 copy
+# of the same bundle, and the checks of documents wait for the release.
+starter_file="$(starter_for_server "$version" "$work/starter-format1.json")"
+starter_documents=1
+if version_lt "$version" "$STARTER_FORMAT3_FIRST"; then
+  starter_documents=0
+  info "the server of $version takes bundle formats 1 and 2: the starter bundle is imported in format 1, documents are checked from $STARTER_FORMAT3_FIRST"
+else
+  check "the starter bundle is in bundle format 3" [ "$(jq -r .version bundles/starter.json)" = 3 ]
+fi
+check "clab import --dry-run reports the bundle" "$clab" --host "$base" import --project CHECK --file "$starter_file" --dry-run
+check "clab import applies the bundle" "$clab" --host "$base" import --project CHECK --file "$starter_file"
 roles="$("$clab" --host "$base" role show analyst --project CHECK --json 2>/dev/null || true)"
 check "the project has the analyst role" contains "$roles" '"analyst"'
+if [ "$starter_documents" = 1 ]; then
+  # The role of the bundle is its document main.md of the kind instructions,
+  # with the text of the bundle byte for byte (the sha256 the server counted).
+  jq -j '.roles[] | select(.key == "analyst") | .documents[0].content' bundles/starter.json >"$work/analyst-main.md"
+  want_sha="$(sha256_of "$work/analyst-main.md")"
+  check "clab role show analyst has the document main.md of the kind instructions" \
+    [ "$(jq -r '[.. | objects | select(.name? == "main.md" and .kind? == "instructions")] | length' <<<"$roles")" -ge 1 ]
+  check "...with the sha256 of the text in the bundle" \
+    [ "$(jq -r '[.. | objects | select(.name? == "main.md") | .sha256] | first // ""' <<<"$roles")" = "$want_sha" ]
+fi
 drafts="$("$clab" --host "$base" workflow list --project CHECK --json |
   jq -r '(if type == "array" then . else (.workflows // .items) end)[] | select(.state == "draft") | .id')"
 check "the bundle brings two draft cycles (tasks and epics)" [ "$(grep -c . <<<"$drafts")" = 2 ]
@@ -920,7 +941,7 @@ active="$("$clab" --host "$base" workflow list --project CHECK --json |
 check "active cycles cover task and epic ($active)" [ "$active" = "epic task " ]
 # A second import changes nothing. Cycles report unchanged since v0.5.2
 # (CLAB-108); v0.5.1 and older create a new draft of each cycle every time.
-again="$("$clab" --host "$base" import --project CHECK --file bundles/starter.json --json)"
+again="$("$clab" --host "$base" import --project CHECK --file "$starter_file" --json)"
 check "a second import leaves the roles unchanged" [ "$(jq -r '[.roles[].outcome] | unique | join(",")' <<<"$again")" = unchanged ]
 cycles_again=unchanged
 if version_lt "$version" v0.5.2; then cycles_again=draft_created; fi
@@ -936,6 +957,18 @@ check "a token with --roles analyst is issued" [ "${agent_token#sdlc_}" != "$age
 queue="$(env SDLC_API_URL="$base" SDLC_TOKEN="$agent_token" SDLC_PROJECT=CHECK "$clab" queue --json)"
 check "the agent sees CHECK-1 in its queue" contains "$queue" '"CHECK-1"'
 check "the agent claims CHECK-1 as analyst" env SDLC_API_URL="$base" SDLC_TOKEN="$agent_token" SDLC_PROJECT=CHECK "$clab" claim CHECK-1
+if [ "$starter_documents" = 1 ]; then
+  # The claim carries the documents of the role (decision 0068); the string
+  # instructions is their join, and for a role of one document it is the text
+  # of main.md byte for byte.
+  claimed="$(env SDLC_API_URL="$base" SDLC_TOKEN="$agent_token" SDLC_PROJECT=CHECK "$clab" claim CHECK-1 --json 2>/dev/null || true)"
+  check "the claim of the analyst carries the document main.md of the kind instructions" \
+    [ "$(jq -r '[.role.documents[]? | select(.name == "main.md" and .kind == "instructions")] | length' <<<"$claimed")" = 1 ]
+  check "...with the text of the bundle byte for byte" \
+    [ "$(jq -r --slurpfile b bundles/starter.json '.role.documents[0].content == ($b[0].roles[] | select(.key == "analyst") | .documents[0].content)' <<<"$claimed")" = true ]
+  check "...and the joined instructions equal main.md byte for byte" \
+    [ "$(jq -r '.role.instructions == .role.documents[0].content' <<<"$claimed")" = true ]
+fi
 gates="$(env SDLC_PROJECT=CHECK "$clab" --host "$base" gates CHECK-1 --json)"
 check "analysis_done waits for the artifacts and a human approval" contains "$gates" 'human_approval'
 # Order of tasks (CLAB-107): a task blocked by an open one does not start.
@@ -1690,7 +1723,9 @@ if [ "$db" = bundled ]; then
 fi
 
 # --- the starter project in one command (docs/admin.md, "First cycle and roles") ----
-if [ "$db" = bundled ]; then
+if [ "$db" = bundled ] && [ "$starter_documents" = 0 ]; then
+  info "skipped the starter project: its bundle is in format 3 and the server of $version takes up to 2 (from $STARTER_FORMAT3_FIRST)"
+elif [ "$db" = bundled ]; then
   starter_clab="${CLAB_BIN:-$pkg_clab}"
   if ! "$starter_clab" server install --help 2>/dev/null | grep -qF -- --with-starter; then
     if version_lt "$version" v0.14.0; then
@@ -1722,7 +1757,10 @@ if [ "$db" = bundled ]; then
       [ "$(jq -r '[.workflows[] | select(.state == "active") | .task_types[]] | sort | join(" ")' <<<"$flows" 2>/dev/null)" = "epic task" ]
     check "...and no draft is left" [ "$(jq -r '[.workflows[] | select(.state == "draft")] | length' <<<"$flows" 2>/dev/null)" = 0 ]
     sclab=(env SDLC_API_URL="$sbase" SDLC_TOKEN="$admin_token" SDLC_PROJECT=START "$clab")
-    check "the project has the analyst role" contains "$("${sclab[@]}" role show analyst --json 2>/dev/null || true)" '"analyst"'
+    sroles="$("${sclab[@]}" role show analyst --json 2>/dev/null || true)"
+    check "the project has the analyst role" contains "$sroles" '"analyst"'
+    check "...with the document main.md of the kind instructions" \
+      [ "$(jq -r '[.. | objects | select(.name? == "main.md" and .kind? == "instructions")] | length' <<<"$sroles")" -ge 1 ]
     check "a task is created in it" "${sclab[@]}" create --title "First task"
     check "an epic is created in it" "${sclab[@]}" create --title "First epic" --type epic
 
