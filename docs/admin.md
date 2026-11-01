@@ -1211,8 +1211,9 @@ over MCP).
 Edit them in the UI, on the page «Пайплайн» ("Pipeline", `/p/<key>/pipeline`;
 the interface is labelled in Russian): the roles and the cycle are on one
 page, and a draft of the cycle is edited and then activated as a new version.
-The page replaced «Роли» and «Цикл» in v0.21.0; the old addresses `/roles` and
-`/workflow` lead to it. Or round-trip them through the CLI:
+The page replaced «Роли» and «Цикл» in v0.21.0; the old addresses
+`/p/<key>/roles` and `/p/<key>/workflow` are gone and show «Страница не
+найдена» ("Page not found"). Or round-trip them through the CLI:
 
 ```bash
 clab export > my-bundle.json        # repositories, roles, documents, the active cycles
@@ -2646,14 +2647,38 @@ the upgrade.
 ### Upgrading to v0.21.0
 
 The upgrade (`./upgrade.sh v0.21.0`, or `clab server upgrade`) needs no
-manual step: no new services, ports, volumes or variables in `.env`. Two
-migrations, both additive, run when the service starts. `000038` creates the
-table of the documents of roles and moves the instruction of every version
-of every role into it as the document `main.md` (kind `instructions`); the
-column the instructions were in stays and is still written. `000037` mends
-the type of tasks that lost it when their scope was switched (the property
-`type` is restored from the cycle a task runs on, where the cycle leaves no
-doubt). Nothing is lost.
+manual step: no new services, ports, volumes or variables in `.env`. Four
+migrations run when the service starts; none drops anything, each only adds
+to what is there:
+
+- `000037` mends the type of tasks that lost it when their scope was
+  switched (the property `type` is restored from the cycle a task runs on,
+  where the version of the cycle has exactly one task type);
+- `000038` creates the table of the documents of roles and moves the
+  instruction of every version of every role into it as the document
+  `main.md` (kind `instructions`); the column the instructions were in stays
+  and is still written;
+- `000039` adds to a role on a status of the cycle the optional list of the
+  documents the stage gets (without the list it gets all of them);
+- `000040` creates the instruction library of a project.
+
+Nothing is lost.
+
+**Upgrade the backend and the interface together.** The interface of
+v0.20.0 against a backend of v0.21.0 drops the choice of documents of a
+status when it saves that status: the save sends the roles of the status
+without the list of documents, and a role without the list gets all of them.
+`./upgrade.sh` moves both images at once; in Helm or your own manifests, roll
+both out in one step. The same holds for a script that sets the roles of a
+status through the API (`PUT /v1/workflows/<id>/statuses/<status>/roles`): it
+keeps the choice only if it sends `document_names` for each role.
+
+**The scope of a task merges properties.** `PATCH /v1/tasks/<key>/scope`
+now merges `properties` into the current ones instead of replacing them: a
+key set to `null` is removed, and a `properties` that is not a JSON object is
+refused with `400`. A script that relied on the replacement removes keys with
+an explicit `null`. `clab scope <KEY> --multi-repo[=false]` switches the
+property `multi_repo` from the CLI.
 
 **What the agent gets does not change.** The claim of a role hands the
 instruction as it did, byte for byte: the same text, now read from the
@@ -2662,13 +2687,37 @@ working against a v0.21.0 server and see the instruction as one string. A
 role with several documents, which only appears once somebody puts it, reaches
 them as the documents joined, each after a marker line
 `<!-- document: name -->`. Developers upgrade `clab` as for any release, see
-[CLI and agents](#cli-and-agents); the new `clab claim` also takes
-`--instructions-dir` and `--instructions-file`.
+[CLI and agents](#cli-and-agents); the new `clab claim` takes
+`--instructions-dir` (one file per document), and `--instructions-file` now
+writes the documents joined in one file.
 
 **The pages «Роли» and «Цикл» are one page, «Пайплайн».** The roles and the
-cycle of a project are edited together on `/p/<key>/pipeline`; the old
-addresses `/roles` and `/workflow` (with their `?role=` and `?workflow=`)
-lead to it. Nothing in the data moved.
+cycle of a project are edited together on `/p/<key>/pipeline`. The old
+addresses `/p/<key>/roles` and `/p/<key>/workflow` (with their `?role=` and
+`?workflow=`) are gone: they show «Страница не найдена» ("Page not found"),
+not the new page, so update the bookmarks. Nothing in the data moved.
+
+**A status can pick documents of a role.** On a status of the cycle a role
+can be given only some of its documents: `role_documents` (and
+`reviewer_documents`, by role, for the reviewers of the status) in the
+bundle, or the dialog of the status on the page «Пайплайн». A name that the
+version of the role does not have is the warning `role_document_missing` in
+the report of `clab import --dry-run` and in the validation of the draft, not
+a refusal; if none of the names is found, the stage gets all the documents.
+A bundle of format 2 that carries these fields (written by hand) is applied
+by a server older than v0.21.0 without them, so the stage there gets all the
+documents; a bundle of format 3 is refused there, see below.
+
+**The instruction library.** Rules shared by roles (git, the format of a
+report) can live in the project as instructions with versions. A role takes
+a version as its document `<key>.md`; a new version reaches the roles only as
+new versions of the roles («обновить в ролях» on the page «Пайплайн», or
+`clab instruction apply <key> --role <role>`). `clab instruction list`,
+`show`, `put` and `apply` need a server of v0.21.0: an older one answers
+that the version must be at least 0.21.0 («нужна версия ≥ 0.21.0»). A bundle
+carries the library in the optional top-level field `instructions`, and a
+bundle directory (`clab export --dir`) in `instructions/<key>/`. A project
+that does not use it has an empty library and nothing changes.
 
 **The starter bundle is in format 3.** Each of its five roles has one
 document, `main.md`, with the text of v0.20.0 unchanged; the two cycles are
@@ -2680,13 +2729,18 @@ by hand is not overwritten, as before.
 
 **Bundles of format 3 and older servers.** A bundle exported by v0.21.0
 (`clab export`, `clab export --dir`) is in format 3, which a server of v0.20.0
-or older refuses with "bundle of version 3 is newer than supported 2",
-applying nothing. The other way works: a bundle of format 1 or 2 imports into
-v0.21.0. The new `clab` against an older server: `clab import --file` of a
+or older refuses with «связка версии 3 новее поддерживаемой 2» ("bundle of
+version 3 is newer than supported 2"), applying nothing. The other way works:
+a bundle of format 1 or 2 imports into v0.21.0. The new `clab` against an older server: `clab import --file` of a
 bundle of format 2 works, of format 3 is refused as above, and
 `clab export --dir` and `clab import --dir` do not work (the old server has no
 documents of roles to write or read); `clab export > bundle.json` still gives
 a bundle of format 2.
+
+**A known bug: `clab import` exits with 0 when the server refuses the
+bundle** (CLAB-356). The refusal, the format 3 bundle against a v0.20.0
+server included, is in the report only. In a script, read the output of
+`clab import` (`clab import --dry-run` first), not its exit code.
 
 **Rolling back.** The way back is the general one, [Upgrades and
 rollback](#upgrades-and-rollback): the database from the backup and the
