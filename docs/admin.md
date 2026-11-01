@@ -1370,7 +1370,7 @@ every status.
 
 **Marking a status.** A maintainer marks a status in the draft of a cycle.
 An initial or a final status cannot be optional: a draft that marks one
-does not activate (see the validator below). In the cycle editor, the dialog
+does not activate (see the validator below). On the page «Пайплайн», the dialog
 of a status has two switches (labelled in
 Russian in the interface): «Необязательный» ("Optional") and, once it is on,
 «Включён по умолчанию» ("Enabled by default"), which says whether a new task
@@ -1987,7 +1987,7 @@ analyst role loses nothing.
 field of a role version, so a change is a new version, made by whoever
 makes role versions (maintainer and above; a task token cannot):
 
-- the UI: the role editor, the switch "Уровень модели" ("model level") with
+- the UI: the role editor on the page «Пайплайн», the switch "Уровень модели" ("model level") with
   `авто` ("auto", no level), `low`, `medium`, `high`; saving makes a new
   version;
 - the CLI: `clab role put --key developer --name Developer --file developer.md --model-level high`.
