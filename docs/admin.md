@@ -2779,8 +2779,8 @@ clab export > before-upgrade.json     # on v0.20.0: a bundle of format 2
 
 The upgrade (`./upgrade.sh v0.21.1`, or `clab server upgrade`) needs no
 manual step: no new services, ports, volumes or variables in `.env`, and the
-starter bundle changes in one gate only (the last paragraph of this note). One
-migration runs when the service starts:
+starter bundle changes in one gate only (the last paragraph of this note). Two
+migrations run when the service starts:
 
 - `000041` rebuilds the full-text index of code. The column `tsv` of
   `code_chunks` is now computed by the function `sdlc_code_tsvector`, which
@@ -2789,6 +2789,16 @@ migration runs when the service starts:
   `context.Context` and `Button` finds `<Button variant="outline">`. The
   column is dropped and added again (PostgreSQL 15 and 16 cannot change the
   expression of a column in place), and its GIN index is created again.
+- `000042` adds a partial index on `task_events` for the approval decisions
+  (the `gate.decided` events). The count of approvals behind
+  `awaiting_approval` in the task list, the approvals queue and the gates of
+  a transition looked the whole task feed through, which made those pages
+  slow on a long feed. The migration only adds an index and rewrites
+  nothing. The migrator runs in a transaction, so the index is not built
+  concurrently: while it is built, writes of task events wait. On a feed of
+  446 thousand events it takes about 30 ms and the index is about 56 KB, so
+  the wait for the API to become ready does not change; on a very large
+  feed, plan the upgrade for a quiet moment.
 
 Nothing is lost and nothing needs to be indexed again: the column is
 computed from the text of the chunks already stored. Search by code changes
@@ -2797,7 +2807,7 @@ the name in the query is declared comes before the chunks where it is only
 used. The API, MCP and the format of the answers are the same; `clab` and
 `clab-runner` of earlier versions keep working against a v0.21.1 server.
 
-**The migration rewrites `code_chunks` under an exclusive lock**, its
+**The migration `000041` rewrites `code_chunks` under an exclusive lock**, its
 indexes included (the HNSW index of the vectors too). The API answers only
 after it, and indexing waits. How long it takes grows with the number of
 chunks; count them before the upgrade:
