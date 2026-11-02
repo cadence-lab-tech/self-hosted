@@ -280,7 +280,7 @@ jobs:
         with:
           version: v3.19.0
       - if: steps.images.outputs.skip != 'true'
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with:
           version: v0.30.0
           install_only: true
