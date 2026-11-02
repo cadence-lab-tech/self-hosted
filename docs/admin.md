@@ -2830,7 +2830,8 @@ Silicon, Docker, PostgreSQL 17 and 18), as a rough guide:
 - with vectors: about 1.7 ms a chunk - 22 830 chunks in 39 seconds - and
   more than linear once the HNSW graph no longer fits in
   `maintenance_work_mem`: 200 000 chunks with vectors can take longer than
-  the 300 seconds the upgrade waits by default.
+  the 300 seconds the `clab` of v0.21.0 waits by default (600 from
+  v0.21.1).
 
 The chunks are those of the last `SDLC_INDEX_RETAIN_RUNS` (5) index runs of
 each branch, plus the runs the tasks keep as their baseline. The index grows
@@ -2870,8 +2871,9 @@ by about a tenth (346 to 384 MB for 100 000 chunks without vectors).
 
   The upgrades run by the `clab` of v0.21.1 and later wait for a migrating
   API themselves, up to `CADENCE_READY_TIMEOUT` from the start of the stack
-  (see [Upgrades and rollback](#upgrades-and-rollback)): raise it there for
-  a long migration. The migration runs in one transaction: if it is
+  (600 s by default from v0.21.1, 300 s before; see [Upgrades and
+  rollback](#upgrades-and-rollback)): raise it there for a longer
+  migration. The migration runs in one transaction: if it is
   interrupted (the container stopped, the machine restarted), it is undone
   as a whole and runs again on the next start.
 - **In Helm**, the startup probe restarts the API after
@@ -3456,7 +3458,8 @@ needed. The script:
 6. pulls the images of the new version — if that fails, it puts the files
    back and the running stack is untouched;
 7. starts the stack (the API applies migrations itself), reloads Caddy and
-   waits for readiness (`CADENCE_READY_TIMEOUT`, 300 s), the routes of
+   waits for readiness (`CADENCE_READY_TIMEOUT`, 600 s by default from
+   v0.21.1, 300 s before), the routes of
    Caddy included from v0.16.0 (see [The UI on port 8080](#the-ui-on-port-8080));
 8. reminds to update `clab` on the machines of people and agents to the new
    version: `brew upgrade clab`, or the install script of the tap with
@@ -3533,8 +3536,9 @@ starts the worker after the API. `clab server upgrade`, `install` and
 fails while the API is still starting - a healthcheck of your own in
 `compose.override.yml`, or a migration longer than the start period - they
 say a migration may be running, wait for the API up to
-`CADENCE_READY_TIMEOUT` (300 s by default), counted from the start of the
-stack, and start the rest of the stack once it is healthy. Success is
+`CADENCE_READY_TIMEOUT` (600 s by default from v0.21.1, 300 s before),
+counted from the start of the stack, and start the rest of the stack once
+it is healthy. Success is
 printed only with the worker running. If the time runs out, they say the
 migration may still be running (`docker compose logs -f api`) and print the
 commands that finish the start; the upgrade prints its rollback too, with

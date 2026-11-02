@@ -1271,7 +1271,7 @@ else
   route_start=$SECONDS
   out="$(restore_cmd --yes "$dump" </dev/null 2>&1)" || code=$?
   check "./restore.sh with the route to ui:81 refuses to say ready: exit 1" [ "$code" = 1 ]
-  check "...before CADENCE_READY_TIMEOUT, 300 s of steps ($((SECONDS - route_start)) s with the restore)" [ $((SECONDS - route_start)) -lt 300 ]
+  check "...long before CADENCE_READY_TIMEOUT (600 s by default): under 300 s ($((SECONDS - route_start)) s with the restore)" [ $((SECONDS - route_start)) -lt 300 ]
   check "...naming the upstream ui:81" contains "$out" "the upstream ui:81 of the loaded Caddy configuration does not answer"
   check "...and / answering 502" contains "$out" "the route / through Caddy (http://localhost/ in the caddy container) answers 502"
   check "...and the fix: the route at ui:8080" contains "$out" "point the route of your Caddyfile at ui:8080"
