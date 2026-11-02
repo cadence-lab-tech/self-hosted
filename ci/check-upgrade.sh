@@ -997,16 +997,44 @@ JSON
       else
         fail "the starter bundle of $to changes the roles of $from: $again"
       fi
-      if [ "$(jq -r '[.workflows[].outcome] | unique | join(",")' <<<"$again" 2>/dev/null)" = unchanged ]; then
-        pass "...and the cycles are unchanged"
+      # A cycle of the starter changes between two releases only on purpose
+      # (v0.21.1: the pull request gate counts a merged pull request, so that a
+      # task that comes back after the merge does not wait for a waiver). An
+      # installation keeps the cycle it has: the import brings the new one as a
+      # draft, the way docs/admin.md ("Existing installations", the starter)
+      # tells to take it, and clab server starter stops on the active cycle of
+      # the project instead of replacing it. A cycle that did not change in the
+      # starter must still come out unchanged, and a changed one is the only
+      # one that may not.
+      local cycles_changed
+      cycles_changed="$(jq -rn --slurpfile a "$starter_from" --slurpfile b bundles/starter.json '
+        [$a[0].workflows[] as $x | $b[0].workflows[] | select(.name == $x.name and . != $x) | .name] | sort | join(",")')"
+      if [ -z "$cycles_changed" ]; then
+        if [ "$(jq -r '[.workflows[].outcome] | unique | join(",")' <<<"$again" 2>/dev/null)" = unchanged ]; then
+          pass "...and the cycles are unchanged"
+        else
+          fail "the starter bundle of $to changes the cycles of $from: $again"
+        fi
       else
-        fail "the starter bundle of $to changes the cycles of $from: $again"
+        info "the starter cycle changed since $from: $cycles_changed (docs/admin.md, \"Existing installations\")"
+        if [ "$(jq -r '[.workflows[] | select(.outcome != "unchanged") | .key] | sort | join(",")' <<<"$again" 2>/dev/null)" = "$cycles_changed" ] &&
+          [ "$(jq -r '[.workflows[] | select(.outcome != "unchanged") | .outcome] | unique | join(",")' <<<"$again" 2>/dev/null)" = draft_created ]; then
+          pass "...and only the changed cycle ($cycles_changed) comes as a draft; the active one in UPS is not touched"
+        else
+          fail "the starter bundle of $to must bring only $cycles_changed as a draft: $again"
+        fi
       fi
       starter_out="$("$to_clab_bin" server starter --dir "$dir" --team upgrade --project UPS 2>&1)" && starter_code=0 || starter_code=$?
-      if [ "$starter_code" = 0 ] && [ "$(grep -o 'unchanged, already active' <<<"$starter_out" | wc -l | tr -d ' ')" = 2 ]; then
-        pass "clab server starter of $to after the upgrade changes nothing in UPS: both cycles unchanged, already active"
+      if [ -z "$cycles_changed" ]; then
+        if [ "$starter_code" = 0 ] && [ "$(grep -o 'unchanged, already active' <<<"$starter_out" | wc -l | tr -d ' ')" = 2 ]; then
+          pass "clab server starter of $to after the upgrade changes nothing in UPS: both cycles unchanged, already active"
+        else
+          fail "clab server starter of $to after the upgrade: exit $starter_code, $starter_out"
+        fi
+      elif [ "$starter_code" != 0 ] && grep -qF "already runs its own active workflow" <<<"$starter_out"; then
+        pass "clab server starter of $to stops on the active cycle of UPS and changes nothing (the changed starter cycle is taken by hand)"
       else
-        fail "clab server starter of $to after the upgrade: exit $starter_code, $starter_out"
+        fail "clab server starter of $to must stop on the active cycle of UPS: exit $starter_code, $starter_out"
       fi
       if grep -qF "$admin_token" <<<"$starter_out"; then fail "clab server starter prints the token"; fi
       # A role edited by hand is not overwritten: the command refuses and
