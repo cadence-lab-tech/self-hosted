@@ -329,12 +329,15 @@
             },
             {
               "key": "pull_request",
-              "name": "Open pull request linked in every repository of the task",
+              "name": "Pull request, open or merged, linked in every repository of the task",
               "type": "repo_ref_required",
               "config": {
                 "ref_type": "pull_request",
                 "min_count": 1,
-                "require_open": true,
+                "states": [
+                  "open",
+                  "merged"
+                ],
                 "per_repository": true
               },
               "blocking": true

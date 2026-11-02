@@ -1185,7 +1185,7 @@ status; a transition to the next status is closed by gates:
 |---|---|---|---|
 | New | — | Start | the tasks that block this one are closed (`clab relate A --to B --rel blocks`) |
 | Analysis | `analyst` | Analysis done | `analysis.brief` and `analysis.acceptance_criteria` submitted; a human approval |
-| Development | `developer` | Development done | `dev.change_summary` and `dev.test_report` submitted; an open pull request linked in every repository of the task |
+| Development | `developer` | Development done | `dev.change_summary` and `dev.test_report` submitted; a pull request, open or merged, linked in every repository of the task |
 | Review | `reviewer` | Review passed | `review.verdict` submitted and its `verdict` is `pass` |
 | QA | `qa` | QA passed | `qa.report` submitted; a human approval |
 | Done, Cancelled | — | | |
@@ -1208,6 +1208,26 @@ the pull request, drift of the code base under the task): it works on an
 instance without one. The pull request gate only needs the link to the
 pull request, which the agent sets (`clab link`, or `sdlc_link_repo_ref`
 over MCP).
+
+**The pull request gate counts open and merged pull requests** (from
+v0.21.1). The gate of "Development done" is of the type `repo_ref_required`
+with `"states": ["open","merged"]`: a pull request in either state counts,
+one closed or declined without a merge does not, and a pull request whose
+state has not been synchronized yet (an instance without access to GitHub)
+counts as open. Before v0.21.1 the gate said `"require_open": true`, which
+refuses a merged pull request. For a task that only goes forward through the
+starter this changes nothing: the pull request is merged after QA. It
+matters in a cycle of your own that can send a task back from a status after
+the merge (a failed rollout, a check of the merged code): the pull request is
+merged by then, and a gate that counts only open ones holds the task until a
+person waives it. The price of `["open","merged"]` is that the gate also lets
+through a pull request that someone merged before the review; the review and
+QA statuses of the starter are the check for that. To keep the stricter rule,
+put `"require_open": true` back in place of `states` in a draft of the cycle
+(never both: the draft is refused with `repo_ref_states_invalid`), as
+described below. The parameters of the gate - `ref_type`, `min_count`,
+`per_repository`, `states` - are described in the skill `clab-rules` of the
+agent kit.
 
 **Making it yours.** Roles and cycles are data of the project, not code.
 Edit them in the UI, on the page «Пайплайн» ("Pipeline", `/p/<key>/pipeline`;
@@ -2759,7 +2779,8 @@ clab export > before-upgrade.json     # on v0.20.0: a bundle of format 2
 
 The upgrade (`./upgrade.sh v0.21.1`, or `clab server upgrade`) needs no
 manual step: no new services, ports, volumes or variables in `.env`, and the
-starter bundle is not changed. Three migrations run when the service starts:
+starter bundle changes in one gate only (the last paragraph of this note).
+Three migrations run when the service starts:
 
 - `000041` rebuilds the full-text index of code. The column `tsv` of
   `code_chunks` is now computed by the function `sdlc_code_tsvector`, which
@@ -2892,6 +2913,24 @@ by about a tenth (346 to 384 MB for 100 000 chunks without vectors).
 **Rolling back.** The way back is the general one, [Upgrades and
 rollback](#upgrades-and-rollback): the database from the backup and the
 package of the old version.
+
+**The one change of the starter bundle: the pull request gate.** The gate "Development done" of the cycle "Starter" counts a merged
+pull request as well as an open one (`"states": ["open","merged"]` in place of
+`"require_open": true`), so that a task that comes back after the pull
+requests were merged does not stand at a gate that no open pull request can
+open; see [What the starter contains](#first-cycle-and-roles). The upgrade changes no cycle of an
+installation: a project set up from the starter keeps the cycle it has, and
+needs nothing if its tasks only go forward. To take the new gate, apply the
+new starter by hand, as for the attempts limit ([Existing
+installations](#attempts-limit)): `clab import --file bundles/starter.json
+--dry-run`, then `clab import --file bundles/starter.json` and `clab workflow
+activate <id of the new draft of Starter>`; roles and "Starter epics" report
+`unchanged`. `clab server starter` stops on such a project ("already runs its
+own active workflow") and changes nothing. Tasks in progress finish on the
+version of the cycle they started on; tasks nobody has picked up move to the
+new one. A cycle of your own that has the gate `require_open` and a way back
+from a status after the merge needs the same edit; the parameters are in the
+skill `clab-rules` of the agent kit.
 
 ## Stage limits
 
