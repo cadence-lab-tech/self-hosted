@@ -377,6 +377,13 @@ JSON
   local starter_from="" starter_roles=""
   if [ -f bundles/starter.json ]; then
     starter_from="$(starter_for_server "$from" "$work/starter-from.json")"
+    # starter_for_server prints the relative bundles/starter.json for a package
+    # that already has the format the server takes: after the upgrade that path
+    # is the bundle of TO. Keep the bundle of FROM in $work, before it.
+    if [ "$starter_from" != "$work/starter-from.json" ]; then
+      cp "$starter_from" "$work/starter-from.json"
+      starter_from="$work/starter-from.json"
+    fi
     "$clab" --host "$base" project create UPS --name "Upgrade check, starter" --team upgrade >/dev/null
     SDLC_PROJECT=UPS "$clab" --host "$base" import --file "$starter_from" >/dev/null
     local draft

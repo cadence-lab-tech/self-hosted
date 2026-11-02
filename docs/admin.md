@@ -2779,7 +2779,8 @@ clab export > before-upgrade.json     # on v0.20.0: a bundle of format 2
 
 The upgrade (`./upgrade.sh v0.21.1`, or `clab server upgrade`) needs no
 manual step: no new services, ports, volumes or variables in `.env`, and the
-starter bundle is not changed. One migration runs when the service starts:
+starter bundle changes in one gate only (the last paragraph of this note). One
+migration runs when the service starts:
 
 - `000041` rebuilds the full-text index of code. The column `tsv` of
   `code_chunks` is now computed by the function `sdlc_code_tsvector`, which
@@ -2847,8 +2848,7 @@ by about a tenth (346 to 384 MB for 100 000 chunks without vectors).
 rollback](#upgrades-and-rollback): the database from the backup and the
 package of the old version.
 
-**One exception to "the starter bundle is not changed": the pull request
-gate.** The gate "Development done" of the cycle "Starter" counts a merged
+**The one change of the starter bundle: the pull request gate.** The gate "Development done" of the cycle "Starter" counts a merged
 pull request as well as an open one (`"states": ["open","merged"]` in place of
 `"require_open": true`), so that a task that comes back after the pull
 requests were merged does not stand at a gate that no open pull request can
