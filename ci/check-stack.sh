@@ -45,6 +45,12 @@
 # Caddy answers 200 with a cursor after 3-5 s, in the images of v0.19.0 and
 # later and on images of a branch (a pin variable set).
 #
+# A long migration (CLAB-369, bundled database): with schema_migrations held
+# for CHECK_MIGRATION_SECONDS (90) the migrator of the API waits as in a long
+# migration, and docker compose up -d --force-recreate api worker waits it
+# out - longer than the 45 s after which the healthcheck of v0.21.0 called
+# the API unhealthy - and starts the worker.
+#
 # The routes of Caddy (CLAB-267): the admin API of Caddy lists the upstreams
 # of the Caddyfile of the package; a Caddyfile of the administrator routing
 # to ui:81, mounted by compose.override.yml, makes the site answer 502, and
@@ -77,6 +83,8 @@
 #                         or relative to where the check is started; unset or
 #                         empty - the clab of the tap, as before
 #   CHECK_KEEP=1          leave the stack (and its directory) after the check
+#   CHECK_MIGRATION_SECONDS  how long the long migration holds
+#                         schema_migrations, default 90
 #   CHECK_DB              bundled (default) - the postgres container of the
 #                         stack; external - a stand-in for the PostgreSQL of
 #                         a customer (ci/external-db.sh: a pgvector container
@@ -1047,6 +1055,39 @@ if [ "$db" = bundled ]; then
   check "...with the tasks created before" contains "$(env SDLC_PROJECT=CHECK "$clab" --host "$base" show CHECK-3 --json 2>/dev/null)" '"Second task"'
   bundled_db_checks "after down and up"
   if [ "$attach_on" = true ]; then attachment_is_back_or_fail "after down and up"; fi
+
+  # --- a migration longer than the old healthcheck (CLAB-369) ------------------------------------
+  # The API migrates at start and answers /readyz only after; 000041 of
+  # v0.21.1 can take minutes. With the healthcheck of v0.21.0 (start_period
+  # 20 s) the API was unhealthy after about 45 s, and `up -d` failed on the
+  # worker (depends_on: service_healthy), leaving it created but not
+  # started. A transaction holding schema_migrations makes the migrator wait
+  # as a long migration would; `up -d` has to wait it out and start the
+  # worker.
+  slow="${CHECK_MIGRATION_SECONDS:-90}"
+  info "a migration of ${slow} s: docker compose up -d --force-recreate api worker"
+  docker compose exec -T postgres psql -X -q -U "${POSTGRES_USER:-sdlc}" -d "${POSTGRES_DB:-sdlc}" \
+    -c "BEGIN; LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep($slow); COMMIT;" >/dev/null 2>&1 &
+  slow_lock=$!
+  slow_held=false
+  for _ in $(seq 1 30); do
+    if [ "$(pg_sql "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'schema_migrations' AND l.mode = 'AccessExclusiveLock' AND l.granted" 2>/dev/null)" = 1 ]; then
+      slow_held=true
+      break
+    fi
+    sleep 1
+  done
+  check "...schema_migrations is held for the migrator" [ "$slow_held" = true ]
+  slow_start=$SECONDS
+  slow_code=0
+  docker compose up -d --force-recreate api worker >"$work/slow-up.log" 2>&1 || slow_code=$?
+  slow_took=$((SECONDS - slow_start))
+  wait "$slow_lock" || true
+  [ "$slow_code" = 0 ] || cat "$work/slow-up.log" >&2
+  check "...up -d exits 0 (got $slow_code after $slow_took s)" [ "$slow_code" = 0 ]
+  check "...it waited for the migration, longer than the old 45 s" [ "$slow_took" -ge 45 ]
+  check "...the worker runs" [ -n "$(docker compose ps -q --status running worker)" ]
+  check "...the stack is ready" wait_ready 180
 fi
 
 # --- clab server -------------------------------------------------------------------------------------
