@@ -36,7 +36,9 @@ public address of your proxy in the `proxy` mode.
   [upgrading to v0.17.0](#upgrading-to-v0170),
   [upgrading to v0.18.0](#upgrading-to-v0180),
   [upgrading to v0.19.0](#upgrading-to-v0190),
-  [upgrading to v0.20.0](#upgrading-to-v0200))
+  [upgrading to v0.20.0](#upgrading-to-v0200),
+  [upgrading to v0.21.0](#upgrading-to-v0210),
+  [upgrading to v0.21.1](#upgrading-to-v0211))
 - [Stage limits](#stage-limits): reviews and the time of a stage
 - [Embeddings](#embeddings)
 - [Attachments](#attachments): the file limit, time limits, your proxy,
@@ -2752,6 +2754,78 @@ them before the upgrade:
 ```bash
 clab export > before-upgrade.json     # on v0.20.0: a bundle of format 2
 ```
+
+### Upgrading to v0.21.1
+
+The upgrade (`./upgrade.sh v0.21.1`, or `clab server upgrade`) needs no
+manual step: no new services, ports, volumes or variables in `.env`, and the
+starter bundle is not changed. One migration runs when the service starts:
+
+- `000041` rebuilds the full-text index of code. The column `tsv` of
+  `code_chunks` is now computed by the function `sdlc_code_tsvector`, which
+  also indexes the parts of dotted names and of JSX tags, so that a search
+  for `RevokeRunTokens` finds `e.store.RevokeRunTokens(...)`, `Context` finds
+  `context.Context` and `Button` finds `<Button variant="outline">`. The
+  column is dropped and added again (PostgreSQL 15 and 16 cannot change the
+  expression of a column in place), and its GIN index is created again.
+
+Nothing is lost and nothing needs to be indexed again: the column is
+computed from the text of the chunks already stored. Search by code changes
+only in what it finds and in the order: in the full-text half, a chunk where
+the name in the query is declared comes before the chunks where it is only
+used. The API, MCP and the format of the answers are the same; `clab` and
+`clab-runner` of earlier versions keep working against a v0.21.1 server.
+
+**The migration rewrites `code_chunks` under an exclusive lock**, its
+indexes included (the HNSW index of the vectors too). The API answers only
+after it, and indexing waits. How long it takes grows with the number of
+chunks; count them before the upgrade:
+
+```bash
+export CADENCE_VERSION=$(cat VERSION)
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -c "SELECT count(*), count(embedding), pg_size_pretty(pg_total_relation_size(\$\$code_chunks\$\$)) FROM code_chunks"'
+```
+
+The first number is all chunks, the second those with vectors, the third
+the size of the table with its indexes. Measured on one machine (Apple
+Silicon, Docker, PostgreSQL 17 and 18), as a rough guide:
+
+- without vectors (no embeddings provider): about 0.33 ms a chunk -
+  100 000 chunks in about 35 seconds, a million in 5-6 minutes;
+- with vectors: about 1.7 ms a chunk - 22 830 chunks in 39 seconds - and
+  more than linear once the HNSW graph no longer fits in
+  `maintenance_work_mem`: 200 000 chunks with vectors can take longer than
+  the 300 seconds the upgrade waits by default.
+
+The chunks are those of the last `SDLC_INDEX_RETAIN_RUNS` (5) index runs of
+each branch, plus the runs the tasks keep as their baseline. The index grows
+by about a tenth (346 to 384 MB for 100 000 chunks without vectors).
+
+- **Give the upgrade time.** If the count is large, raise the wait:
+  `CADENCE_READY_TIMEOUT=1800 ./upgrade.sh v0.21.1` (or the variable in
+  `.env`; the same for `clab server upgrade`). If the wait runs out, the
+  upgrade prints the commands to roll back while the migration is still
+  running: do not run them, follow `docker compose logs -f api` until the
+  API logs the migration as applied and `/readyz` answers. The migration
+  runs in one transaction: if it is interrupted (the container stopped, the
+  machine restarted), it is undone as a whole and runs again on the next
+  start.
+- **In Helm**, the startup probe restarts the API after
+  `api.startupProbe.failureThreshold` x `api.startupProbe.periodSeconds`
+  (ten minutes by default), and a restart undoes the migration. For a long
+  one raise the threshold for this upgrade, e.g.
+  `--set api.startupProbe.failureThreshold=360` (30 minutes), and the
+  `--timeout` of `helm upgrade` with it.
+- **Free disk.** The rewrite writes a new copy of `code_chunks` and its
+  indexes before the old one is removed: keep free at least the size the
+  query above prints, on top of the backup the upgrade takes.
+- An [external database](#external-postgresql) of PostgreSQL 15-18 takes
+  the migration as it is. A dump of a v0.21.1 database restores as before:
+  the column is computed again while it loads.
+
+**Rolling back.** The way back is the general one, [Upgrades and
+rollback](#upgrades-and-rollback): the database from the backup and the
+package of the old version.
 
 ## Stage limits
 
