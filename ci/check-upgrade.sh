@@ -1005,7 +1005,7 @@ JSON
         fail "the starter bundle of $to changes the roles of $from: $again"
       fi
       # A cycle of the starter changes between two releases only on purpose
-      # (v0.21.1: the pull request gate counts a merged pull request, so that a
+      # (v0.22.0: the pull request gate counts a merged pull request, so that a
       # task that comes back after the merge does not wait for a waiver). An
       # installation keeps the cycle it has: the import brings the new one as a
       # draft, the way docs/admin.md ("Existing installations", the starter)

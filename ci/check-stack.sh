@@ -1058,7 +1058,7 @@ if [ "$db" = bundled ]; then
 
   # --- a migration longer than the old healthcheck (CLAB-369) ------------------------------------
   # The API migrates at start and answers /readyz only after; 000041 of
-  # v0.21.1 can take minutes. With the healthcheck of v0.21.0 (start_period
+  # v0.22.0 can take minutes. With the healthcheck of v0.21.0 (start_period
   # 20 s) the API was unhealthy after about 45 s, and `up -d` failed on the
   # worker (depends_on: service_healthy), leaving it created but not
   # started. A transaction holding schema_migrations makes the migrator wait
