@@ -2779,8 +2779,8 @@ clab export > before-upgrade.json     # on v0.20.0: a bundle of format 2
 
 The upgrade (`./upgrade.sh v0.21.1`, or `clab server upgrade`) needs no
 manual step: no new services, ports, volumes or variables in `.env`, and the
-starter bundle changes in one gate only (the last paragraph of this note). Two
-migrations run when the service starts:
+starter bundle changes in one gate only (the last paragraph of this note).
+Three migrations run when the service starts:
 
 - `000041` rebuilds the full-text index of code. The column `tsv` of
   `code_chunks` is now computed by the function `sdlc_code_tsvector`, which
@@ -2799,13 +2799,38 @@ migrations run when the service starts:
   446 thousand events it takes about 30 ms and the index is about 56 KB, so
   the wait for the API to become ready does not change; on a very large
   feed, plan the upgrade for a quiet moment.
+- `000043` adds the column `symbols_version` to `code_files`: the version of
+  the extraction of symbols a file of the code index was indexed with (see
+  below). A column with a constant default changes only the catalog: the
+  migration takes no time, whatever the size of the index.
 
 Nothing is lost and nothing needs to be indexed again: the column is
 computed from the text of the chunks already stored. Search by code changes
-only in what it finds and in the order: in the full-text half, a chunk where
+only in what it finds and in the order. In the full-text half, a chunk where
 the name in the query is declared comes before the chunks where it is only
-used. The API, MCP and the format of the answers are the same; `clab` and
+used; among the declarations, a name with the case of the query comes first
+(`listAttachments` finds `listAttachments` before `ListAttachments`, which
+it still finds), and within each step declarations in test files come after
+those of other files. A test file is told by its path: `*_test.go`,
+`*.test.*`, `*.spec.*`, `test_*.py`, `*_test.py`, and anything under a
+directory `testdata/`, `__tests__/`, `test/`, `tests/`, `e2e/` or
+`fixtures/`. The API, MCP and the format of the answers are the same; `clab` and
 `clab-runner` of earlier versions keep working against a v0.21.1 server.
+
+**The first index run of each branch after the upgrade is heavier, once.**
+A declaration inside a multi-line string literal (a raw string of Go, a
+template string of TypeScript and JavaScript, a triple-quoted string of
+Python) and a heading inside a fenced code block of Markdown are no longer
+symbols: a test fixture no longer cuts the file into chunks under a false
+name and no longer comes first in a search for that name. A file that did
+not change in the new commit is not copied from the previous run as usual
+while it was indexed by the old extraction: its symbols and chunks are
+computed again from the content already stored, without downloading it.
+Such a file adds no change to the index feed and no drift signal; chunks
+with the same text keep their vectors, and with an embeddings provider only
+the chunks with new text (around a false symbol that is gone) are embedded.
+The next run copies the files as before. A branch without a new commit
+keeps the old symbols until its next commit. Nothing to do by hand.
 
 **The migration `000041` rewrites `code_chunks` under an exclusive lock**, its
 indexes included (the HNSW index of the vectors too). The API answers only
@@ -2826,21 +2851,52 @@ Silicon, Docker, PostgreSQL 17 and 18), as a rough guide:
 - with vectors: about 1.7 ms a chunk - 22 830 chunks in 39 seconds - and
   more than linear once the HNSW graph no longer fits in
   `maintenance_work_mem`: 200 000 chunks with vectors can take longer than
-  the 300 seconds the upgrade waits by default.
+  the 300 seconds the `clab` of v0.21.0 waits by default (600 from
+  v0.21.1).
 
 The chunks are those of the last `SDLC_INDEX_RETAIN_RUNS` (5) index runs of
 each branch, plus the runs the tasks keep as their baseline. The index grows
 by about a tenth (346 to 384 MB for 100 000 chunks without vectors).
 
-- **Give the upgrade time.** If the count is large, raise the wait:
-  `CADENCE_READY_TIMEOUT=1800 ./upgrade.sh v0.21.1` (or the variable in
-  `.env`; the same for `clab server upgrade`). If the wait runs out, the
-  upgrade prints the commands to roll back while the migration is still
-  running: do not run them, follow `docker compose logs -f api` until the
-  API logs the migration as applied and `/readyz` answers. The migration
-  runs in one transaction: if it is interrupted (the container stopped, the
-  machine restarted), it is undone as a whole and runs again on the next
-  start.
+- **The upgrade waits for the migration.** The healthcheck of the API in
+  the `docker-compose.yml` of v0.21.1 does not call the API unhealthy for
+  its first 30 minutes (`start_period: 1800s`; in v0.21.0 it did after
+  about 45 seconds), and the files of the new package are in place before
+  the stack starts. So `docker compose up -d` of the upgrade from v0.21.0
+  waits for `000041` and starts the worker after it, though the upgrade is
+  run by the `clab` of v0.21.0, which counts `CADENCE_READY_TIMEOUT` only
+  after `up -d`: for this upgrade the variable does not need raising. For a
+  migration that may take longer than 30 minutes (hundreds of thousands of
+  chunks with vectors), give the API more before the upgrade, in
+  `compose.override.yml`, which the upgrade keeps:
+
+  ```yaml
+  services:
+    api:
+      healthcheck:
+        start_period: 3600s
+  ```
+
+  If `up -d` fails anyway, the `clab` of v0.21.0 prints `docker compose up
+  failed for v0.21.1` and the commands to roll back while the migration may
+  still be running: **do not run them** unless the API has failed (an error
+  in its log). Follow `docker compose logs -f api` until the API logs the
+  migration as applied and `/readyz` answers, then start the rest of the
+  stack, the worker included:
+
+  ```bash
+  export CADENCE_VERSION=$(cat VERSION)
+  docker compose up -d --remove-orphans
+  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+  ```
+
+  The upgrades run by the `clab` of v0.21.1 and later wait for a migrating
+  API themselves, up to `CADENCE_READY_TIMEOUT` from the start of the stack
+  (600 s by default from v0.21.1, 300 s before; see [Upgrades and
+  rollback](#upgrades-and-rollback)): raise it there for a longer
+  migration. The migration runs in one transaction: if it is
+  interrupted (the container stopped, the machine restarted), it is undone
+  as a whole and runs again on the next start.
 - **In Helm**, the startup probe restarts the API after
   `api.startupProbe.failureThreshold` x `api.startupProbe.periodSeconds`
   (ten minutes by default), and a restart undoes the migration. For a long
@@ -3441,7 +3497,8 @@ needed. The script:
 6. pulls the images of the new version — if that fails, it puts the files
    back and the running stack is untouched;
 7. starts the stack (the API applies migrations itself), reloads Caddy and
-   waits for readiness (`CADENCE_READY_TIMEOUT`, 300 s), the routes of
+   waits for readiness (`CADENCE_READY_TIMEOUT`, 600 s by default from
+   v0.21.1, 300 s before), the routes of
    Caddy included from v0.16.0 (see [The UI on port 8080](#the-ui-on-port-8080));
 8. reminds to update `clab` on the machines of people and agents to the new
    version: `brew upgrade clab`, or the install script of the tap with
@@ -3508,6 +3565,34 @@ example: `000033` of v0.18.0 (attachments), with what stays in the volume or
 the bucket, in [Upgrading to v0.18.0](#upgrading-to-v0180). Keep the backup
 until you are sure of the new version. With the Helm chart the same: restore
 the database and the bucket, then install the chart of the old version.
+
+**A long migration.** The API applies the migrations of the new version
+when it starts and answers `/readyz` only after them. The healthcheck of the
+API in `docker-compose.yml` gives it 30 minutes (`start_period`, from
+v0.21.1) before it calls it unhealthy, so `docker compose up -d` waits and
+starts the worker after the API. `clab server upgrade`, `install` and
+`restore` (and the scripts, which run them) do more: if `up -d` fails while
+the API is still starting - a healthcheck of your own in
+`compose.override.yml`, or a migration longer than the start period - they
+say a migration may be running, wait for the API and start the rest of the
+stack once it is healthy. Their whole start, `up -d` included, is bounded
+by `CADENCE_READY_TIMEOUT` (600 s by default from v0.21.1, 300 s before),
+counted from the start of the stack: with the default, a migration longer
+than 10 minutes ends as below, though the healthcheck would wait longer.
+Success is
+printed only with the worker running. If the time runs out, they say the
+migration may still be running (`docker compose logs -f api`) and print the
+commands that finish the start; the upgrade prints its rollback too, with
+the caveat that it is for an API that has failed, not for one that is still
+migrating. Expect a long migration (the note of a release says so) - raise
+`CADENCE_READY_TIMEOUT` in `.env` or for one command, e.g.
+`CADENCE_READY_TIMEOUT=1800 ./upgrade.sh`. An `up -d` that fails for another
+reason (the API exits or restarts, a port is taken, an image is missing)
+fails at once, as before. `install` and `restore` behave so from v0.21.1
+(the `clab` of the package); `upgrade` runs the `clab` of the version it
+starts from, so from upgrades out of v0.21.1 on - the upgrade to v0.21.1
+itself relies on the healthcheck of its package (see [Upgrading to
+v0.21.1](#upgrading-to-v0211)).
 
 Releases are published as GitHub Releases of this repository; watch it
 (Releases and Security alerts) to hear about them and about security fixes

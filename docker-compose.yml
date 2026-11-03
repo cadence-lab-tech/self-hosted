@@ -229,7 +229,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      # The API answers /readyz only after its migrations, and a migration
+      # can take minutes (000041 of v0.21.1 grows with the code index). With
+      # 20 s the API was unhealthy after about 45 s, `up -d` failed on the
+      # worker below (depends_on: service_healthy) and left it created but
+      # not started. Failed probes in the start period do not count and the
+      # first passing one makes the API healthy at once, so a normal start
+      # takes as long as before; an API that exits is seen by compose
+      # anyway. 1800 s is the wait docs/admin.md names for a long 000041
+      # ("Upgrading to v0.21.1"). No start_interval: the package supports
+      # Docker Engine 24, and start_interval needs 25.
+      start_period: 1800s
 
   # Background jobs: leases, repository indexing with drift detection, pull
   # request state, embeddings. Same image, another entrypoint; it does not
