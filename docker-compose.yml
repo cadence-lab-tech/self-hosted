@@ -39,14 +39,14 @@ name: cadence
 # CADENCE_VERSION: older Compose v2 - seen on v2.3 and v2.6 - reads it as a
 # default value when another variable follows.)
 x-image-backend: &image-backend
-  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_BACKEND_DIGEST-@sha256:3414195ff060876d0fcf331d3e2b090481450d09d92b661a6d251ec21cb75750}
+  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-backend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_BACKEND_DIGEST-@sha256:2978c450df9adeaed1b9bdf7b9b02c7810d618019b614604c01c61ba78297705}
 
 # The frontend image runs two services: ui (the static files) and caddy (the
 # entry point). Its Caddy is built from source on a current Go (docs/admin.md,
 # "Known scanner findings"), so what faces the internet is pinned, signed and
 # verified together with the release, like the API.
 x-image-frontend: &image-frontend
-  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_FRONTEND_DIGEST-@sha256:9acaf763e3f532f47c3c8aec02636199a182ca38bee9418c98e1dc43ac77c212}
+  image: ${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}/sdlc-pipeline-frontend:${CADENCE_VERSION:?CADENCE_VERSION is not set, use the scripts in this directory or export it from the VERSION file}${CADENCE_FRONTEND_DIGEST-@sha256:0312e57d306f2ac4fe1e56571827d69c5bba3f8467ba4a58e7ef8f07ae44d981}
 
 # Settings the API and the worker must agree on.
 #
