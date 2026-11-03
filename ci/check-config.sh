@@ -684,6 +684,36 @@ retention() { env -u SDLC_AUDIT_RETENTION_DAYS "$@" POSTGRES_PASSWORD=x CADENCE_
 check "the worker gets SDLC_AUDIT_RETENTION_DAYS=180 without the line in .env" [ "$(retention)" = "180" ]
 check "SDLC_AUDIT_RETENTION_DAYS of .env reaches the worker" [ "$(retention SDLC_AUDIT_RETENTION_DAYS=30)" = "30" ]
 
+# Polling periods (CLAB-395): webhooks are optional, the worker polls GitHub
+# on these periods. An .env written before the variables existed gets the
+# defaults of the service: empty SDLC_REPO_REF_SYNC_INTERVAL follows
+# SDLC_INDEX_INTERVAL, which is how the PR state was synced before. The
+# defaults of compose and the chart are the same (the parity below); the
+# service reads an empty value as its default, so neither breaks the start.
+info "polling periods"
+poll_vars="SDLC_INDEX_INTERVAL SDLC_INDEX_POLL_INTERVAL SDLC_REPO_REF_SYNC_INTERVAL SDLC_INSTALLATION_SYNC_INTERVAL"
+poll_env() {
+  local unset=()
+  for v in $poll_vars; do unset+=(-u "$v"); done
+  env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST "${unset[@]}" "$@" \
+    POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose config --format json |
+    jq -r --arg vars "$poll_vars" '.services.worker.environment as $e | [$vars | split(" ")[] | "\(.)=\($e[.] // "<none>")"] | join(" ")'
+}
+check "the worker gets the polling defaults without .env" \
+  [ "$(poll_env)" = "SDLC_INDEX_INTERVAL=5m SDLC_INDEX_POLL_INTERVAL=15s SDLC_REPO_REF_SYNC_INTERVAL= SDLC_INSTALLATION_SYNC_INTERVAL=5m" ]
+check "the polling periods of .env reach the worker" \
+  [ "$(poll_env SDLC_REPO_REF_SYNC_INTERVAL=1m SDLC_INSTALLATION_SYNC_INTERVAL=10m)" = "SDLC_INDEX_INTERVAL=5m SDLC_INDEX_POLL_INTERVAL=15s SDLC_REPO_REF_SYNC_INTERVAL=1m SDLC_INSTALLATION_SYNC_INTERVAL=10m" ]
+for v in $poll_vars; do
+  check ".env.example documents $v, commented out" grep -qE "^# $v=" .env.example
+  check ".env.example does not set $v" lacks "$(grep -v '^#' <<<"$env_example")" "$v="
+  check "docs/admin.md describes $v" grep -qF "\`$v\`" docs/admin.md
+done
+check "docs/admin.md has the table of webhooks and polling" contains "$admin" "### Webhooks and polling"
+check "the job installation_sync is in the alert rules of docs/admin.md" contains "$admin" 'job="installation_sync"'
+for f in README.md docs/admin.md; do
+  check "$f does not make the webhook a requirement" bash -c "! grep -nE 'has to reach|let GitHub reach' $f"
+done
+
 # Traces of the API over OTLP/HTTP (since v0.12.0): the standard OTEL_* go to
 # the API only - the worker is not traced - and are empty by default, so an
 # installation exports nothing until .env sets an endpoint. .env.example

@@ -136,8 +136,10 @@ verified offline:
 | Database | none: the stack runs PostgreSQL 18 with pgvector (an installation on PostgreSQL 17 [moves](docs/admin.md#postgresql-18) on its upgrade) | your own PostgreSQL 15-18 with pgvector 0.5+ and pgcrypto, and Docker Compose 2.20+ ([external PostgreSQL](docs/admin.md#external-postgresql)) |
 | Network | `tls`: ports 80 and 443 from the internet; `proxy`: one port for your proxy | outbound HTTPS to `ghcr.io`, GitHub and your embeddings provider, if any |
 
-GitHub has to reach `https://<host>/webhooks/github` if you connect a GitHub
-App.
+GitHub webhooks are optional: with a GitHub App, deliveries to
+`https://<host>/webhooks/github` cut the delay from minutes to seconds, and
+without them the worker polls GitHub
+([Webhooks and polling](docs/admin.md#webhooks-and-polling)).
 
 ## Evaluating on a laptop
 

@@ -334,8 +334,10 @@ terminates TLS and forwards everything for `<host>` there. It must:
   [Waiting for an approval](#waiting-for-an-approval)). A proxy that cuts
   earlier loses nothing — the client asks again — but it makes more
   requests;
-- let GitHub reach `https://<host>/webhooks/github` from the internet if you
-  connect a GitHub App, even if the rest of the instance is internal-only;
+- if you use GitHub webhooks, keep `https://<host>/webhooks/github`
+  reachable from GitHub, even if the rest of the instance is internal-only.
+  Webhooks are optional: without them the worker polls GitHub, minutes
+  instead of seconds ([Webhooks and polling](#webhooks-and-polling));
 - **take a request body of `2 x SDLC_BLOB_MAX_BYTES + 1 MiB`** and keep a
   slow upload and download open: nginx stops a body above
   `client_max_body_size` (1 MiB unless set) with `413` and a connection that
@@ -1577,6 +1579,14 @@ Without a GitHub App the instance works — tasks, artifacts, the cycle, gates
 and approvals — but it does not index code, does not follow pull requests and
 receives no webhooks. Pull requests can still be linked to tasks by hand.
 
+Webhooks are an option of the app, not a requirement: the worker polls
+GitHub for everything it needs — branch heads, pull requests and their
+checks, the installations of the app and their repositories. A webhook only
+cuts the delay from minutes to seconds. An instance GitHub cannot reach
+turns the webhook off in step 4; what that costs is in
+[Webhooks and polling](#webhooks-and-polling). Signing in with GitHub never
+uses a webhook: it is a browser redirect to `/login/github`.
+
 One app serves the whole instance. It reads repositories with installation
 tokens and lets people sign in with GitHub. Create it in your GitHub
 organization: **Settings → Developer settings → GitHub Apps → New GitHub
@@ -1589,14 +1599,16 @@ App**.
    - Leave "Request user authorization (OAuth) during installation" off.
 3. **Post installation:** Setup URL `https://<host>/settings/github/callback`,
    with **Redirect on update** on.
-4. **Webhook:** active, URL `https://<host>/webhooks/github`, secret — the
-   value of `SDLC_GITHUB_WEBHOOK_SECRET` from `.env` (`install.sh` generated
-   it).
+4. **Webhook (optional):** active, URL `https://<host>/webhooks/github`,
+   secret — the value of `SDLC_GITHUB_WEBHOOK_SECRET` from `.env`
+   (`install.sh` generated it). If GitHub cannot reach the instance, leave
+   **Active** off: the worker polls instead
+   ([Webhooks and polling](#webhooks-and-polling)).
 5. **Repository permissions, read-only:** Contents: Read, Metadata: Read,
    Pull requests: Read, Checks: Read. Nothing else, and no write access:
    Cadence Lab never writes to your repositories.
-6. **Subscribe to events:** Push, Pull request, Check run. Installation events
-   come without a subscription.
+6. **Subscribe to events** (with the webhook on): Push, Pull request, Check
+   run. Installation events come without a subscription.
 7. **Where can this app be installed:** "Only on this account" is enough for
    one organization.
 
@@ -1637,6 +1649,75 @@ repository; the installation is found automatically.
 
 The machine clock must be right: GitHub rejects app tokens signed "in the
 future" with `Bad credentials`, which looks exactly like a revoked key.
+
+### Webhooks and polling
+
+The worker reads GitHub on its own periods; a webhook delivery only tells it
+to look now. Nothing is lost without webhooks, it comes later:
+
+| Event on GitHub | With the webhook | Without it, the worker notices on | Delay without it (defaults) |
+|---|---|---|---|
+| `push` to a watched branch | queued at once, indexed within `SDLC_INDEX_POLL_INTERVAL` | the next pass over branch heads, `SDLC_INDEX_INTERVAL` | up to 5 min plus the pass |
+| `pull_request` opened, updated, merged, closed | state of the linked PR at once | the next sync of pull requests, `SDLC_REPO_REF_SYNC_INTERVAL` | up to 5 min; 50 pull requests a pass, the least recently read first |
+| `check_run`, `check_suite`, `status` | checks of the PR read on the next sync | the same sync of pull requests | up to 5 min |
+| `installation`: app uninstalled, suspended, unsuspended | installation marked at once | the next poll of installations, `SDLC_INSTALLATION_SYNC_INTERVAL` | up to 5 min |
+| `installation_repositories`: repository removed from the app or added back | repository marked at once | the same poll of installations | up to 5 min |
+
+Limits that are the same with and without webhooks, or only without them:
+
+- A pull request is read until it is closed or merged. A closed pull request
+  that is reopened is seen only by the `pull_request` webhook.
+- Polling needs indexing on (`SDLC_INDEX_ENABLED=true`, the default) for
+  branches and pull requests, and a GitHub App (`SDLC_GITHUB_APP_ID`) for
+  installations. With indexing off the worker reads neither branches nor
+  pull requests; the gates on pull requests then get the state only from the
+  `pull_request` webhook, without the checks.
+- An installation is marked uninstalled only when GitHub answers `404` for
+  it; an error, a rate limit or a list read only in part changes nothing,
+  and the job `installation_sync` counts an error. An uninstalled
+  installation is not brought back by polling: connect it again with
+  "Connect GitHub". A repository missing from the list of its installation
+  is asked for by name first, so a renamed one stays available.
+- Renaming, transferring or archiving a repository and deleting a branch are
+  followed by neither path: the project keeps the old name (GitHub
+  redirects), and a deleted watched branch shows as an unreadable branch
+  (`cadence_repository_head_failures`).
+- An installation linked only to a project (no installation picked for its
+  repositories) is not marked by either path; its repositories show as
+  unreadable after two passes.
+
+The periods are variables of the worker, in `.env` for compose and in
+`config.worker` for the [Helm chart](#values):
+
+| Variable | Default | What the worker reads | Empty or unset | `0`, negative, not a duration |
+|---|---|---|---|---|
+| `SDLC_INDEX_INTERVAL` | `5m` | the heads of watched branches, then the full index pass: pruning old runs, artifacts, embeddings | the default | the worker does not start and names the variable |
+| `SDLC_INDEX_POLL_INTERVAL` | `15s` | the queue of indexing runs (what a `push` webhook put there); after runs it syncs pull requests too | the default | the same |
+| `SDLC_REPO_REF_SYNC_INTERVAL` | `SDLC_INDEX_INTERVAL` | pull requests linked to tasks and their checks, for the gates | follows `SDLC_INDEX_INTERVAL`, as before v0.24.0 | the same |
+| `SDLC_INSTALLATION_SYNC_INTERVAL` | `5m` | the installations of the GitHub App and their repositories; only with an app | the default | the same |
+
+A shorter period costs GitHub API requests, which count against the hourly
+limit of each installation (5,000 and up). A pass of branch heads is one
+request per watched branch; a sync of pull requests up to two per pull
+request, 50 at most; a poll of installations one request per 100
+installations of the app, one per installation in use with repositories,
+an installation token an hour, and one per repository that has disappeared
+from its installation. Polling every minute is fine for a handful of
+repositories; with webhooks on, the defaults are enough.
+
+```bash
+# .env
+SDLC_REPO_REF_SYNC_INTERVAL=1m
+SDLC_INSTALLATION_SYNC_INTERVAL=10m
+```
+
+```yaml
+# cadence-values.yaml
+config:
+  worker:
+    SDLC_REPO_REF_SYNC_INTERVAL: 1m
+    SDLC_INSTALLATION_SYNC_INTERVAL: 10m
+```
 
 ## Single sign-on with OIDC
 
@@ -2964,6 +3045,27 @@ new one. A cycle of your own that has the gate `require_open` and a way back
 from a status after the merge needs the same edit; the parameters are in the
 skill `clab-rules` of the agent kit.
 
+### Upgrading to v0.24.0
+
+The upgrade needs no manual step and no migration. GitHub webhooks become
+optional ([Webhooks and polling](#webhooks-and-polling)):
+
+- The worker polls the installations of the GitHub App
+  (`SDLC_INSTALLATION_SYNC_INTERVAL`, `5m`) and marks an uninstalled or
+  suspended app and a repository removed from it, as the `installation` and
+  `installation_repositories` webhooks do. An installation without webhooks
+  whose app was uninstalled or suspended stops trying to read its
+  repositories: the warnings in the worker log and
+  `cadence_repository_head_failures` for them stop, and its repositories show
+  as unavailable, the index kept. With webhooks nothing visible changes.
+- The pull requests of tasks are synced on their own period,
+  `SDLC_REPO_REF_SYNC_INTERVAL`; empty or unset, it is `SDLC_INDEX_INTERVAL`,
+  as before.
+- A new job of the worker, `installation_sync`, and an alert rule for it,
+  `CadenceInstallationSyncStalled`, in [Alert rules](#alert-rules).
+- An `.env` and values without the new variables keep working: compose and
+  the chart pass the defaults.
+
 ## Stage limits
 
 From v0.17.0 a cycle can put two more limits on a stage: how many times a
@@ -4271,7 +4373,10 @@ Both processes also expose the standard `go_*` and `process_*` metrics.
 The `job` label of the worker: `lease_sweep` (returning expired leases),
 `ops_state` (the database snapshot), and with indexing on (the default,
 `SDLC_INDEX_ENABLED`) `index_enqueue`, `index_run`, `drift`, `index_prune`,
-`repo_ref_sync`, `knowledge`, `embed_refresh`, `overlaps`; `blob_gc` runs
+`repo_ref_sync` (on its own period, `SDLC_REPO_REF_SYNC_INTERVAL`),
+`knowledge`, `embed_refresh`, `overlaps`; with a GitHub App
+`installation_sync` (the [poll of installations](#webhooks-and-polling), at
+start and every `SDLC_INSTALLATION_SYNC_INTERVAL`); `blob_gc` runs
 hourly and `embed_cache_gc` every six hours, neither at start; `audit_gc`
 (the [audit log](#audit-log) retention) runs hourly unless
 `SDLC_AUDIT_RETENTION_DAYS=0`, not at start either. A job that
@@ -4323,6 +4428,13 @@ groups:
         for: 30m
         annotations:
           summary: "A watched branch cannot be read: check the GitHub App or token"
+      - alert: CadenceInstallationSyncStalled
+        # Six passes of the default 5m; raise it with
+        # SDLC_INSTALLATION_SYNC_INTERVAL.
+        expr: time() - cadence_worker_job_last_success_timestamp_seconds{job="installation_sync"} > 1800
+        for: 5m
+        annotations:
+          summary: "The worker has not polled the GitHub App installations for 30 minutes"
       - alert: CadenceWebhookBadSignature
         expr: increase(cadence_webhook_deliveries_total{outcome="bad_signature"}[15m]) > 0
         annotations:
@@ -5051,6 +5163,14 @@ docker compose exec caddy wget -qO- http://worker:9090/metrics | grep '^cadence_
   same reason without `SDLC_API_URL=https://<host>/v1`.
 - **GitHub App: `Bad credentials`** — the key file is unreadable for uid
   65532 or the machine clock is off.
+- **A repository stopped indexing, its installation shows as suspended or
+  removed** — GitHub said so, by a webhook or by the
+  [poll of installations](#webhooks-and-polling); the worker logs each change
+  it polled, `change=installation_removed` and the like
+  (`docker compose logs worker | grep installation`). Unsuspending the app
+  or adding the repository back to it is picked up on the next poll; an
+  uninstalled app is installed and connected again with "Connect GitHub".
+  The index already built stays searchable all along.
 - **External database: the API does not become ready** — run
   `docker compose run --rm --no-deps -T api dbcheck`: it names what is wrong
   (TLS, the password, the extensions, the privileges, the schema). A host
