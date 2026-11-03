@@ -159,6 +159,11 @@ config:
     SDLC_INDEX_INTERVAL: 5m
     SDLC_INDEX_POLL_INTERVAL: 15s
     SDLC_INDEX_RETAIN_RUNS: "5"
+    # Polling that stands in for the GitHub webhooks (docs/admin.md,
+    # "Webhooks and polling"). Empty: the PR state follows
+    # SDLC_INDEX_INTERVAL.
+    SDLC_REPO_REF_SYNC_INTERVAL: ""
+    SDLC_INSTALLATION_SYNC_INTERVAL: 5m
     SDLC_BLOB_GC_ENABLED: "true"
     SDLC_BLOB_GC_INTERVAL: 1h
     SDLC_BLOB_GC_MIN_AGE: 24h
