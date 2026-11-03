@@ -1,0 +1,11 @@
+# GitHub Actions used by the workflows of this repository (CLAB-142). A weekly
+# pull request moves the pinned actions; a maintainer merges it after green
+# checks, as any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "Dependabot"
