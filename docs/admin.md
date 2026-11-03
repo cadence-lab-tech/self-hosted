@@ -3571,13 +3571,15 @@ when it starts and answers `/readyz` only after them. The healthcheck of the
 API in `docker-compose.yml` gives it 30 minutes (`start_period`, from
 v0.21.1) before it calls it unhealthy, so `docker compose up -d` waits and
 starts the worker after the API. `clab server upgrade`, `install` and
-`restore` (and the scripts, which run them) wait more than that: if `up -d`
-fails while the API is still starting - a healthcheck of your own in
+`restore` (and the scripts, which run them) do more: if `up -d` fails while
+the API is still starting - a healthcheck of your own in
 `compose.override.yml`, or a migration longer than the start period - they
-say a migration may be running, wait for the API up to
-`CADENCE_READY_TIMEOUT` (600 s by default from v0.21.1, 300 s before),
-counted from the start of the stack, and start the rest of the stack once
-it is healthy. Success is
+say a migration may be running, wait for the API and start the rest of the
+stack once it is healthy. Their whole start, `up -d` included, is bounded
+by `CADENCE_READY_TIMEOUT` (600 s by default from v0.21.1, 300 s before),
+counted from the start of the stack: with the default, a migration longer
+than 10 minutes ends as below, though the healthcheck would wait longer.
+Success is
 printed only with the worker running. If the time runs out, they say the
 migration may still be running (`docker compose logs -f api`) and print the
 commands that finish the start; the upgrade prints its rollback too, with
