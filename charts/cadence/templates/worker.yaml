@@ -82,13 +82,15 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with include "cadence.secretMount" (list . "worker") }}
+          {{- $mounts := list (include "cadence.secretMount" (list . "worker") | trim) (include "cadence.projectedTokenMount" . | trim) | compact | join "\n" }}
+          {{- with $mounts }}
           volumeMounts:
-            {{- . | trim | nindent 12 }}
+            {{- . | nindent 12 }}
           {{- end }}
-      {{- with include "cadence.secretVolume" (list . "worker") }}
+      {{- $volumes := list (include "cadence.secretVolume" (list . "worker") | trim) (include "cadence.projectedTokenVolume" . | trim) | compact | join "\n" }}
+      {{- with $volumes }}
       volumes:
-        {{- . | trim | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:

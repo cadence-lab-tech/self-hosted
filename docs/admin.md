@@ -638,7 +638,10 @@ new secret comes with a row here:
 
 The `AWS_*` variables the blob storage falls back to have no file form: the
 names are not ours. Neither has the bare secret name of a repository token
-kept for configurations made before the GitHub App.
+kept for configurations made before the GitHub App. The keys of the bucket
+are both or none: half of the pair stops the start, naming the missing
+variable. On EKS the bucket needs no key at all — see
+[S3 without keys](#s3-without-keys-pod-identity-and-irsa).
 
 **Owners and modes.** Without swarm a Docker secret is the file itself,
 mounted read-only: the owner and the mode on the host are what the container
@@ -801,8 +804,11 @@ no Caddy and no persistent volumes (the API gets one scratch directory,
 - **PostgreSQL with pgvector**, as for an
   [external database](#server-extensions-and-the-role): the role, the
   extensions and `sslmode`. The pods reach it from the cluster.
-- **An S3 bucket** and its keys: the pods of the API and of the worker share
-  no volume, so artifact content lives in the bucket (`blobs.s3.bucket`).
+- **An S3 bucket**: the pods of the API and of the worker share no volume, so
+  artifact content lives in the bucket (`blobs.s3.bucket`). Its keys go in
+  a Secret, or, on EKS, the pods take temporary keys of an IAM role by EKS
+  Pod Identity or IRSA, with no key in any Secret (from v0.24.0,
+  [S3 without keys](#s3-without-keys-pod-identity-and-irsa)).
 - **The certificate of the host**: a Secret of type `kubernetes.io/tls`
   (cert-manager or yours) named in `ingress.tls.secretName`, or TLS that
   ends before the Ingress.
@@ -858,9 +864,9 @@ nothing.
 | `SDLC_DATABASE_URL` | `SDLC_DATABASE_URL_FILE`: the URL with its password | one of the two |
 | `SDLC_DATABASE_PASSWORD` | `SDLC_DATABASE_PASSWORD_FILE`: the password put into `database.url`, the URL without one | one of the two |
 | `SDLC_ADMIN_TOKEN` | `SDLC_ADMIN_TOKEN_FILE` | yes |
-| `SDLC_BLOB_S3_ACCESS_KEY_ID` | `SDLC_BLOB_S3_ACCESS_KEY_ID_FILE` | yes |
-| `SDLC_BLOB_S3_SECRET_ACCESS_KEY` | `SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE` | yes |
-| `SDLC_BLOB_S3_SESSION_TOKEN` | `SDLC_BLOB_S3_SESSION_TOKEN_FILE` | no |
+| `SDLC_BLOB_S3_ACCESS_KEY_ID` | `SDLC_BLOB_S3_ACCESS_KEY_ID_FILE` | both or none: none with [Pod Identity or IRSA](#s3-without-keys-pod-identity-and-irsa) (before v0.24.0: yes) |
+| `SDLC_BLOB_S3_SECRET_ACCESS_KEY` | `SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE` | both or none, with the key above |
+| `SDLC_BLOB_S3_SESSION_TOKEN` | `SDLC_BLOB_S3_SESSION_TOKEN_FILE` | no; only with the two keys above |
 | `SDLC_GITHUB_TOKEN` | `SDLC_GITHUB_TOKEN_FILE` | no |
 | `SDLC_GITHUB_APP_KEY_FILE` | `SDLC_GITHUB_APP_KEY_FILE`: the private key of the [GitHub App](#github-app) | no |
 | `SDLC_GITHUB_APP_CLIENT_SECRET` | `SDLC_GITHUB_APP_CLIENT_SECRET_FILE` | no |
@@ -943,7 +949,136 @@ config:
 ```
 
 `blobs.s3.pathStyle` is `true` by default, as the service has it; set it to
-`false` for a provider that wants virtual-hosted addresses.
+`false` for a provider that wants virtual-hosted addresses. On EKS drop the
+two `SDLC_BLOB_S3_*` keys and the `--from-file` of them, and give the pods a
+role instead: [S3 without keys](#s3-without-keys-pod-identity-and-irsa).
+
+### S3 without keys: Pod Identity and IRSA
+
+From v0.24.0 the API and the worker on EKS take the keys of the bucket from
+an IAM role of their ServiceAccount — temporary keys, renewed while the pods
+run, with no key of the bucket in a Secret or in Git. Two ways, both
+standard on EKS; EKS Pod Identity is the simpler one.
+
+**The role.** One policy for both ways, on the bucket of `blobs.s3.bucket`
+and the prefix of `blobs.s3.prefix`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+     "Resource": "arn:aws:s3:::acme-cadence/cadence/*"},
+    {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::acme-cadence"}
+  ]
+}
+```
+
+`s3:ListBucket` is required: before it stores a file the service asks
+whether the object is already there (`HEAD`), and without `s3:ListBucket`
+S3 answers `403` instead of `404` for a missing object, so every upload
+fails with `AccessDenied`.
+
+**EKS Pod Identity.** Install the add-on *EKS Pod Identity Agent*, let the
+role trust `pods.eks.amazonaws.com` (`sts:AssumeRole` and `sts:TagSession`)
+and associate it with the ServiceAccount of the release — `cadence` for the
+release `cadence`, or `serviceAccount.name`:
+
+```bash
+aws eks create-pod-identity-association --cluster-name <cluster> \
+  --namespace cadence --service-account cadence --role-arn arn:aws:iam::111122223333:role/cadence
+```
+
+EKS then gives the pods `AWS_CONTAINER_CREDENTIALS_FULL_URI` and
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`. Pod Identity does not work on
+Fargate; use IRSA there.
+
+**IRSA.** The cluster has an IAM OIDC provider; the role trusts it for
+`sts:AssumeRoleWithWebIdentity` with the conditions
+`<provider>:sub = system:serviceaccount:cadence:cadence` and
+`<provider>:aud = sts.amazonaws.com`. Name the role in the annotation of the
+ServiceAccount, `serviceAccount.annotations`:
+
+```yaml
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/cadence
+```
+
+EKS then gives the pods `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`;
+the service calls STS of the region of the bucket
+(`https://sts.<region>.amazonaws.com`) or `blobs.s3.stsEndpoint`
+(`SDLC_BLOB_S3_STS_ENDPOINT`: GovCloud, a VPC endpoint of STS).
+`AWS_ROLE_SESSION_NAME` names the session if you set it in `extraEnv`. With
+`serviceAccount.create: false` the annotation goes on your ServiceAccount,
+named in `serviceAccount.name`. EKS sets the variables when a pod is
+created: restart the pods after an association or an annotation was added.
+
+**Which keys the service takes**, the first that is there: the keys of
+`secrets.keys` (`SDLC_BLOB_S3_ACCESS_KEY_ID` and `..._SECRET_ACCESS_KEY`,
+or `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`), then Pod Identity, then
+IRSA. The order differs from the AWS SDKs, which take IRSA before Pod
+Identity: a pod that has both gets Pod Identity here. Keys given explicitly
+win, as in the SDKs — keep them out of the values to use a role. Half of the
+pair of keys is refused (by the chart on rendering, by the service on
+start), never taken as "no keys". The log of the start names the source,
+never a key: `kubectl -n cadence logs deploy/cadence-api | grep credentials`
+shows `"credentials":"pod-identity"` (or `irsa`, `static`).
+
+**On start** the API and the worker ask for the keys at once and retry for
+30 seconds, every 2 seconds: the agent of Pod Identity is a DaemonSet and on
+a fresh node may come up after the pod. No keys after 30 seconds — the
+process exits with an error that names the source, the address or the
+file, and the reason; Kubernetes restarts the pod with its backoff. A
+cluster with neither keys nor a role stops the start at once, naming the
+three ways.
+
+**While it runs** the keys are renewed five minutes before they expire, by
+one request for all; the token file is read again on every renewal (the
+kubelet rotates it). No restart is ever needed for the keys. If a renewal
+fails while the keys still hold, the service goes on with them and logs a
+warning; once they expire, requests to the bucket fail with the error of
+the source until it answers again, without a restart. A request to the
+agent or to STS gives up after 5 seconds.
+
+**Network.** The pods reach the agent of Pod Identity on the node,
+`169.254.170.23:80` (`[fd00:ec2::23]:80` on IPv6), and STS on port 443 — let
+them through a NetworkPolicy of yours, next to S3. The service never sends
+the request to the agent through `HTTP_PROXY`/`HTTPS_PROXY`, and takes the
+address of the agent over plain `http` only for that address or loopback;
+STS goes through `HTTPS_PROXY` when one is set, so allow STS on the proxy or
+put it in `NO_PROXY`.
+
+**The token mounted by the chart.** EKS puts the token of the role into the
+pod as a projected volume of its own; the chart keeps
+`automountServiceAccountToken: false`, the token of the Kubernetes API,
+which the pods do not need. If the pods of your cluster get no
+`AWS_CONTAINER_CREDENTIALS_FULL_URI` (Pod Identity) or no
+`AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA), let the chart mount the token itself:
+`serviceAccount.projectedToken.podIdentity: true` (audience
+`pods.eks.amazonaws.com`, the agent at
+`serviceAccount.projectedToken.podIdentityAgentUri`) or
+`serviceAccount.projectedToken.irsa: true` (audience `sts.amazonaws.com`,
+the role from the annotation above), one of the two; the token lives
+`serviceAccount.projectedToken.expirationSeconds`. The volumes and paths are
+those EKS uses, and both pass Pod Security `restricted`. Off by default.
+
+**Check it on your cluster.** We test these ways against stand-ins of the
+agent and STS, not on EKS; after an installation or an upgrade run through:
+
+1. The pod got the variables and the token:
+   `kubectl -n cadence get pod -l app.kubernetes.io/component=api -o yaml | grep -E 'AWS_|serviceaccount'`
+   shows `AWS_CONTAINER_*` (Pod Identity) or `AWS_ROLE_ARN` and
+   `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA), and the volume of the token.
+2. The source in the logs of the API and the worker:
+   `kubectl -n cadence logs deploy/cadence-api | grep credentials`, the same
+   for `deploy/cadence-worker`.
+3. Upload a file larger than 256 KiB to a task (an attachment): it opens,
+   and the object is in the bucket (`aws s3 ls s3://<bucket>/<prefix> --recursive`).
+4. A day later, without a restart: another upload works, and the logs have
+   no warning about keys not renewed.
+5. In CloudTrail the role is used by `AssumeRoleForPodIdentity` or
+   `AssumeRoleWithWebIdentity`, and no access key of a user.
 
 ### Install
 
@@ -952,9 +1087,9 @@ helm install cadence oci://ghcr.io/cadence-lab-tech/charts/cadence --version 0.1
   -n cadence -f cadence-values.yaml --wait --timeout 10m
 ```
 
-1. A rendering without the database, the bucket, its keys, the
-   administrator token or `ingress.host` stops before anything reaches the
-   cluster, naming the missing key.
+1. A rendering without the database, the bucket, the administrator token
+   or `ingress.host`, or with half of the pair of keys of the bucket, stops
+   before anything reaches the cluster, naming the missing key.
 2. The hook `pre-install` runs `/api dbcheck --install` of the backend image
    of the version as a Job (`cadence-dbcheck`), with the secrets of the
    database only. A database it refuses — no `vector`, a wrong password, a
@@ -3066,6 +3201,25 @@ optional ([Webhooks and polling](#webhooks-and-polling)):
 - An `.env` and values without the new variables keep working: compose and
   the chart pass the defaults.
 
+The keys of the S3 bucket become optional on EKS
+([S3 without keys](#s3-without-keys-pod-identity-and-irsa)):
+
+- The service takes the keys of `SDLC_BLOB_S3_*` (or `AWS_*`) as before,
+  then EKS Pod Identity, then IRSA. Installations with keys change nothing:
+  the log of the start gains a line with `credentials=static`, and no
+  request goes to the agent or STS.
+- Half of the pair of keys now stops the start naming the missing variable
+  (before: "keys not set"); `SDLC_BLOB_S3_SESSION_TOKEN` without the pair
+  too. With Pod Identity or IRSA the API and the worker wait up to
+  30 seconds for the first keys on start and exit if none come.
+- A new optional variable, `SDLC_BLOB_S3_STS_ENDPOINT` (`blobs.s3.stsEndpoint`):
+  STS for IRSA; empty is the STS of the region. Compose passes it empty.
+- The chart: the keys of the bucket are no longer required in
+  `secrets.keys` (half of the pair is refused); `serviceAccount.annotations`
+  and `serviceAccount.labels`; `serviceAccount.projectedToken`, off by
+  default. The pods of old values render the same, but for the one new empty
+  variable `SDLC_BLOB_S3_STS_ENDPOINT`.
+
 ## Stage limits
 
 From v0.17.0 a cycle can put two more limits on a stage: how many times a
@@ -3288,7 +3442,8 @@ With `SDLC_BLOB_S3_BUCKET` empty, files live in the `blobs` volume of the
 host, which the backup archives. For large files, or when the disk of the
 host is small, set the bucket (`SDLC_BLOB_S3_*` in `.env.example`, `blobs.s3`
 in Helm): the files go there, and the bucket is yours to back up and to size.
-Helm requires the bucket.
+Helm requires the bucket; on EKS its keys can come from a role instead of a
+Secret ([S3 without keys](#s3-without-keys-pod-identity-and-irsa)).
 
 An upload is first written to a temporary file, then stored. With the
 `blobs` volume the file is in the volume, next to its final place. With a
@@ -5171,6 +5326,22 @@ docker compose exec caddy wget -qO- http://worker:9090/metrics | grep '^cadence_
   or adding the repository back to it is picked up on the next poll; an
   uninstalled app is installed and connected again with "Connect GitHub".
   The index already built stays searchable all along.
+- **S3 without keys: the API or the worker exits on start** — the last line
+  of `kubectl -n cadence logs deploy/cadence-api` names the source and the
+  reason (the messages of the service are in Russian):
+  `ключи S3 не заданы` — the pod got neither keys nor a role: no Pod Identity
+  association for its ServiceAccount, no annotation of IRSA, or the pod was
+  created before them (restart it), or EKS does not inject the token
+  (`serviceAccount.projectedToken`); `учётные данные S3 (pod-identity) не
+  получены за 30s` with `connection refused` or a timeout — the agent of Pod
+  Identity is not running on the node or a NetworkPolicy closes
+  `169.254.170.23:80`; `файл токена … no such file` — the token is not
+  mounted; `ответ 403` or `AccessDenied` of STS — the trust policy of the
+  role does not name this ServiceAccount; `задан SDLC_BLOB_S3_ACCESS_KEY_ID,
+  но не задан SDLC_BLOB_S3_SECRET_ACCESS_KEY` — half of the pair of keys.
+  Uploads fail with `403 AccessDenied` of S3 — the policy of the role lacks
+  `s3:ListBucket` or the prefix. See
+  [S3 without keys](#s3-without-keys-pod-identity-and-irsa).
 - **External database: the API does not become ready** — run
   `docker compose run --rm --no-deps -T api dbcheck`: it names what is wrong
   (TLS, the password, the extensions, the privileges, the schema). A host

@@ -238,11 +238,22 @@ The values the chart cannot do without (docs/admin.md, "Kubernetes
 {{- if not $v.blobs.s3.bucket -}}
 {{- fail "blobs.s3.bucket is required: artifact content lives in an S3 bucket (the pods share no volume)" -}}
 {{- end -}}
-{{- if not $k.SDLC_BLOB_S3_ACCESS_KEY_ID -}}
-{{- fail "secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID is required: the key of the Secret with the access key of blobs.s3.bucket" -}}
+{{- /* The keys of the bucket: both or none (none - Pod Identity or IRSA). */ -}}
+{{- if and $k.SDLC_BLOB_S3_ACCESS_KEY_ID (not $k.SDLC_BLOB_S3_SECRET_ACCESS_KEY) -}}
+{{- fail "secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY is required with secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID: the key of the Secret with the secret key of blobs.s3.bucket (or set neither for Pod Identity or IRSA)" -}}
 {{- end -}}
-{{- if not $k.SDLC_BLOB_S3_SECRET_ACCESS_KEY -}}
-{{- fail "secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY is required: the key of the Secret with the secret key of blobs.s3.bucket" -}}
+{{- if and $k.SDLC_BLOB_S3_SECRET_ACCESS_KEY (not $k.SDLC_BLOB_S3_ACCESS_KEY_ID) -}}
+{{- fail "secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID is required with secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY: the key of the Secret with the access key of blobs.s3.bucket (or set neither for Pod Identity or IRSA)" -}}
+{{- end -}}
+{{- if and $k.SDLC_BLOB_S3_SESSION_TOKEN (not $k.SDLC_BLOB_S3_ACCESS_KEY_ID) -}}
+{{- fail "secrets.keys.SDLC_BLOB_S3_SESSION_TOKEN goes with secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID and secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY: a session token without its keys" -}}
+{{- end -}}
+{{- $pt := include "cadence.projectedToken" . | fromYaml -}}
+{{- if and $pt.podIdentity $pt.irsa -}}
+{{- fail "serviceAccount.projectedToken: podIdentity and irsa are both on - the service takes Pod Identity first; turn on the one your cluster uses" -}}
+{{- end -}}
+{{- if and $pt.irsa (not $pt.roleArn) -}}
+{{- fail "serviceAccount.projectedToken.irsa needs the role in serviceAccount.annotations.eks.amazonaws.com/role-arn" -}}
 {{- end -}}
 {{- if not $k.SDLC_ADMIN_TOKEN -}}
 {{- fail "secrets.keys.SDLC_ADMIN_TOKEN is required: the key of the Secret with the administrator token (the first sign-in)" -}}
@@ -275,6 +286,7 @@ the metrics listener, the secret files and extraEnv.
 {{- $_ := set $fixed "SDLC_BLOB_S3_REGION" (default "" $v.blobs.s3.region) -}}
 {{- $_ := set $fixed "SDLC_BLOB_S3_PREFIX" (default "" $v.blobs.s3.prefix) -}}
 {{- $_ := set $fixed "SDLC_BLOB_S3_PATH_STYLE" (ternary "true" "false" (ne (toString $v.blobs.s3.pathStyle) "false")) -}}
+{{- $_ := set $fixed "SDLC_BLOB_S3_STS_ENDPOINT" (default "" $v.blobs.s3.stsEndpoint) -}}
 {{- $_ := set $fixed "SDLC_METRICS_ADDR" (ternary ":9090" "" (ne (toString $v.metrics.enabled) "false")) -}}
 {{- $config := merge (deepCopy (default dict (index $v.config $reader))) (deepCopy (default dict $v.config.shared)) -}}
 {{- range $name, $_ := $config -}}
@@ -304,8 +316,73 @@ the metrics listener, the secret files and extraEnv.
   value: {{ .path | quote }}
 {{- end }}
 {{- end }}
+{{- $pt := include "cadence.projectedToken" $root | fromYaml }}
+{{- if $pt.podIdentity }}
+- name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+  value: {{ $pt.podIdentityAgentUri | quote }}
+- name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+  value: /var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token
+{{- else if $pt.irsa }}
+- name: AWS_ROLE_ARN
+  value: {{ $pt.roleArn | quote }}
+- name: AWS_WEB_IDENTITY_TOKEN_FILE
+  value: /var/run/secrets/eks.amazonaws.com/serviceaccount/token
+{{- end }}
 {{- with $v.extraEnv }}
 {{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{/*
+The token of the role the chart mounts itself (serviceAccount.projectedToken,
+off by default), as a dict: podIdentity, irsa, podIdentityAgentUri,
+expirationSeconds and roleArn - the annotation eks.amazonaws.com/role-arn.
+The volume, its path and audience are those the EKS webhooks inject, so a
+pod reads the same files whoever mounted them.
+*/}}
+{{- define "cadence.projectedToken" -}}
+{{- $sa := default dict .Values.serviceAccount -}}
+{{- $pt := default dict $sa.projectedToken -}}
+podIdentity: {{ eq (toString $pt.podIdentity) "true" }}
+irsa: {{ eq (toString $pt.irsa) "true" }}
+podIdentityAgentUri: {{ default "http://169.254.170.23/v1/credentials" $pt.podIdentityAgentUri | quote }}
+expirationSeconds: {{ default 86400 $pt.expirationSeconds | int }}
+roleArn: {{ index (default dict $sa.annotations) "eks.amazonaws.com/role-arn" | default "" | quote }}
+{{- end -}}
+
+{{- define "cadence.projectedTokenVolume" -}}
+{{- $pt := include "cadence.projectedToken" . | fromYaml -}}
+{{- if $pt.podIdentity }}
+- name: eks-pod-identity-token
+  projected:
+    defaultMode: 288
+    sources:
+      - serviceAccountToken:
+          audience: pods.eks.amazonaws.com
+          expirationSeconds: {{ $pt.expirationSeconds }}
+          path: eks-pod-identity-token
+{{- else if $pt.irsa }}
+- name: aws-iam-token
+  projected:
+    defaultMode: 288
+    sources:
+      - serviceAccountToken:
+          audience: sts.amazonaws.com
+          expirationSeconds: {{ $pt.expirationSeconds }}
+          path: token
+{{- end }}
+{{- end -}}
+
+{{- define "cadence.projectedTokenMount" -}}
+{{- $pt := include "cadence.projectedToken" . | fromYaml -}}
+{{- if $pt.podIdentity }}
+- name: eks-pod-identity-token
+  mountPath: /var/run/secrets/pods.eks.amazonaws.com/serviceaccount
+  readOnly: true
+{{- else if $pt.irsa }}
+- name: aws-iam-token
+  mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+  readOnly: true
 {{- end }}
 {{- end -}}
 

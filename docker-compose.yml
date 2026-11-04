@@ -87,6 +87,8 @@ x-shared-env: &shared-env
   SDLC_BLOB_S3_ACCESS_KEY_ID_FILE: ${SDLC_BLOB_S3_ACCESS_KEY_ID_FILE:-}
   SDLC_BLOB_S3_SECRET_ACCESS_KEY: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY:-}
   SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE: ${SDLC_BLOB_S3_SECRET_ACCESS_KEY_FILE:-}
+  # The STS of IRSA (Kubernetes); compose uses the keys above.
+  SDLC_BLOB_S3_STS_ENDPOINT: ${SDLC_BLOB_S3_STS_ENDPOINT:-}
   # Repository access: a GitHub App (private key in ./secrets) or a token.
   SDLC_GITHUB_API_URL: ${SDLC_GITHUB_API_URL:-https://api.github.com}
   SDLC_GITHUB_APP_ID: ${SDLC_GITHUB_APP_ID:-}

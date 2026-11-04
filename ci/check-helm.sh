@@ -21,7 +21,9 @@
 # and name (CLAB-300); the metrics inside the cluster only; Pod Security; no value of a
 # secret in the values of the release or the manifests; a key missing in the
 # Secret; a refused upgrade keeps the pods; an upgrade with a changed value
-# keeps the data. CI runs it in the job "helm" of check.yml.
+# keeps the data; the manifests of the bucket without keys (Pod Identity and
+# IRSA, CLAB-394) admitted under restricted by a dry run. CI runs it in the
+# job "helm" of check.yml.
 #
 #   ci/check-helm.sh
 #
@@ -368,6 +370,23 @@ check "no pod adds a capability" \
 # shellcheck disable=SC2016 # the program of awk
 ui_uid="$(k exec "deploy/$release-ui" -- awk '/^Uid:/ { print $2 }' /proc/1/status 2>/dev/null || true)"
 check "the Caddy of ui runs as uid 65532 ($ui_uid)" [ "$ui_uid" = 65532 ]
+# The bucket without keys (CLAB-394): kind has neither Pod Identity nor IRSA,
+# so these modes are not installed - the API server admits their manifests
+# under restricted (a dry run of another release in the same namespace, on a
+# host of its own: the controller refuses a second Ingress of the same host
+# and path): the role in the annotation, and the token of the role mounted
+# by the chart.
+role=arn:aws:iam::111122223333:role/cadence-check
+for mode in annotation podIdentity irsa; do
+  extra=()
+  [ "$mode" = annotation ] || extra=(--set "serviceAccount.projectedToken.$mode=true")
+  dry="$(helm template nokeys "$chart" -n "$ns" -f "$work/values.yaml" --set ingress.host=nokeys.invalid \
+    --set secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID= \
+    --set secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY= --set-string "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$role" \
+    ${extra[@]+"${extra[@]}"} | kubectl apply -n "$ns" --dry-run=server -f - 2>&1 >/dev/null || echo "exit $?")"
+  check "no keys of the bucket ($mode): admitted under restricted, no warning ($(printf '%s' "${dry:-none}" | tr '\n' ' '))" \
+    [ -z "$dry" ]
+done
 
 # --- through the Ingress --------------------------------------------------------------------
 info "the Ingress"
@@ -449,6 +468,18 @@ after="$(s3_keys helm/ | grep -c . || true)"
 check "the brief is an object under helm/ in the bucket ($before -> $after)" [ "$after" -gt "$before" ]
 artifact_content >"$work/brief.out" 2>&1 || true
 check "the API serves the same content from the bucket" grep -qF "line 400 of the brief" "$work/brief.out"
+# The source of the keys in the log of the start (CLAB-394, images of
+# v0.24.0 and later, or of a branch with CADENCE_BACKEND_DIGEST=): the keys
+# of the Secret, no key in the line.
+if [ -z "$backend_digest" ] || ! version_lt "$version" v0.24.0; then
+  for d in api worker; do
+    start_log="$(k logs "deploy/$release-$d" 2>&1 | grep -F '"credentials"' || true)"
+    check "$d: the log names the source of the keys of the bucket, static" contains "$start_log" '"credentials":"static"'
+    check "$d: ...without the secret key" lacks "$start_log" "$S3_SECRET"
+  done
+else
+  info "VERSION is $version: the source of the keys in the log comes with v0.24.0, skipped"
+fi
 
 # --- a file through the Ingress (CLAB-300) -----------------------------------------------------
 # The root filesystem of the API is read-only, and a file above the inline

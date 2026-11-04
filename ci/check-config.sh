@@ -1036,9 +1036,16 @@ check "database.url without the password key: refused, naming secrets.keys.SDLC_
 check "database.url with a password: refused" refused "database.url has a password" \
   --set secrets.keys.SDLC_DATABASE_URL= --set secrets.keys.SDLC_DATABASE_PASSWORD=p --set 'database.url=postgres://cadence:pw@db/cadence'
 check "no bucket: refused, naming blobs.s3.bucket" refused "blobs.s3.bucket is required" --set blobs.s3.bucket=
-for k in SDLC_BLOB_S3_ACCESS_KEY_ID SDLC_BLOB_S3_SECRET_ACCESS_KEY SDLC_ADMIN_TOKEN; do
-  check "no secrets.keys.$k: refused, naming it" refused "secrets.keys.$k is required" --set "secrets.keys.$k="
-done
+check "no secrets.keys.SDLC_ADMIN_TOKEN: refused, naming it" refused "secrets.keys.SDLC_ADMIN_TOKEN is required" --set "secrets.keys.SDLC_ADMIN_TOKEN="
+# The keys of the bucket are both or none (CLAB-394): half of the pair is
+# refused by the name of the missing key, a session token without the pair too.
+check "only the access key of the bucket: refused, naming the secret key" refused \
+  "secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY is required with secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID" --set secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY=
+check "only the secret key of the bucket: refused, naming the access key" refused \
+  "secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID is required with secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY" --set secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID=
+check "a session token of the bucket without its keys: refused" refused \
+  "secrets.keys.SDLC_BLOB_S3_SESSION_TOKEN goes with" --set secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID= \
+  --set secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY= --set secrets.keys.SDLC_BLOB_S3_SESSION_TOKEN=s3-session
 check "an unknown key of secrets.keys: refused" refused "secrets.keys.SDLC_NO_SUCH: no such secret" --set secrets.keys.SDLC_NO_SUCH=x
 check "a secret as a value of config: refused" refused "SDLC_GITHUB_TOKEN is a secret" --set config.shared.SDLC_GITHUB_TOKEN=x
 check "the headers of traces as a value of config.api: refused" refused "OTEL_EXPORTER_OTLP_HEADERS is a secret" \
@@ -1170,6 +1177,56 @@ for svc in api worker; do
   extra="$(jq -r --argjson c "$c_env" 'keys[] | select(. as $k | $c | has($k) | not) | select(endswith("_FILE") | not) | select(. != "SDLC_BLOB_S3_PATH_STYLE")' <<<"$h_env" | tr '\n' ' ')"
   check "[$svc] the chart has no variable docker-compose.yml lacks${extra:+: $extra}" [ -z "$extra" ]
 done
+# The bucket without keys (CLAB-394): EKS Pod Identity or IRSA give the pods
+# their keys. The second mode of the chart: no key of the bucket, the role in
+# the annotation of the ServiceAccount; the env and the volumes differ from
+# the mode with keys only by the files of the keys.
+irsa_role=arn:aws:iam::111122223333:role/x
+nokeys=(--set secrets.keys.SDLC_BLOB_S3_ACCESS_KEY_ID= --set secrets.keys.SDLC_BLOB_S3_SECRET_ACCESS_KEY=
+  --set-string "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$irsa_role")
+nokeys_json="$(render_json -f "$dist/min-values.yaml" "${nokeys[@]}" 2>/dev/null || true)"
+check "no keys of the bucket, the role in the annotation: the chart renders" [ -n "$nokeys_json" -a "$nokeys_json" != "[]" ]
+check "...the ServiceAccount carries eks.amazonaws.com/role-arn, no token mounted" \
+  [ "$(jq -r '.[] | select(.kind == "ServiceAccount") | "\(.metadata.annotations["eks.amazonaws.com/role-arn"]) \(.automountServiceAccountToken)"' <<<"$nokeys_json")" = "$irsa_role false" ]
+pod_view() { jq -r --arg d "cadence-$2" '.[] | select(.kind == "Deployment" and .metadata.name == $d) | .spec.template.spec |
+  "\([.containers[0].env[].name] | sort | join(",")) | \([.volumes[]?.name] | sort | join(",")) | \(.automountServiceAccountToken)"' <<<"$1"; }
+for svc in api worker; do
+  with_keys="$(pod_view "$min_json" "$svc" | sed -E 's/SDLC_BLOB_S3_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)_FILE,//g')"
+  check "[$svc] without keys: the same env and volumes as with them, but the files of the keys" [ "$(pod_view "$nokeys_json" "$svc")" = "$with_keys" ]
+  check "[$svc] without keys: no file of a key of the bucket" \
+    [ "$(jq -r --arg d "cadence-$svc" '[.[] | select(.kind == "Deployment" and .metadata.name == $d) | .spec.template.spec.containers[0].env[].name | select(startswith("SDLC_BLOB_S3_") and endswith("_FILE"))] | length' <<<"$nokeys_json")" = 0 ]
+done
+check "without keys: no pod gets the token of the role from the chart by default" \
+  [ "$(jq -r '[.[] | .spec.template.spec? // empty | (.volumes // [])[] | select(.projected.sources[]?.serviceAccountToken)] | length' <<<"$nokeys_json")" = 0 ]
+# serviceAccount.create=false: a ServiceAccount of yours, in every pod.
+own_sa="$(render_json -f "$dist/min-values.yaml" "${nokeys[@]}" --set serviceAccount.create=false --set serviceAccount.name=cadence-s3)"
+check "serviceAccount.create=false with a name: no ServiceAccount, api, worker, ui and dbcheck run as it" \
+  [ "$(jq -r '[.[] | select(.kind == "ServiceAccount")] | length' <<<"$own_sa") $(jq -r '[.[] | .spec.template.spec.serviceAccountName? // empty] | unique | join(",")' <<<"$own_sa")" = "0 cadence-s3" ]
+# The token of the role mounted by the chart (serviceAccount.projectedToken,
+# off by default): the volume, the path and the audience of the EKS webhooks.
+token_view() { jq -r --arg d "cadence-$2" '.[] | select(.kind == "Deployment" and .metadata.name == $d) | .spec.template.spec as $p |
+  ($p.volumes[] | select(.projected.sources[0].serviceAccountToken) | .name) as $v |
+  "\($v) \($p.volumes[] | select(.name == $v) | .projected.sources[0].serviceAccountToken | "\(.audience) \(.expirationSeconds)") \($p.containers[0].volumeMounts[] | select(.name == $v) | "\(.mountPath) \(.readOnly)") \($p.automountServiceAccountToken)"' <<<"$1"; }
+pi_json="$(render_json -f "$dist/min-values.yaml" "${nokeys[@]}" --set serviceAccount.projectedToken.podIdentity=true)"
+irsa_json="$(render_json -f "$dist/min-values.yaml" "${nokeys[@]}" --set serviceAccount.projectedToken.irsa=true)"
+for svc in api worker; do
+  check "[$svc] projectedToken.podIdentity: the token of pods.eks.amazonaws.com, automount stays off" \
+    [ "$(token_view "$pi_json" "$svc")" = "eks-pod-identity-token pods.eks.amazonaws.com 86400 /var/run/secrets/pods.eks.amazonaws.com/serviceaccount true false" ]
+  check "[$svc] ...and the variables of Pod Identity" \
+    [ "$(chart_env "$pi_json" "$svc" | jq -r '"\(.AWS_CONTAINER_CREDENTIALS_FULL_URI) \(.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE)"')" = "http://169.254.170.23/v1/credentials /var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token" ]
+  check "[$svc] projectedToken.irsa: the token of sts.amazonaws.com, automount stays off" \
+    [ "$(token_view "$irsa_json" "$svc")" = "aws-iam-token sts.amazonaws.com 86400 /var/run/secrets/eks.amazonaws.com/serviceaccount true false" ]
+  check "[$svc] ...and AWS_ROLE_ARN from the annotation" \
+    [ "$(chart_env "$irsa_json" "$svc" | jq -r '"\(.AWS_ROLE_ARN) \(.AWS_WEB_IDENTITY_TOKEN_FILE)"')" = "$irsa_role /var/run/secrets/eks.amazonaws.com/serviceaccount/token" ]
+done
+check "projectedToken: the ui and the precheck get no token" \
+  [ "$(jq -r '[.[] | select(.metadata.name == "cadence-ui" or .kind == "Job") | .spec.template.spec.volumes[]? | select(.projected.sources[]?.serviceAccountToken)] | length' <<<"$pi_json")" = 0 ]
+check "projectedToken: podIdentity and irsa both on: refused" refused "podIdentity and irsa are both on" \
+  "${nokeys[@]}" --set serviceAccount.projectedToken.podIdentity=true --set serviceAccount.projectedToken.irsa=true
+check "projectedToken.irsa without the role in the annotation: refused" refused "needs the role in serviceAccount.annotations" \
+  --set serviceAccount.projectedToken.irsa=true
+check "blobs.s3.stsEndpoint is SDLC_BLOB_S3_STS_ENDPOINT of api and worker" \
+  [ "$(render_json -f "$dist/min-values.yaml" --set blobs.s3.stsEndpoint=https://sts.us-gov-west-1.amazonaws.com | jq -r '[.[] | select(.kind == "Deployment") | .spec.template.spec.containers[0].env[]? | select(.name == "SDLC_BLOB_S3_STS_ENDPOINT") | .value] | unique | join(" ")')" = https://sts.us-gov-west-1.amazonaws.com ]
 # The values docker-compose.yml fixes, fixed in the chart too (one line per
 # container and variable).
 fixed_of() {
