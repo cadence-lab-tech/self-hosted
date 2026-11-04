@@ -53,7 +53,9 @@ database:
   url: ""
 
 # Artifact content: an S3 bucket, required - the pods of the API and of the
-# worker share no volume. The keys come from secrets.keys.
+# worker share no volume. The keys of the bucket come from secrets.keys, or,
+# on EKS, from the role of the pods: EKS Pod Identity or IRSA, without a key
+# in any Secret (docs/admin.md, "S3 without keys: Pod Identity and IRSA").
 blobs:
   s3:
     bucket: ""
@@ -61,6 +63,9 @@ blobs:
     region: ""
     prefix: ""
     pathStyle: true
+    # The STS of IRSA (SDLC_BLOB_S3_STS_ENDPOINT); empty - the STS of the
+    # region. GovCloud, a VPC endpoint of STS.
+    stsEndpoint: ""
 
 # Secrets, by reference. Every secret of docs/admin.md, "Secrets in files",
 # is a key of a Secret that exists in the namespace: secrets.name is the
@@ -79,7 +84,8 @@ secrets:
     SDLC_DATABASE_PASSWORD: ""
     # Required: the token of the administrator (SDLC_ADMIN_TOKEN_FILE).
     SDLC_ADMIN_TOKEN: ""
-    # Required: the keys of the bucket of blobs.s3.
+    # The keys of the bucket of blobs.s3: both or none. None - the pods get
+    # theirs from EKS Pod Identity or IRSA (serviceAccount below).
     SDLC_BLOB_S3_ACCESS_KEY_ID: ""
     SDLC_BLOB_S3_SECRET_ACCESS_KEY: ""
     SDLC_BLOB_S3_SESSION_TOKEN: ""
@@ -237,7 +243,27 @@ dbcheck:
   timeout: 15s
   resources: {}
 
-# The service account of the pods; they need no access to the Kubernetes API.
+# The service account of the pods; they need no access to the Kubernetes API,
+# and no pod mounts its token for that (automountServiceAccountToken: false).
+# On EKS it carries the role of the bucket: name it in the Pod Identity
+# association, or put the role in the annotation of IRSA.
 serviceAccount:
   create: true
   name: ""
+  # IRSA: eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/cadence
+  annotations: {}
+  labels: {}
+  # The token of the role mounted by the chart itself, a projected volume of
+  # its own - off by default: EKS injects it into the pod (the Pod Identity
+  # webhook, the IRSA webhook). Turn one on if the pods of a cluster get no
+  # AWS_CONTAINER_CREDENTIALS_FULL_URI or AWS_WEB_IDENTITY_TOKEN_FILE
+  # (docs/admin.md, "S3 without keys: Pod Identity and IRSA").
+  projectedToken:
+    # EKS Pod Identity: the token of the audience pods.eks.amazonaws.com and
+    # the address of the agent of the node.
+    podIdentity: false
+    podIdentityAgentUri: http://169.254.170.23/v1/credentials
+    # IRSA: the token of the audience sts.amazonaws.com and AWS_ROLE_ARN from
+    # the annotation eks.amazonaws.com/role-arn above.
+    irsa: false
+    expirationSeconds: 86400

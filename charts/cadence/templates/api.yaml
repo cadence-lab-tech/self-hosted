@@ -92,10 +92,16 @@ spec:
             {{- with include "cadence.secretMount" (list . "api") }}
             {{- . | trim | nindent 12 }}
             {{- end }}
+            {{- with include "cadence.projectedTokenMount" . }}
+            {{- . | trim | nindent 12 }}
+            {{- end }}
             - name: tmp
               mountPath: /tmp
       volumes:
         {{- with include "cadence.secretVolume" (list . "api") }}
+        {{- . | trim | nindent 8 }}
+        {{- end }}
+        {{- with include "cadence.projectedTokenVolume" . }}
         {{- . | trim | nindent 8 }}
         {{- end }}
         - name: tmp
