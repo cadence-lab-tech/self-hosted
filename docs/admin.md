@@ -33,6 +33,7 @@ public address of your proxy in the `proxy` mode.
   ([cost of a run](#cost-of-a-run),
   [usage policy](#usage-policy-of-a-project),
   [runner failures](#runner-failures-and-the-subscription-limit),
+  [the order of the backlog](#the-order-of-the-backlog),
   [upgrading to v0.17.0](#upgrading-to-v0170),
   [upgrading to v0.18.0](#upgrading-to-v0180),
   [upgrading to v0.19.0](#upgrading-to-v0190),
@@ -2710,6 +2711,59 @@ If you copied the alert `CadenceApiSlow` from [Monitoring](#monitoring)
 earlier, add the filter `route!~".*/events"` to it: waiting requests are
 slow on purpose.
 
+### The order of the backlog
+
+From v0.25.0 the backlog has a manual order, and `clab` shows and changes
+it. The server keeps the order; the CLI names a neighbour and never builds
+a position itself.
+
+```bash
+clab backlog [--parent PLAT-4] [--limit 50] [--next] [--json]
+clab rank PLAT-12 --before PLAT-15 | --after PLAT-15 | --top | --bottom
+```
+
+`clab backlog` prints the backlog in the order of the server, the top level
+of the project or, with `--parent`, the children of one epic that have not
+started:
+
+```
+№  КЛЮЧ     ТИП   ПРИОРИТЕТ  ЗАДАЧ  ПОМЕТКИ              ЗАГОЛОВОК
+1  PLAT-9   task  urgent     —      —                    Fix the login redirect
+2  PLAT-4   epic  normal     3      в работе             Billing export
+3  PLAT-21  task  normal     —      ждёт PLAT-9          Rotate the signing key
+```
+
+`ЗАДАЧ` is the number of the children of an epic that are in the backlog;
+`ПОМЕТКИ` says which rows are `в работе` (an epic with started children) and
+what a row waits for (`ждёт` with the keys of the unfinished tasks that
+block it; more than three are counted). `--limit` takes 1 to 500, 50 by
+default; when there are more rows, the last line says how many are shown
+and the command that shows more. `--next` prints only the next task: the
+first row that waits for nothing; an epic that is in work is opened and its
+first free child is named; `--limit` does not apply, the whole backlog is
+read. With `--json` the table is replaced by the answer of the server as it
+is, and `--next --json` prints `next`, `epic`, `skipped` and
+`first_blocked`.
+
+`clab rank` puts a task over or under a neighbour (`--before`, `--after`)
+or at the edge of its group (`--top`, `--bottom`) and prints one line:
+`PLAT-12 поставлена над PLAT-15.`, or `PLAT-12 уже на этом месте.` when
+nothing changed. Exactly one place is allowed, otherwise the command stops
+before it sends anything. A group is the top level of the project or the
+children of one epic: a neighbour from another group, a closed task and a
+neighbour that does not exist are refused with the text of the server. It
+needs the level `agent` or higher; the token of a task stage moves only the
+children of its own task, against each other. Every move is written to the
+audit log and to the feed of the task as `task.ranked`.
+
+The same operations are open to agents over MCP: the tool `sdlc_rank_task`
+and the parameters `backlog` and `top_level` of `sdlc_list_tasks`; agents of
+the previous version do not know the tool and keep working. A newer `clab`
+against a server older than v0.25.0 does not guess: both commands answer
+`сервер не знает порядка бэклога: обновите сервер до v0.25.0 или новее` and
+exit with a non-zero code. The commands need `clab` v0.25.0 or newer.
+Nothing to configure.
+
 ### Upgrading to v0.17.0
 
 `./upgrade.sh v0.17.0` (or `clab server upgrade`) needs no manual step.
@@ -3238,6 +3292,10 @@ The upgrade needs no manual step. The backlog gets a manual order:
   element of the task list, the parameter `backlog=true` of the list and the
   event `task.ranked` in the feeds. `clab` and agents of the previous version
   keep working. No new variables, services or routes of Caddy.
+- `clab rank` and `clab backlog` and the MCP tool `sdlc_rank_task` come with
+  v0.25.0: see [The order of the backlog](#the-order-of-the-backlog). Update
+  `clab` after the server (`brew upgrade clab`); an older `clab` simply has
+  no such commands.
 
 ## Stage limits
 
