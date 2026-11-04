@@ -3220,6 +3220,25 @@ The keys of the S3 bucket become optional on EKS
   default. The pods of old values render the same, but for the one new empty
   variable `SDLC_BLOB_S3_STS_ENDPOINT`.
 
+### Upgrading to v0.25.0
+
+The upgrade needs no manual step. The backlog gets a manual order:
+
+- Migration `000045_task_rank` adds `tasks.rank` and fills it for every task
+  in the order the backlog had before the upgrade: unblocked tasks first,
+  then by priority, then by number — at the top level of each project and
+  separately among the children of each task. It is one `UPDATE`, seconds on
+  thousands of tasks; the API waits for it on start as for any migration.
+- `order=backlog` of the task list is now this manual order. Priority and
+  `blocks` links no longer move a task in it: a task that becomes blocked
+  stays where it was, and a raised priority does not lift a task. Whoever
+  wants another order moves the task, `POST /v1/tasks/:key/rank` (level
+  `agent` and above); a new task goes to the end of its group.
+- The API only adds: the field `rank` of a task, the field `in_work` of an
+  element of the task list, the parameter `backlog=true` of the list and the
+  event `task.ranked` in the feeds. `clab` and agents of the previous version
+  keep working. No new variables, services or routes of Caddy.
+
 ## Stage limits
 
 From v0.17.0 a cycle can put two more limits on a stage: how many times a
