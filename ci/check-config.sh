@@ -1273,6 +1273,36 @@ check "every X_FILE is a path under /secrets/<secret>/<key>, a key of another Se
 check "...other/hook is the key hook of the Secret other" [ "$(chart_env "$all_json" api | jq -r .SDLC_GITHUB_WEBHOOK_SECRET_FILE)" = /secrets/other/hook ]
 check "the worker gets no sign-in or webhook secret" \
   [ "$(chart_env "$all_json" worker | jq -r '[keys[] | select(test("ADMIN_TOKEN|APP_CLIENT_SECRET|WEBHOOK_SECRET"))] | length')" = 0 ]
+# The client ID of the GitHub sign-in from a Secret (issue #105): the value of
+# config.api dropped with null, the variable in extraEnv by secretKeyRef, so
+# the worker gets it too. It renders, and the worker gets the ID but never the
+# client secret: the backend checks the pair at the start of the api only.
+cat >"$dist/client-id-from-secret.yaml" <<'EOF'
+config:
+  api:
+    SDLC_GITHUB_APP_CLIENT_ID: null
+extraEnv:
+  - name: SDLC_GITHUB_APP_CLIENT_ID
+    valueFrom:
+      secretKeyRef: {name: cadence-github, key: client-id}
+secrets:
+  keys:
+    SDLC_GITHUB_APP_CLIENT_SECRET: app-secret
+EOF
+client_id_json="$(render_json -f "$dist/min-values.yaml" -f "$dist/client-id-from-secret.yaml" 2>/dev/null || true)"
+check "the client ID from a Secret in extraEnv, config.api.SDLC_GITHUB_APP_CLIENT_ID null (#105): helm template" \
+  [ -n "$client_id_json" -a "$client_id_json" != "[]" ]
+client_id_of() {
+  jq -r --arg d "cadence-$1" '.[] | select(.kind == "Deployment" and .metadata.name == $d) | .spec.template.spec.containers[0].env |
+    [.[] | select(.name == "SDLC_GITHUB_APP_CLIENT_ID")] | map(.valueFrom.secretKeyRef // {} | "\(.name)/\(.key)") | join(" ")' <<<"$client_id_json"
+}
+for svc in api worker; do
+  check "[$svc] ...gets SDLC_GITHUB_APP_CLIENT_ID once, from the Secret" [ "$(client_id_of "$svc")" = cadence-github/client-id ]
+done
+check "...api gets SDLC_GITHUB_APP_CLIENT_SECRET_FILE" \
+  [ "$(chart_env "$client_id_json" api | jq -r .SDLC_GITHUB_APP_CLIENT_SECRET_FILE)" = /secrets/cadence/app-secret ]
+check "...the worker no SDLC_GITHUB_APP_CLIENT_SECRET(_FILE)" \
+  [ "$(chart_env "$client_id_json" worker | jq -r '[keys[] | select(startswith("SDLC_GITHUB_APP_CLIENT_SECRET"))] | length')" = 0 ]
 check "the headers of traces: api gets both files (the per-signal one by compose.override.yml in compose)" \
   [ "$(chart_env "$all_json" api | jq -r '"\(.OTEL_EXPORTER_OTLP_HEADERS_FILE) \(.OTEL_EXPORTER_OTLP_TRACES_HEADERS_FILE)"')" = "/secrets/cadence/otlp-headers /secrets/cadence/otlp-traces-headers" ]
 check "...the worker none" \
