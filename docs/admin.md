@@ -1269,8 +1269,10 @@ apart by the kind of their token.
     outside the repositories of the parent), assigns, links, changes the
     repositories and the properties of a task, and puts it in its place in the
     backlog;
-  - requests any transition of the cycle, from any status, and moves a task
-    to any status of its cycle with `clab move`
+  - requests any transition of the cycle out of the current status, of any
+    kind (`advance`, `reject`, `cancel`, `reassign`, a transition from any
+    status), also out of a status that has no executor, and moves a task to
+    any status of its cycle with `clab move`
     ([Moving a task to a status](#moving-a-task-to-a-status));
   - decides the gates that a person closes, at any stage: `human_approval`
     and checklists (`passed` or `failed`), and lifts the limits of a stage
@@ -1291,18 +1293,19 @@ apart by the kind of their token.
   token (`clab token create --for agent:…`, the token of a runner). It works at
   the stage of its role only. It requests the `advance` and `reject`
   transitions of the current status, ticks (`passed`) a checklist of that
-  stage, edits the task whose stage it holds by a lease and creates children
-  of it. It cannot take a transition from any status, cancel a task, decide a
+  stage, edits the task whose stage (or the stage of whose parent) it holds
+  by a lease and creates children of the task it holds, in its repositories.
+  It cannot take a transition from any status, cancel a task, decide a
   limit, give a `waived`, fail a checklist, move a task to a status or change
   its repositories, and it never puts an approval (see below). It assigns and
   links tasks as before.
-- **The executor of a stage with a task token** (the token that a claim of a
-  stage issues for the run) writes only into its own task and its children,
-  and creates only children of its own task, in its repositories. It requests
-  `advance` and `reject` of its own run and ticks the checklist of its own
-  stage. The stages and the repositories of its own task, its properties, a
-  move to a status, an approval and the limits are closed to it, whatever the
-  level of the person who holds the lease.
+- **A stage executor** is an agent with a task token (the token that a claim
+  of a stage issues for the run). It writes only into its own task and its
+  children, and creates only children of its own task, in its repositories.
+  It requests `advance` and `reject` of its own run and ticks the checklist
+  of its own stage. The stages and the repositories of its own task, its
+  properties, a move to a status, an approval and the limits are closed to
+  it, whatever the level of the person who holds the lease.
 
 An approval is never put by an agent: `human_approval` is closed by a person
 (an employee or a maintainer), never by a bot or a task token, and the audit
@@ -1339,8 +1342,9 @@ merges no pull request and sets no tag.
   GitHub: [protected
   branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
   and [rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets).
-- The starter cycle has no such statuses (its statuses are `new`, `analysis`,
-  `development`, `review`, `qa`, `done` and `cancelled`): the boundary is a
+- The starter cycle has no statuses of a merge or a release (its statuses
+  are `new`, `analysis`, `development`, `review`, `qa`, `done` and
+  `cancelled`), and no role of it is told to merge: the boundary is a
   choice of your own cycle and roles, not a part of the starter.
 
 ## First cycle and roles
@@ -1590,8 +1594,10 @@ clab transition PLAT-7 --to qa_failed
 ```
 
 Only a person can do it: an agent's token and the task token of a stage
-executor are refused (`forbidden`), and `--status passed` or `failed` is
-refused as invalid input, since the verdict is the server's. The value of
+executor are refused (`forbidden`). The verdict is the server's, so a person
+gives only `waived`: `--status passed` is refused as invalid input (`400`);
+`--status failed` is invalid input for a maintainer and `403` with the reason
+`maintainer_action` for an employee. The value of
 `max_attempts` is part of the cycle and is changed by a maintainer (see
 below). A waiver is good for one transition: the next time the task comes
 back, the gate counts again and needs a new decision. If you do not want
@@ -2079,11 +2085,11 @@ version has no `move`.
 
 The MCP tools of a person's AI: `sdlc_move_task` (`to`, `reason`: the same
 as `clab move`) and `sdlc_decide_gate`, a decision on a gate with the rules
-and the codes of `clab decide`; neither is open to a task token, and a bot
-does not get `sdlc_move_task`. `clab whoami` prints, with the level of the
-project, the line `С задачами:` ("With tasks") with what the server lets this
-actor do with the tasks of the project: for an employee, any task of the
-project, without a lease.
+and the codes of `clab decide`; neither is open to a task token, and
+`sdlc_move_task` refuses a bot (`403`, as `clab move`). `clab whoami`
+prints, with the level of the project, the line `С задачами:` ("With
+tasks") with what the server lets this actor do with the tasks of the
+project: for an employee, any task of the project, without a lease.
 
 ### Connecting developers
 
@@ -2213,11 +2219,14 @@ project allows. The panel is not on the model of [Who may do what](#who-may-do-w
 yet: it still decides by the level, and until a separate task changes that,
 the buttons of decisions are for the level `maintainer` and above, even
 though an employee (the `agent` level) may decide in the web interface and
-with `clab decide`. Below `maintainer` «Ждут меня» is empty with the caption
-«нужен уровень сопровождающего» ("the maintainer level is needed"), and a
-refusal of the server (`403`) is shown as it is. The model in the chat cannot
-change a task through the panel: it has no tool that changes a task, and the
-panel writes nothing into the conversation.
+with `clab decide`. For a viewer «Ждут меня» is empty with the caption
+«нужен уровень сопровождающего» ("the maintainer level is needed"). An
+employee sees in «Ждут меня» what the server lists for them, the gates of
+the stages of their roles, but the card of such a task opens in the panel
+without the buttons of decisions: decide in the web interface or with
+`clab decide`. A refusal of the server (`403`) is shown as it is. The
+model in the chat cannot change a task through the panel: it has no tool
+that changes a task, and the panel writes nothing into the conversation.
 
 **Older servers.** `clab` of v0.20.0 against a server of v0.19.x hides
 «Ждут меня» (the server answers `404` to its query) and reads the list in
@@ -3474,10 +3483,11 @@ Again no manual step:
   v0.25.0 refuses with a clear message.
 - If you upgrade from v0.22.x or older: v0.23.0 narrowed the `agent` level
   without a separate note. Up to v0.22.x the server did not check the stage of
-  a transition that a member with the `agent` level requested; from v0.23.0
-  the transitions and decisions of an agent follow the role of its stage.
-  v0.25.0 gives people of that level their freedom back (above) and keeps the
-  rule of the stage for bots and task tokens only. This note describes the
+  a transition that a member with the `agent` level requested, and the
+  decisions on gates were a maintainer's; from v0.23.0 the transitions and
+  decisions of an agent follow the role of its stage. v0.25.0 frees people of
+  that level from the rule of the stage (above) and keeps it for bots; the
+  frame of a task token does not change. This note describes the
   result, so there is nothing to compare with v0.22.x.
 
 ## Stage limits
