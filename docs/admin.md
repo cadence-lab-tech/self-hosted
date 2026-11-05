@@ -882,7 +882,10 @@ key (`ACME: github-token-acme` gives `SDLC_GITHUB_TOKEN_ACME_FILE`), and
 `secrets.files` mounts keys without a variable — the CA of the database for
 `sslrootcert=/secrets/<secret>/<key>` of the URL. The worker gets no
 sign-in or webhook secret and no headers of traces; the precheck only the
-database.
+database. The client ID of the sign-in through GitHub is no secret: give it
+as a value, `config.api.SDLC_GITHUB_APP_CLIENT_ID`. Taken from a Secret by
+`extraEnv` instead, it reaches the worker too, which from v0.25.0 starts
+with it and without the client secret.
 
 A key missing in its Secret keeps the pod from starting: its events name
 the Secret and the key (`kubectl -n cadence describe pod`). A key written
@@ -3292,6 +3295,14 @@ The upgrade needs no manual step. The backlog gets a manual order:
   element of the task list, the parameter `backlog=true` of the list and the
   event `task.ranked` in the feeds. `clab` and agents of the previous version
   keep working. No new variables, services or routes of Caddy.
+- A fix (issue #105): the worker no longer checks `SDLC_GITHUB_APP_CLIENT_ID`
+  and `SDLC_GITHUB_APP_CLIENT_SECRET` as a pair — the sign-in through GitHub
+  is the API's, and the chart gives the client secret to the API only. A Helm
+  installation that passes the client ID to both by `extraEnv`, with
+  `config.api.SDLC_GITHUB_APP_CLIENT_ID: null`, had a worker that stopped at
+  start with "SDLC_GITHUB_APP_CLIENT_ID и SDLC_GITHUB_APP_CLIENT_SECRET
+  задаются вместе"; on v0.25.0 it starts with the same values. The API still
+  refuses half of the pair.
 - `clab rank` and `clab backlog` and the MCP tool `sdlc_rank_task` come with
   v0.25.0: see [The order of the backlog](#the-order-of-the-backlog). Update
   `clab` after the server (`brew upgrade clab`); an older `clab` simply has
