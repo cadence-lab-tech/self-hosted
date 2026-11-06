@@ -1198,9 +1198,21 @@ both_routes() {
     [ "$(jq -c '.[] | select(.kind == "Ingress")' <<<"$both_json")" = "$(jq -c '.[] | select(.kind == "Ingress")' <<<"$min_json")" ]
 }
 check "Ingress and HTTPRoute together: both rendered, the Ingress as with the defaults" both_routes
-# NOTES: the address by the rule (helm install --dry-run=client prints them).
+# NOTES: the address by the rule. helm template does not print the notes
+# (and helm install --dry-run=client of Helm 3.19 wants a cluster to ask), so a
+# copy of the chart carries NOTES.txt as a template of its own that puts the
+# rendered text into a ConfigMap.
+notes_chart="$dist/notes-chart"
+rm -rf "$notes_chart"
+cp -R "$chart" "$notes_chart"
+{
+  printf '{{- define "notes" -}}\n'
+  cat "$chart/templates/NOTES.txt"
+  printf '\n{{- end -}}\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: notes}\ndata:\n  notes: {{ include "notes" . | toJson }}\n'
+} >"$notes_chart/templates/notes.yaml"
+rm "$notes_chart/templates/NOTES.txt"
 notes_of() {
-  helm_run install cadence "$chart" -f "$dist/min-values.yaml" --dry-run=client "$@" 2>&1 | awk '/^NOTES:$/ { on = 1; next } on'
+  helm_run template cadence "$notes_chart" -f "$dist/min-values.yaml" --show-only templates/notes.yaml "$@" | sed -n 's/^  notes: //p' | jq -r .
 }
 no_route_notes="$(notes_of --set ingress.enabled=false --set ingress.host=)"
 no_address() {
