@@ -1125,6 +1125,7 @@ httpRoute:
   annotations: {a: b}
   labels: {team: x}
 EOF
+lacks_pattern() { ! grep -q "$1" -e "$2" <<<"$3"; }
 kinds_of() { jq -r '[.[] | "\(.kind)/\(.metadata.name)"] | sort | join(" ")' <<<"$1"; }
 # The manifests of the chart with the minimal values and the arguments: no
 # object of Gateway API in them.
@@ -1151,7 +1152,7 @@ route_obj() { jq -c '.[] | select(.kind == "HTTPRoute")' <<<"${1:-$route_json}";
 check "HTTPRoute only: one HTTPRoute of gateway.networking.k8s.io/v1 named cadence, no Ingress" \
   [ "$(jq -r '[.[] | select(.kind == "HTTPRoute" or .kind == "Ingress") | "\(.kind) \(.apiVersion) \(.metadata.name)"] | join(",")' <<<"$route_json")" = "HTTPRoute gateway.networking.k8s.io/v1 cadence" ]
 check "HTTPRoute only: the other objects are those of the defaults" \
-  [ "$(kinds_of "$route_json")" = "$(sed 's#Ingress/cadence#HTTPRoute/cadence#' <<<"$kinds")" ]
+  [ "$(kinds_of "$route_json")" = "${kinds/Ingress\/cadence/HTTPRoute/cadence}" ]
 check "HTTPRoute: parentRefs as set (name, namespace, sectionName)" \
   [ "$(route_obj | jq -c '.spec.parentRefs')" = '[{"name":"gw","namespace":"infra","sectionName":"https"}]' ]
 check "HTTPRoute: hostnames as set" [ "$(route_obj | jq -c '.spec.hostnames')" = '["cadence.example.com"]' ]
@@ -1162,8 +1163,8 @@ route_paths="$(route_obj | jq -r '.spec.rules[] as $r | $r.matches[] | "\(.path.
 check "the HTTPRoute routes as the Ingress, ports by number: $route_paths" \
   [ "$route_paths" = "/v1 PathPrefix cadence-api:8080,/mcp PathPrefix cadence-api:8080,/webhooks PathPrefix cadence-api:8080,/healthz Exact cadence-api:8080,/readyz Exact cadence-api:8080,/ PathPrefix cadence-ui:80," ]
 check "the HTTPRoute has one backend per rule" [ "$(route_obj | jq -r '[.spec.rules[].backendRefs | length] | join(",")')" = "1,1" ]
-check "the HTTPRoute routes no metrics port" bash -c '! grep -qE "9090|metrics" <<<"$1"' _ "$(route_obj)"
-check "the HTTPRoute carries no TLS (ingress.tls stays with the Ingress)" bash -c '! grep -qi "tls" <<<"$1"' _ "$(route_obj)"
+check "the HTTPRoute routes no metrics port" lacks_pattern -E "9090|metrics" "$(route_obj)"
+check "the HTTPRoute carries no TLS (ingress.tls stays with the Ingress)" lacks_pattern -i "tls" "$(route_obj)"
 # 4. Timeouts: what is set, on every rule; nothing set, no field.
 check "HTTPRoute without timeouts: no timeouts field" [ "$(route_obj | jq -r '[.spec.rules[] | has("timeouts")] | unique | join(",")')" = false ]
 route_with() { route_obj "$(render_json -f "$dist/min-values.yaml" -f "$dist/httproute-values.yaml" "$@")"; }

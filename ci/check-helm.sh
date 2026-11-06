@@ -22,8 +22,11 @@
 # secret in the values of the release or the manifests; a key missing in the
 # Secret; a refused upgrade keeps the pods; an upgrade with a changed value
 # keeps the data; the manifests of the bucket without keys (Pod Identity and
-# IRSA, CLAB-394) admitted under restricted by a dry run. CI runs it in the
-# job "helm" of check.yml.
+# IRSA, CLAB-394) admitted under restricted by a dry run; the HTTPRoute of the
+# chart (httpRoute.enabled, CLAB-456) validated by the API server against the
+# CRDs of Gateway API, installed only after the chart is: with the route off
+# the chart needs none. No Gateway controller runs, so the route is admitted,
+# not served. CI runs it in the job "helm" of check.yml.
 #
 #   ci/check-helm.sh
 #
@@ -48,6 +51,10 @@
 #                     of a branch built under the tag of VERSION before
 #                     v0.18.0 (the published images of those have no
 #                     attachments, and the scenario is skipped for them)
+#   CHECK_GATEWAY_API_VERSION
+#                     release of the CRDs of Gateway API (Standard channel)
+#                     the HTTPRoute of the chart is validated against, default
+#                     v1.2.1 - the smallest one docs/admin.md names
 #   CHECK_KEEP=1      leave the cluster and the stand-ins after the check
 #
 # Images in a local registry (localhost:*) are not reachable from the nodes
@@ -90,6 +97,7 @@ cluster="${CHECK_CLUSTER:-cadence-check-helm}"
 port="${CHECK_HTTP_PORT:-8090}"
 s3_port="${CHECK_S3_PORT:-$((port + 4))}"
 version="$(tr -d '[:space:]' <VERSION)"
+gateway_api="${CHECK_GATEWAY_API_VERSION:-v1.2.1}"
 tag="${CHECK_IMAGE_TAG:-$version}"
 registry="${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}"
 ns=cadence
@@ -387,6 +395,43 @@ for mode in annotation podIdentity irsa; do
   check "no keys of the bucket ($mode): admitted under restricted, no warning ($(printf '%s' "${dry:-none}" | tr '\n' ' '))" \
     [ -z "$dry" ]
 done
+
+# --- HTTPRoute against Gateway API (CLAB-456) --------------------------------------------
+info "HTTPRoute (Gateway API $gateway_api)"
+# The install above ran with no CRD of Gateway API in the cluster: the chart
+# with httpRoute off needs none. Now they go in (Standard channel, the
+# smallest version the guide names), and the API server validates the
+# HTTPRoute of the chart against their schema. There is no Gateway controller
+# here: the route is admitted, not served.
+check "the release installed with no CRD of Gateway API in the cluster" \
+  [ -z "$(kubectl get crd -o name | grep -F 'gateway.networking.k8s.io' || true)" ]
+check "...and has no HTTPRoute among its manifests" lacks "$(helm get manifest "$release" -n "$ns")" "gateway.networking.k8s.io"
+check "the CRDs of Gateway API $gateway_api (Standard channel) install" \
+  kubectl apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/$gateway_api/standard-install.yaml"
+check "...and HTTPRoute is established" kubectl wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s
+cat >"$work/httproute-values.yaml" <<EOT
+ingress: {enabled: false}
+httpRoute:
+  enabled: true
+  parentRefs:
+    - {name: gateway, namespace: infra, sectionName: https}
+  hostnames: [cadence.example.com]
+  annotations: {check: httproute}
+  labels: {team: check}
+  timeouts: {request: 3600s, backendRequest: 3600s}
+EOT
+route_manifest() { helm template route "$chart" -n "$ns" -f "$work/values.yaml" -f "$work/httproute-values.yaml" "$@" --show-only templates/httproute.yaml; }
+# stdout is dropped: what stays is the stderr of kubectl, errors and warnings.
+route_dry="$(route_manifest | kubectl apply -n "$ns" --dry-run=server -f - 2>&1 >/dev/null || echo "exit $?")"
+check "the HTTPRoute with parentRefs, hostnames and timeouts passes the schema, no error and no warning (${route_dry:-none})" [ -z "$route_dry" ]
+route_created="$(route_manifest | kubectl apply -n "$ns" --dry-run=server -f - -o name 2>&1 || true)"
+check "...the API server names it httproute.gateway.networking.k8s.io/route-cadence" contains "$route_created" "httproute.gateway.networking.k8s.io/route-cadence"
+# The schema is applied: a backendRequest longer than request is refused.
+bad_dry="$(route_manifest --set httpRoute.timeouts.request=1s --set httpRoute.timeouts.backendRequest=2s |
+  kubectl apply -n "$ns" --dry-run=server -f - 2>&1 || true)"
+check "an HTTPRoute with backendRequest longer than request is refused by the schema" contains "$bad_dry" "backendRequest"
+bad_dry="$(route_manifest --set httpRoute.timeouts.request=an-hour | kubectl apply -n "$ns" --dry-run=server -f - 2>&1 || true)"
+check "an HTTPRoute with a timeout that is no duration is refused by the schema" contains "$bad_dry" "timeouts"
 
 # --- through the Ingress --------------------------------------------------------------------
 info "the Ingress"
