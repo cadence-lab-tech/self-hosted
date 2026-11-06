@@ -40,10 +40,11 @@ nothing in a section that is there.
 */}}
 {{- define "cadence.sections" -}}
 {{- $v := .Values -}}
-{{- range $name := list "database" "ingress" "blobs" "secrets" "image" -}}
+{{- range $name := list "database" "ingress" "httpRoute" "blobs" "secrets" "image" -}}
 {{- $_ := set $v $name (default dict (index $v $name)) -}}
 {{- end -}}
 {{- $_ := set $v.ingress "tls" (default dict $v.ingress.tls) -}}
+{{- $_ := set $v.httpRoute "timeouts" (default dict $v.httpRoute.timeouts) -}}
 {{- $_ := set $v.blobs "s3" (default dict $v.blobs.s3) -}}
 {{- $_ := set $v.secrets "keys" (default dict $v.secrets.keys) -}}
 {{- $_ := set $v.image "backend" (default dict $v.image.backend) -}}
@@ -209,14 +210,40 @@ pod names the Secret and the key.
 {{- end -}}
 
 {{/*
+Whether the Ingress and the HTTPRoute are rendered, as "true" or "false".
+The Ingress is on unless ingress.enabled is false - a missing key, also an
+`ingress:` left null, means on, as metrics.enabled. The HTTPRoute is off
+unless httpRoute.enabled is true. cadence.sections comes first.
+*/}}
+{{- define "cadence.ingressEnabled" -}}
+{{- ne (toString .Values.ingress.enabled) "false" -}}
+{{- end -}}
+
+{{- define "cadence.httpRouteEnabled" -}}
+{{- eq (toString .Values.httpRoute.enabled) "true" -}}
+{{- end -}}
+
+{{/*
 The values the chart cannot do without (docs/admin.md, "Kubernetes
 (Helm)"): the rendering stops with the key to set.
 */}}
 {{- define "cadence.validate" -}}
 {{- include "cadence.sections" . -}}
 {{- $v := .Values -}}
+{{- if eq (include "cadence.ingressEnabled" .) "true" -}}
 {{- if not $v.ingress.host -}}
 {{- fail "ingress.host is required: the address people open, e.g. cadence.example.com" -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (include "cadence.httpRouteEnabled" .) "true" -}}
+{{- if not $v.httpRoute.parentRefs -}}
+{{- fail "httpRoute.parentRefs is required: the Gateway the route attaches to, e.g. [{name: gateway, namespace: infra, sectionName: https}]" -}}
+{{- end -}}
+{{- range $i, $ref := $v.httpRoute.parentRefs -}}
+{{- if not (and (kindIs "map" $ref) $ref.name) -}}
+{{- fail (printf "httpRoute.parentRefs[%d].name is required: the name of the Gateway" $i) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- $k := $v.secrets.keys -}}
 {{- if and $k.SDLC_DATABASE_URL $v.database.url -}}

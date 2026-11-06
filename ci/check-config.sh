@@ -987,7 +987,7 @@ helm_run() {
 yaml_json() { docker run --rm -i mikefarah/yq:4.47.1 -o=json -I=0 '.'; }
 chart=charts/cadence
 for f in Chart.yaml values.yaml templates/_helpers.tpl templates/api.yaml templates/worker.yaml templates/ui.yaml \
-  templates/ingress.yaml templates/dbcheck-job.yaml templates/NOTES.txt; do
+  templates/ingress.yaml templates/httproute.yaml templates/dbcheck-job.yaml templates/NOTES.txt; do
   check "$chart/$f exists" [ -f "$chart/$f" ]
 done
 check "Chart.yaml: version ${version#v}, appVersion $version (VERSION)" [ "$(chart_version_of)" = "${version#v} $version" ]
@@ -1005,6 +1005,19 @@ fi
 render_json() { helm_run template cadence "$chart" "$@" | yaml_json | jq -s -c '[.[] | select(. != null)]'; }
 example_json="$(render_json -f "$dist/example-values.yaml" 2>/dev/null || true)"
 check "helm template with the example of docs/admin.md" [ -n "$example_json" -a "$example_json" != "[]" ]
+# The second example, the Gateway API one, goes over the first (CLAB-456).
+route_example="$(awk '/^# cadence-values-httproute.yaml$/ { on = 1 } on && /^```$/ { exit } on' docs/admin.md)"
+check "docs/admin.md has the example values of the HTTPRoute (# cadence-values-httproute.yaml)" [ -n "$route_example" ]
+printf '%s\n' "$route_example" >"$dist/example-httproute-values.yaml"
+if lint_out="$(helm_run lint "$chart" -f "$dist/example-values.yaml" -f "$dist/example-httproute-values.yaml" 2>&1)"; then
+  pass "helm lint with the example of the HTTPRoute of docs/admin.md"
+else
+  fail "helm lint with the example of the HTTPRoute of docs/admin.md"
+  printf '%s\n' "$lint_out" >&2
+fi
+route_example_json="$(render_json -f "$dist/example-values.yaml" -f "$dist/example-httproute-values.yaml" 2>/dev/null || true)"
+check "helm template with the example of the HTTPRoute: one HTTPRoute, no Ingress" \
+  [ "$(jq -r '[.[] | .kind] | map(select(. == "HTTPRoute" or . == "Ingress")) | join(",")' <<<"${route_example_json:-[]}")" = HTTPRoute ]
 
 # The smallest values the chart takes: the URL of the database in a Secret,
 # the bucket and its keys, the administrator token, the host.
@@ -1097,6 +1110,134 @@ check "the Ingress routes as the Caddyfile: $routes" \
   [ "$routes" = "/v1 Prefix cadence-api:http,/mcp Prefix cadence-api:http,/webhooks Prefix cadence-api:http,/healthz Exact cadence-api:http,/readyz Exact cadence-api:http,/ Prefix cadence-ui:http," ]
 check "the Ingress routes no metrics port" lacks "$(jq -c '.[] | select(.kind == "Ingress")' <<<"$min_json")" "metrics"
 check "the Services are ClusterIP" [ "$(jq -r '[.[] | select(.kind == "Service") | .spec.type] | unique | join(" ")' <<<"$min_json")" = ClusterIP ]
+
+# The Ingress and the HTTPRoute (CLAB-456, self-hosted#109): the Ingress is on
+# unless switched off, the HTTPRoute off unless switched on, each by its own
+# switch; the routes of the HTTPRoute are those of the Ingress.
+info "Helm chart: Ingress and HTTPRoute"
+cat >"$dist/httproute-values.yaml" <<'EOF'
+ingress: {enabled: false}
+httpRoute:
+  enabled: true
+  parentRefs:
+    - {name: gw, namespace: infra, sectionName: https}
+  hostnames: [cadence.example.com]
+  annotations: {a: b}
+  labels: {team: x}
+EOF
+lacks_pattern() { ! grep -q "$1" -e "$2" <<<"$3"; }
+kinds_of() { jq -r '[.[] | "\(.kind)/\(.metadata.name)"] | sort | join(" ")' <<<"$1"; }
+# The manifests of the chart with the minimal values and the arguments: no
+# object of Gateway API in them.
+gateway_free() { ! helm_run template cadence "$chart" -f "$dist/min-values.yaml" "$@" | grep -qF 'gateway.networking.k8s.io'; }
+# 1. Defaults: the Ingress as before, no HTTPRoute, nothing of Gateway API.
+check "default values: an Ingress, no HTTPRoute" \
+  [ "$(jq -r '[.[] | select(.kind == "Ingress" or .kind == "HTTPRoute") | .kind] | join(",")' <<<"$min_json")" = Ingress ]
+check "default values: no object of gateway.networking.k8s.io" gateway_free
+check "ingress.enabled=true, httpRoute off: the same objects as the defaults" \
+  [ "$(kinds_of "$(render_json -f "$dist/min-values.yaml" --set ingress.enabled=true --set httpRoute.enabled=false)")" = "$(kinds_of "$min_json")" ]
+printf 'ingress: {host: x.example.com}\n' >"$dist/ingress-no-enabled.yaml"
+check "ingress: {host: ...} without enabled is on (a missing key means on)" \
+  [ "$(render_json -f "$dist/min-values.yaml" -f "$dist/ingress-no-enabled.yaml" | jq -r '.[] | select(.kind == "Ingress") | .spec.rules[0].host')" = x.example.com ]
+# 2. No route at all: the objects of the defaults without the Ingress.
+no_route_kinds="$(kinds_of "$(render_json -f "$dist/min-values.yaml" --set ingress.enabled=false --set ingress.host=)")"
+check "ingress.enabled=false without host and HTTPRoute renders: $no_route_kinds" \
+  [ "$no_route_kinds" = "Deployment/cadence-api Deployment/cadence-ui Deployment/cadence-worker Job/cadence-dbcheck Service/cadence-api Service/cadence-ui Service/cadence-worker-metrics ServiceAccount/cadence" ]
+check "...no object of gateway.networking.k8s.io" gateway_free --set ingress.enabled=false --set ingress.host=
+check "ingress.enabled=false with the host set renders no Ingress either" \
+  [ "$(kinds_of "$(render_json -f "$dist/min-values.yaml" --set ingress.enabled=false)")" = "$no_route_kinds" ]
+# 3. Only the HTTPRoute.
+route_json="$(render_json -f "$dist/min-values.yaml" -f "$dist/httproute-values.yaml")"
+route_obj() { jq -c '.[] | select(.kind == "HTTPRoute")' <<<"${1:-$route_json}"; }
+check "HTTPRoute only: one HTTPRoute of gateway.networking.k8s.io/v1 named cadence, no Ingress" \
+  [ "$(jq -r '[.[] | select(.kind == "HTTPRoute" or .kind == "Ingress") | "\(.kind) \(.apiVersion) \(.metadata.name)"] | join(",")' <<<"$route_json")" = "HTTPRoute gateway.networking.k8s.io/v1 cadence" ]
+check "HTTPRoute only: the other objects are those of the defaults" \
+  [ "$(kinds_of "$route_json")" = "${kinds/Ingress\/cadence/HTTPRoute/cadence}" ]
+check "HTTPRoute: parentRefs as set (name, namespace, sectionName)" \
+  [ "$(route_obj | jq -c '.spec.parentRefs')" = '[{"name":"gw","namespace":"infra","sectionName":"https"}]' ]
+check "HTTPRoute: hostnames as set" [ "$(route_obj | jq -c '.spec.hostnames')" = '["cadence.example.com"]' ]
+check "HTTPRoute: the annotation of httpRoute.annotations" [ "$(route_obj | jq -r '.metadata.annotations.a')" = b ]
+check "HTTPRoute: the labels of the chart and httpRoute.labels" \
+  [ "$(route_obj | jq -r '.metadata.labels | [.["app.kubernetes.io/name"], .["app.kubernetes.io/instance"], .["app.kubernetes.io/version"], .["app.kubernetes.io/managed-by"], .["helm.sh/chart"], .team] | join(" ")')" = "cadence cadence $version Helm cadence-${version#v} x" ]
+route_paths="$(route_obj | jq -r '.spec.rules[] as $r | $r.matches[] | "\(.path.value) \(.path.type) \($r.backendRefs[0].name):\($r.backendRefs[0].port)"' | tr '\n' ',')"
+check "the HTTPRoute routes as the Ingress, ports by number: $route_paths" \
+  [ "$route_paths" = "/v1 PathPrefix cadence-api:8080,/mcp PathPrefix cadence-api:8080,/webhooks PathPrefix cadence-api:8080,/healthz Exact cadence-api:8080,/readyz Exact cadence-api:8080,/ PathPrefix cadence-ui:80," ]
+check "the HTTPRoute has one backend per rule" [ "$(route_obj | jq -r '[.spec.rules[].backendRefs | length] | join(",")')" = "1,1" ]
+check "the HTTPRoute routes no metrics port" lacks_pattern -E "9090|metrics" "$(route_obj)"
+check "the HTTPRoute carries no TLS (ingress.tls stays with the Ingress)" lacks_pattern -i "tls" "$(route_obj)"
+# 4. Timeouts: what is set, on every rule; nothing set, no field.
+check "HTTPRoute without timeouts: no timeouts field" [ "$(route_obj | jq -r '[.spec.rules[] | has("timeouts")] | unique | join(",")')" = false ]
+route_with() { route_obj "$(render_json -f "$dist/min-values.yaml" -f "$dist/httproute-values.yaml" "$@")"; }
+check "HTTPRoute timeouts.request and backendRequest: on every rule" \
+  [ "$(route_with --set httpRoute.timeouts.request=3600s --set httpRoute.timeouts.backendRequest=3600s | jq -c '[.spec.rules[].timeouts] | unique')" = '[{"backendRequest":"3600s","request":"3600s"}]' ]
+check "HTTPRoute timeouts.request alone: only request" \
+  [ "$(route_with --set httpRoute.timeouts.request=3600s | jq -c '[.spec.rules[].timeouts] | unique')" = '[{"request":"3600s"}]' ]
+check "HTTPRoute timeouts.backendRequest alone: only backendRequest" \
+  [ "$(route_with --set httpRoute.timeouts.backendRequest=0s | jq -c '[.spec.rules[].timeouts] | unique')" = '[{"backendRequest":"0s"}]' ]
+check "HTTPRoute timeouts: null renders without timeouts" \
+  [ "$(route_with --set httpRoute.timeouts=null | jq -r '[.spec.rules[] | has("timeouts")] | unique | join(",")')" = false ]
+check "HTTPRoute without hostnames: no hostnames field" [ "$(route_with --set httpRoute.hostnames=null | jq -r '.spec | has("hostnames")')" = false ]
+check "HTTPRoute with a label of the chart in httpRoute.labels: one key, the operator's value" \
+  [ "$(route_with --set 'httpRoute.labels.app\.kubernetes\.io/name=mine' | jq -r '.metadata.labels["app.kubernetes.io/name"]')" = mine ]
+# 5. Refusals by the name of the key; null is not a nil pointer.
+check "HTTPRoute on without parentRefs: refused, naming httpRoute.parentRefs" refused "httpRoute.parentRefs is required" --set httpRoute.enabled=true
+check "HTTPRoute on, parentRefs null: refused, naming httpRoute.parentRefs" refused "httpRoute.parentRefs is required" \
+  --set httpRoute.enabled=true --set httpRoute.parentRefs=null
+check "HTTPRoute on, a parentRef without name: refused, naming httpRoute.parentRefs[0].name" refused "httpRoute.parentRefs[0].name is required" \
+  --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].namespace=infra'
+check "HTTPRoute off without parentRefs renders" [ -n "$(render_json -f "$dist/min-values.yaml" --set httpRoute.enabled=false)" ]
+printf 'httpRoute:\n' >"$dist/null-httproute.yaml"
+check "httpRoute: null renders, no HTTPRoute" [ "$(kinds_of "$(render_json -f "$dist/min-values.yaml" --set httpRoute=null)")" = "$kinds" ]
+check "...the same with httpRoute: empty in a values file" \
+  [ "$(kinds_of "$(render_json -f "$dist/min-values.yaml" -f "$dist/null-httproute.yaml")")" = "$kinds" ]
+check "httpRoute: null leaves no object of gateway.networking.k8s.io" gateway_free --set httpRoute=null
+# 6. Both routes: the Ingress as before and the HTTPRoute.
+both_json="$(render_json -f "$dist/min-values.yaml" -f "$dist/httproute-values.yaml" --set ingress.enabled=true)"
+both_routes() {
+  [ "$(jq -r '[.[] | select(.kind == "Ingress" or .kind == "HTTPRoute") | .kind] | sort | join(",")' <<<"$both_json")" = "HTTPRoute,Ingress" ] &&
+    [ "$(jq -c '.[] | select(.kind == "Ingress")' <<<"$both_json")" = "$(jq -c '.[] | select(.kind == "Ingress")' <<<"$min_json")" ]
+}
+check "Ingress and HTTPRoute together: both rendered, the Ingress as with the defaults" both_routes
+# NOTES: the address by the rule. helm template does not print the notes
+# (and helm install --dry-run=client of Helm 3.19 wants a cluster to ask), so a
+# copy of the chart carries NOTES.txt as a template of its own that puts the
+# rendered text into a ConfigMap.
+notes_chart="$dist/notes-chart"
+rm -rf "$notes_chart"
+cp -R "$chart" "$notes_chart"
+{
+  printf '{{- define "notes" -}}\n'
+  cat "$chart/templates/NOTES.txt"
+  printf '\n{{- end -}}\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: notes}\ndata:\n  notes: {{ include "notes" . | toJson }}\n'
+} >"$notes_chart/templates/notes.yaml"
+rm "$notes_chart/templates/NOTES.txt"
+notes_of() {
+  helm_run template cadence "$notes_chart" -f "$dist/min-values.yaml" --show-only templates/notes.yaml "$@" | sed -n 's/^  notes: //p' | jq -r .
+}
+no_route_notes="$(notes_of --set ingress.enabled=false --set ingress.host=)"
+no_address() {
+  [ "$(grep -c 'the route is yours: open the address you gave it' <<<"$1")" = 1 ] && lacks "$1" "Address:" &&
+    contains "$1" "clab auth login --host https://<your address> --with-token" && ! grep -qE 'https?://($| )' <<<"$1"
+}
+check "NOTES without a route: no address, \"the route is yours\", a place for it in clab auth login" no_address "$no_route_notes"
+check "NOTES of the defaults: the address of ingress.host" contains "$(notes_of)" "Address: http://cadence.example.com"
+notes_both() {
+  local n
+  n="$(notes_of -f "$dist/httproute-values.yaml" --set ingress.enabled=true)"
+  contains "$n" "Address: http://cadence.example.com" && lacks "$n" "listener"
+}
+check "NOTES with the Ingress and the HTTPRoute: the address of ingress.host, no listener line" notes_both
+notes_route() {
+  local n
+  n="$(notes_of -f "$dist/httproute-values.yaml" --set 'httpRoute.hostnames={*.example.com,cadence.example.com}')"
+  contains "$n" "Address: https://cadence.example.com" && contains "$n" "TLS on the listener of the Gateway" &&
+    contains "$n" "clab auth login --host https://cadence.example.com --with-token"
+}
+check "NOTES with the HTTPRoute: the first hostname without a wildcard, https, the listener line" notes_route
+check "NOTES with only a wildcard hostname: as without a route" \
+  [ "$(notes_of -f "$dist/httproute-values.yaml" --set 'httpRoute.hostnames={*.example.com}')" = "$no_route_notes" ]
+check "NOTES with the HTTPRoute and no hostnames: as without a route" \
+  [ "$(notes_of -f "$dist/httproute-values.yaml" --set httpRoute.hostnames=null)" = "$no_route_notes" ]
 
 # The images: the tag of VERSION and the pins of docker-compose.yml.
 for image in $PIN_IMAGES; do
@@ -1401,7 +1542,7 @@ documented=0
 while read -r key; do
   documented=$((documented + 1))
   check "docs/admin.md names $key: a key of values.yaml" grep -qxF -- "$key" <<<"$value_paths"
-done < <(grep -oE '`(image|imagePullSecrets|ingress|database|blobs|secrets|config|extraEnv|metrics|api|worker|ui|dbcheck|serviceAccount)(\.[A-Za-z0-9_]+)+`' <<<"$k8s_doc" | tr -d '`' | sort -u)
+done < <(grep -oE '`(image|imagePullSecrets|ingress|httpRoute|database|blobs|secrets|config|extraEnv|metrics|api|worker|ui|dbcheck|serviceAccount)(\.[A-Za-z0-9_]+)+`' <<<"$k8s_doc" | tr -d '`' | sort -u)
 check "docs/admin.md names keys of values.yaml" [ "$documented" -gt 0 ]
 # CLAB-236: the namespace enforces restricted, the UI included.
 check "docs/admin.md labels the namespace enforce=restricted" contains "$k8s_doc" "kubectl label namespace cadence pod-security.kubernetes.io/enforce=restricted"

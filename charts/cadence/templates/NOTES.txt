@@ -1,9 +1,29 @@
 {{- include "cadence.sections" . -}}
+{{- /* The address: the Ingress host; else the first hostname of the HTTPRoute without a wildcard; else none, the route is the operator's. */ -}}
 {{- $scheme := ternary "https" "http" (not (empty .Values.ingress.tls.secretName)) -}}
+{{- $base := "" -}}
+{{- $viaRoute := false -}}
+{{- if eq (include "cadence.ingressEnabled" .) "true" -}}
+{{- $base = printf "%s://%s" $scheme .Values.ingress.host -}}
+{{- else if eq (include "cadence.httpRouteEnabled" .) "true" -}}
+{{- range .Values.httpRoute.hostnames -}}
+{{- if and (not $base) (not (hasPrefix "*" (toString .))) -}}
+{{- $base = printf "https://%s" (toString .) -}}
+{{- $viaRoute = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $ref := include "cadence.secretRef" (list . .Values.secrets.keys.SDLC_ADMIN_TOKEN "secrets.keys.SDLC_ADMIN_TOKEN") | fromYaml -}}
 Cadence Lab {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}" in the namespace {{ .Release.Namespace }}.
 
-Address: {{ $scheme }}://{{ .Values.ingress.host }}
+{{ if $base -}}
+Address: {{ $base }}
+{{- if $viaRoute }}
+(TLS on the listener of the Gateway; http:// if the listener is plain HTTP)
+{{- end }}
+{{- else -}}
+No address to print, the route is yours: open the address you gave it.
+{{- end }}
 
 The API applies the migrations on start; the worker waits for it:
 
@@ -14,7 +34,7 @@ First sign-in: the administrator token is the key {{ $ref.key }} of the Secret
 it to the CLI:
 
   kubectl -n {{ .Release.Namespace }} get secret {{ $ref.secret }} -o go-template='{{ "{{" }}index .data "{{ $ref.key }}" | base64decode{{ "}}" }}' >admin-token
-  clab auth login --host {{ $scheme }}://{{ .Values.ingress.host }} --with-token <admin-token && rm admin-token
+  clab auth login --host {{ default "https://<your address>" $base }} --with-token <admin-token && rm admin-token
 
 Then teams, projects and the first cycle: docs/admin.md of the package,
 "Teams, projects and invites" and "First cycle and roles".
