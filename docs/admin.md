@@ -783,8 +783,10 @@ Next to the compose package, Cadence Lab installs into a Kubernetes cluster
 with the Helm chart `charts/cadence` of this repository, from v0.13.0. The
 chart runs the same images of the same version — the API, the worker and
 the UI as three Deployments — on your PostgreSQL and your S3 bucket, with
-the secrets in Secrets of the cluster; the Ingress of the cluster takes the
-place of the Caddy of the package. The settings are the `SDLC_*` variables
+the secrets in Secrets of the cluster; an Ingress or an HTTPRoute of Gateway
+API (from v0.26.0), or a route of your own, takes the place of the Caddy of
+the package ([Routes](#routes-the-ingress-an-httproute-or-your-own)). The
+settings are the `SDLC_*` variables
 of `docker-compose.yml` with the same defaults. The chart has no database,
 no Caddy and no persistent volumes (the API gets one scratch directory,
 [`/tmp`](#attachments)).
@@ -793,15 +795,19 @@ no Caddy and no persistent volumes (the API gets one scratch directory,
 
 - **Kubernetes 1.27 or newer and Helm 3.8 or newer** (charts from an OCI
   registry).
-- **An ingress controller** that passes a stream through: MCP answers with
-  server-sent events. The controller must not buffer the responses of
+- **An ingress controller, or an implementation of Gateway API** (Envoy
+  Gateway, for one), that passes a stream through: MCP answers with
+  server-sent events. Whichever you use, it must not buffer the responses of
   `/mcp`, must keep a request open for an hour, and must take a request
   body of `2 x SDLC_BLOB_MAX_BYTES + 1 MiB` (129 MiB for the default limit of
   64 MiB: the API's own limit on a request, see [Attachments](#attachments)).
-  For ingress-nginx the annotations of the example below do it; for another
-  controller set its equivalents. The annotations apply to every path of
-  the Ingress, `/v1` included, where the long poll of events
-  (`clab wait`) holds a response for up to 25 seconds.
+  The long poll of events (`clab wait`) on `/v1` holds a response for up to
+  25 seconds, and no idle timeout of the controller may cut it. How to do it
+  depends on the controller. For ingress-nginx the annotations of the example
+  below do it; for another ingress controller set its equivalents, and for
+  Gateway API see [what the route sets and what only the controller
+  does](#gateway-api-httproute). The annotations of an Ingress apply to
+  every path of it, `/v1` included.
 - **PostgreSQL with pgvector**, as for an
   [external database](#server-extensions-and-the-role): the role, the
   extensions and `sslmode`. The pods reach it from the cluster.
@@ -812,7 +818,8 @@ no Caddy and no persistent volumes (the API gets one scratch directory,
   [S3 without keys](#s3-without-keys-pod-identity-and-irsa)).
 - **The certificate of the host**: a Secret of type `kubernetes.io/tls`
   (cert-manager or yours) named in `ingress.tls.secretName`, or TLS that
-  ends before the Ingress.
+  ends before the Ingress. With an HTTPRoute the certificate belongs to the
+  listener of the Gateway, not to the chart.
 - **Pod Security `restricted`** for the namespace, from the chart 0.14.0:
   every pod meets it — the API, the worker, the precheck and the UI. The
   frontend image runs Caddy as uid 65532 on port 8080, and from the chart
@@ -957,6 +964,108 @@ config:
 two `SDLC_BLOB_S3_*` keys and the `--from-file` of them, and give the pods a
 role instead: [S3 without keys](#s3-without-keys-pod-identity-and-irsa).
 
+### Routes: the Ingress, an HTTPRoute, or your own
+
+The chart can route the traffic itself, in one of two ways, or leave the route
+to you. Each way has its own switch:
+
+| key | default | what it does |
+|---|---|---|
+| `ingress.enabled` | `true` | Renders the Ingress. `false`: no Ingress, and `ingress.host` is not required. A missing key (and an empty `ingress:`) means `true` |
+| `httpRoute.enabled` | `false` | Renders an HTTPRoute of Gateway API, from v0.26.0 |
+| `httpRoute.parentRefs` | `[]` | The Gateways the route attaches to: `name` (required), `namespace`, `sectionName` (the listener) and the other fields of a parent reference, passed as they are. Required when the route is on |
+| `httpRoute.hostnames` | `[]` | The hostnames of the route; empty takes those of the listener |
+| `httpRoute.annotations`, `httpRoute.labels` | `{}` | Added to the HTTPRoute; the labels join those of the chart |
+| `httpRoute.timeouts.request`, `httpRoute.timeouts.backendRequest` | empty | Set on every rule of the route when given; empty sets nothing |
+
+- **Ingress only** is what the chart has always done and stays the default:
+  a release of an older version upgrades with the same values to the same
+  Ingress, and the chart needs no Gateway API.
+- **HTTPRoute only**: `ingress.enabled: false` and `httpRoute.enabled: true`,
+  see [below](#gateway-api-httproute).
+- **Both** is allowed, for the time of a move from the Ingress to a Gateway:
+  switch `httpRoute` on, move the traffic (DNS), then set
+  `ingress.enabled: false` and upgrade — the Ingress goes, the route stays.
+- **Neither**: the chart installs the API, the worker and the UI, and the
+  route is yours (a service mesh, your own HTTPRoute or Ingress in a
+  repository of GitOps). Set `ingress.enabled: false` and leave
+  `httpRoute.enabled` off; `ingress.host` is not needed. Your route repeats
+  what the Caddyfile of the package does, to the Services of the release
+  (`cadence-api` and `cadence-ui` for the release `cadence`, see
+  `kubectl -n cadence get service`):
+
+  | path | match | Service | port |
+  |---|---|---|---|
+  | `/v1`, `/mcp`, `/webhooks` | prefix | `cadence-api` | 8080 |
+  | `/healthz`, `/readyz` | exact | `cadence-api` | 8080 |
+  | `/` | prefix | `cadence-ui` | 80 |
+
+  Port 9090 (the metrics of the API and the worker) is not routed. With no
+  route from the chart, the notes of `helm install` print no address and
+  say that the route is yours.
+
+#### Gateway API (HTTPRoute)
+
+The HTTPRoute is `gateway.networking.k8s.io/v1`, with the routes of the
+table above (the ports as numbers: an HTTPRoute takes no port name). The chart
+creates the route only. The Gateway, its listener with the certificate of
+the host, the controller and its policies are yours: TLS belongs to the
+listener, and `ingress.tls` is not carried over. Put the overlay below over
+the values of the example above, or on its own:
+
+```yaml
+# cadence-values-httproute.yaml
+ingress:
+  enabled: false
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: gateway
+      namespace: infra
+      sectionName: https
+  hostnames:
+    - cadence.example.com
+  timeouts:
+    request: 3600s
+    backendRequest: 3600s
+```
+
+- **The CRDs of Gateway API** must be in the cluster **when the HTTPRoute is
+  on**, and only then: a release with `httpRoute.enabled: false` has no object
+  of that API group and needs none. The chart does not install them and does
+  not look for them (`helm template` and GitOps render with no cluster); with
+  the CRDs missing `helm install` fails with "no matches for kind HTTPRoute".
+  Install the Standard channel yourself, v1.2 or newer:
+  `kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml`.
+  The route needs `v1` of `HTTPRoute`; its `timeouts` field is in the Standard
+  channel from v1.2. An earlier release of the CRDs rejects the field.
+- **`parentRefs` is required** while the route is on, and each entry needs a
+  `name`: the rendering stops naming the key.
+- **`hostnames`** are optional, as in Gateway API: empty, the route takes the
+  hostnames of the listener it attaches to. A Gateway of its own with a
+  hostname on the listener is the usual case. On a Gateway shared with others a
+  route with no `hostnames` and the prefix `/` becomes the fallback for every
+  host of the listener: set `hostnames` there. The notes of `helm install` print
+  the address of the first hostname with no wildcard (`https`, since TLS ends
+  on the listener; `http://` if yours is plain HTTP), or none.
+- **What `timeouts` set, and what only the controller does.** `timeouts.request`
+  is the time the controller gives a request to be answered, and
+  `timeouts.backendRequest` the time of one try to the Service; `0s` sets no
+  limit. MCP holds a request open for an hour, so set both to `3600s`, or the
+  default of your controller cuts the stream. The route cannot say whether
+  responses are buffered, how large a request body may be
+  (`2 x SDLC_BLOB_MAX_BYTES + 1 MiB`), or when an idle connection closes:
+  those are policies of the controller, which the chart does not create. For
+  Envoy Gateway they are [`BackendTrafficPolicy` and
+  `ClientTrafficPolicy`](https://gateway.envoyproxy.io/docs/api/extension_types/),
+  attached to the Gateway or to this route (named `cadence` for the release
+  `cadence`) as each policy allows; read their fields in that reference for
+  your version.
+  Another controller has its own.
+- Check what you installed the same way as with an Ingress: the notes of
+  `helm install` print the address, `kubectl -n cadence get httproute cadence`
+  shows the `Accepted` and `ResolvedRefs` conditions of the Gateway.
+
 ### S3 without keys: Pod Identity and IRSA
 
 From v0.24.0 the API and the worker on EKS take the keys of the bucket from
@@ -1092,8 +1201,9 @@ helm install cadence oci://ghcr.io/cadence-lab-tech/charts/cadence --version 0.1
 ```
 
 1. A rendering without the database, the bucket, the administrator token
-   or `ingress.host`, or with half of the pair of keys of the bucket, stops
-   before anything reaches the cluster, naming the missing key.
+   or, while the Ingress is on, `ingress.host`, or with an HTTPRoute with no
+   `httpRoute.parentRefs`, or with half of the pair of keys of the bucket,
+   stops before anything reaches the cluster, naming the missing key.
 2. The hook `pre-install` runs `/api dbcheck --install` of the backend image
    of the version as a Job (`cadence-dbcheck`), with the secrets of the
    database only. A database it refuses — no `vector`, a wrong password, a
@@ -1180,8 +1290,8 @@ and do not touch a cluster. Back up with the means of your platform:
 
 The API (`cadence-api`, port `metrics`) and the worker
 (`cadence-worker-metrics`) serve Prometheus metrics on port 9090 inside the
-cluster: Services of type ClusterIP, never routed by the Ingress, without a
-token — `/metrics` through the Ingress is the UI. Point a scrape job or your
+cluster: Services of type ClusterIP, never routed by the Ingress or by the
+HTTPRoute, without a token — `/metrics` through either is the UI. Point a scrape job or your
 ServiceMonitor at them, or set `metrics.podAnnotations: true` for a
 Prometheus that discovers pods by `prometheus.io/*` annotations;
 `metrics.enabled: false` turns the listeners off. The
@@ -3500,6 +3610,26 @@ Again no manual step:
   that level from the rule of the stage (above) and keeps it for bots; the
   frame of a task token does not change. This note describes the
   result, so there is nothing to compare with v0.22.x.
+
+### Upgrading to v0.26.0
+
+The upgrade needs no manual step, and the values of an installation do not
+change: `helm upgrade` with the same `-f cadence-values.yaml` renders the same
+Ingress as before (the same host, paths, annotations and TLS) and nothing else
+of the routes.
+
+- The chart gets two settings, both off the path you are on:
+  `ingress.enabled` (`true` by default: the Ingress is rendered as it always
+  was) and the section `httpRoute` (off by default). With `ingress.enabled:
+  false` the Ingress and the need for `ingress.host` go away, and
+  `httpRoute.enabled: true` renders an HTTPRoute of Gateway API in its place,
+  for a cluster with a Gateway controller and no ingress controller. See
+  [Routes](#routes-the-ingress-an-httproute-or-your-own).
+- The CRDs of Gateway API are needed only when `httpRoute.enabled` is `true`.
+  An installation that does not switch it on does not need them.
+- The change is in the chart, its checks and this guide: the service does not
+  read the new settings, and `docker-compose.yml`, `.env` and the scripts of
+  the package are not touched.
 
 ## Stage limits
 

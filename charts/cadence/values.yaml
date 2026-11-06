@@ -29,19 +29,53 @@ imagePullSecrets: []
 
 # The single entry point, in place of the Caddy of the package: /v1, /mcp,
 # /webhooks, /healthz and /readyz go to the API, everything else to the UI.
-# The metrics port is not routed. MCP answers with a stream (SSE): the
-# controller must not buffer it nor cut it by a read timeout - for
-# ingress-nginx see the annotations in docs/admin.md.
+# The metrics port is not routed, by the Ingress or by the HTTPRoute. MCP
+# answers with a stream (SSE): the controller must not buffer it nor cut it
+# by a read timeout - for ingress-nginx see the annotations in
+# docs/admin.md. Two ways to route: this Ingress (on by default) and
+# httpRoute below (off by default); both off - the route is yours.
 ingress:
+  # Render the Ingress. Off: no Ingress, and host is not required.
+  enabled: true
   # The IngressClass; empty - the default class of the cluster.
   className: ""
-  # The address people open, without the scheme. Required.
+  # The address people open, without the scheme. Required while the Ingress
+  # is on.
   host: ""
   tls:
     # The Secret with the certificate of the host (cert-manager or yours);
     # empty - no TLS on the Ingress (TLS ends before it).
     secretName: ""
   annotations: {}
+
+# The same routes as an HTTPRoute of Gateway API (gateway.networking.k8s.io/v1),
+# for a cluster with a Gateway controller instead of an Ingress one. Off by
+# default. The chart creates the route only: the Gateway, its listener with
+# the TLS certificate and the controller are yours, and so are the policies
+# of the controller (buffering, the limit of the body). Switching it on needs
+# the CRDs of Gateway API in the cluster (Standard channel, v1.2 or newer
+# for timeouts); off, the chart has no object of that API group and needs
+# none. Ports are numbers here: an HTTPRoute takes no port name.
+httpRoute:
+  enabled: false
+  # The Gateways the route attaches to (ParentReference of Gateway API, passed
+  # as is): name is required, namespace and sectionName (the listener) are
+  # as needed. Required while the route is on.
+  parentRefs: []
+  #  - name: gateway
+  #    namespace: infra
+  #    sectionName: https
+  # The hostnames of the route. Empty - the route takes the hostnames of the
+  # listener, and on a Gateway shared with others it is the fallback for all
+  # of them: set the host there.
+  hostnames: []
+  annotations: {}
+  labels: {}
+  # Set on every rule of the route, only what is set (e.g. 3600s; 0s - no
+  # limit). Empty - the controller's own timeouts.
+  timeouts:
+    request: ""
+    backendRequest: ""
 
 # The database: your PostgreSQL with pgvector (docs/admin.md, "External
 # PostgreSQL"); the chart has none. Either the whole URL in a key of a Secret

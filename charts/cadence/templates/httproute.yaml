@@ -1,0 +1,57 @@
+{{- include "cadence.sections" . -}}
+{{- if eq (include "cadence.httpRouteEnabled" .) "true" -}}
+# The routes of the Ingress and of the Caddyfile of the package: what the
+# service handles goes to the API, everything else to the UI. Port 9090 is
+# never routed. An HTTPRoute takes the port as a number, not a name.
+{{- $api := printf "%s-api" (include "cadence.fullname" .) }}
+{{- $timeouts := dict }}
+{{- with .Values.httpRoute.timeouts.request }}{{ $_ := set $timeouts "request" . }}{{ end }}
+{{- with .Values.httpRoute.timeouts.backendRequest }}{{ $_ := set $timeouts "backendRequest" . }}{{ end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "cadence.fullname" . }}
+  labels:
+    {{- merge (deepCopy (default dict .Values.httpRoute.labels)) (include "cadence.labels" . | fromYaml) | toYaml | nindent 4 }}
+  {{- with .Values.httpRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml .Values.httpRoute.parentRefs | nindent 4 }}
+  {{- with .Values.httpRoute.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches:
+        {{- range list "/v1" "/mcp" "/webhooks" }}
+        - path:
+            type: PathPrefix
+            value: {{ . }}
+        {{- end }}
+        {{- range list "/healthz" "/readyz" }}
+        - path:
+            type: Exact
+            value: {{ . }}
+        {{- end }}
+      {{- with $timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ $api }}
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      {{- with $timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ include "cadence.fullname" . }}-ui
+          port: 80
+{{- end }}
