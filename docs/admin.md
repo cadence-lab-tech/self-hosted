@@ -5411,6 +5411,15 @@ A signature by any other identity — another workflow, another repository,
 another tag — is not ours: if a check fails, do not install that release and
 report it privately (see [Security](#security)).
 
+The images and the `clab` archives of a version are normally built when its
+tag is pushed. If that push did not start the build, we start the same
+`release.yml` by hand on the same tag. The identity of such a build is the
+same as in the table — the workflow on `refs/tags/vX.Y.Z` — and the commands
+below accept it unchanged; only the workflow trigger recorded in the
+certificate is `workflow_dispatch` instead of `push`. Do not check the
+trigger (for example with `--certificate-github-workflow-trigger`): either
+value is a release of ours.
+
 ### Automatic verification
 
 `get-cadence.sh`, `install.sh`, `./upgrade.sh` and `clab server install`
