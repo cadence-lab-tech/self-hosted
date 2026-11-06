@@ -158,6 +158,13 @@ gw_base="http://$host:$gateway_port"
 # gives a Service that asks for no port only when the rest of the range is
 # taken - the NodePorts of ingress-nginx do not take it.
 gateway_node_port=30080
+for p in "CHECK_HTTP_PORT=$port" "CHECK_GATEWAY_PORT=$gateway_port" "CHECK_S3_PORT=$s3_port"; do
+  case "${p#*=}" in '' | *[!0-9]*) die "$p: a port is a number" ;; esac
+done
+[ "$gateway_port" != "$port" ] ||
+  die "CHECK_GATEWAY_PORT ($gateway_port) is CHECK_HTTP_PORT, the port of the Ingress: give the Gateway a port of its own"
+[ "$gateway_port" != "$s3_port" ] ||
+  die "CHECK_GATEWAY_PORT ($gateway_port) is CHECK_S3_PORT, the port of the bucket: give the Gateway a port of its own"
 chart=charts/cadence
 failures=0
 work="$(mktemp -d)"
@@ -184,13 +191,6 @@ step() {
 http_code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 k() { kubectl -n "$ns" "$@"; }
 
-for p in "CHECK_HTTP_PORT=$port" "CHECK_GATEWAY_PORT=$gateway_port" "CHECK_S3_PORT=$s3_port"; do
-  case "${p#*=}" in '' | *[!0-9]*) die "$p: a port is a number" ;; esac
-done
-[ "$gateway_port" != "$port" ] ||
-  die "CHECK_GATEWAY_PORT ($gateway_port) is CHECK_HTTP_PORT, the port of the Ingress: give the Gateway a port of its own"
-[ "$gateway_port" != "$s3_port" ] ||
-  die "CHECK_GATEWAY_PORT ($gateway_port) is CHECK_S3_PORT, the port of the bucket: give the Gateway a port of its own"
 kind get clusters 2>/dev/null | grep -qxF "$cluster" &&
   die "a kind cluster '$cluster' exists: the check deletes the cluster it runs in - give it CHECK_CLUSTER of its own"
 
