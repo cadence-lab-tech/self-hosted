@@ -18,15 +18,51 @@
 # the Ingress, unbuffered; an artifact larger than the inline limit in the
 # bucket; a file of 1 MiB uploaded through the Ingress (multipart, spooled to
 # the emptyDir of /tmp of the read-only API) and downloaded with its sha256
-# and name (CLAB-300); the metrics inside the cluster only; Pod Security; no value of a
+# and name (CLAB-300); the long poll of events through the Ingress; the
+# metrics inside the cluster only; Pod Security; no value of a
 # secret in the values of the release or the manifests; a key missing in the
 # Secret; a refused upgrade keeps the pods; an upgrade with a changed value
 # keeps the data; the manifests of the bucket without keys (Pod Identity and
 # IRSA, CLAB-394) admitted under restricted by a dry run; the HTTPRoute of the
 # chart (httpRoute.enabled, CLAB-456) validated by the API server against the
 # CRDs of Gateway API, installed only after the chart is: with the route off
-# the chart needs none. No Gateway controller runs, so the route is admitted,
-# not served. CI runs it in the job "helm" of check.yml.
+# the chart needs none. CI runs it in the job "helm" of check.yml.
+#
+# Two live routes, in the same cluster (CLAB-457):
+#   - the Ingress, through ingress-nginx controller-v1.15.1: the default of
+#     the chart and the example of docs/admin.md for the installations that
+#     run on it. ingress-nginx is retired, so the pin stays where it is;
+#     the scenario stays while it comes up (the manifest and the images are
+#     there, kind runs it) and a human has not moved the example to another
+#     controller - to be looked at again by 2027-03-31 at the latest;
+#   - the HTTPRoute, through Envoy Gateway CHECK_ENVOY_GATEWAY_VERSION, the
+#     way "Envoy Gateway" of docs/admin.md has it: its manifest over the CRDs
+#     of the dry run, then the GatewayClass and the Gateway of the block
+#     "# cadence-gateway.yaml" and the overlay "# cadence-values-httproute.yaml",
+#     both read from docs/admin.md, not kept here. The release serves both
+#     routes at once (the move of the guide), the probes, the UI, sign-in,
+#     MCP, the long poll of events held longer than the default timeout of a
+#     route of Envoy (15 s: what reaches Envoy is the timeouts of the
+#     overlay) and a file of 1 MiB through the Gateway; then the overlay as
+#     it is drops the Ingress, and the data is there through the Gateway;
+#     last, the route without the timeouts: Envoy cuts the long poll after
+#     15 s with a 504, the default docs/admin.md names.
+#     What kind needs and the guide does not have, and nothing else:
+#       * the listener "https" is plain HTTP on port 80 with no tls and the
+#         hostname localhost, and the route takes hostnames [localhost]:
+#         TLS is not checked, as with the Ingress;
+#       * the Gateway takes an EnvoyProxy of its own (infrastructure
+#         parametersRef): the Service of Envoy is a NodePort on 30080 (in
+#         the static band of the range, see gateway_node_port), mapped by
+#         kind to 127.0.0.1:CHECK_GATEWAY_PORT - no port-forward;
+#       * ingress.enabled=true for the step with both routes, and
+#         config.shared.SDLC_LOG_LEVEL=debug of the upgrade before, so the
+#         pods are not replaced.
+#     No policy of Envoy Gateway is applied: the guide says none is needed,
+#     and the timeouts of the overlay are not touched. A Gateway or a route
+#     not ready by its deadline prints the status of the GatewayClass, the
+#     Gateway, the HTTPRoute and the policies, the events and the logs of
+#     the controller and of Envoy, and ends the check naming the object.
 #
 #   ci/check-helm.sh
 #
@@ -39,6 +75,10 @@
 #   CHECK_HTTP_PORT   host port of the Ingress (127.0.0.1), default 8090
 #   CHECK_S3_PORT     host port of the stand-in bucket, default
 #                     CHECK_HTTP_PORT + 4
+#   CHECK_GATEWAY_PORT
+#                     host port of the Gateway (127.0.0.1), default
+#                     CHECK_HTTP_PORT + 1; the same port as the Ingress or
+#                     the bucket is refused before the cluster is made
 #   CADENCE_REGISTRY  registry of the images (image.registry), default
 #                     ghcr.io/cadence-lab-tech
 #   CADENCE_BACKEND_DIGEST, CADENCE_FRONTEND_DIGEST
@@ -55,6 +95,12 @@
 #                     release of the CRDs of Gateway API (Standard channel)
 #                     the HTTPRoute of the chart is validated against, default
 #                     v1.2.1 - the smallest one docs/admin.md names
+#   CHECK_ENVOY_GATEWAY_VERSION
+#                     release of Envoy Gateway the HTTPRoute is served by,
+#                     default v1.10.0 - the one docs/admin.md names (its
+#                     install.yaml brings Gateway API v1.6.1, and its
+#                     Kubernetes are v1.34 to v1.37: the node of kind v0.30.0
+#                     of check.yml is v1.34)
 #   CHECK_KEEP=1      leave the cluster and the stand-ins after the check
 #
 # Images in a local registry (localhost:*) are not reachable from the nodes
@@ -96,14 +142,22 @@ done
 cluster="${CHECK_CLUSTER:-cadence-check-helm}"
 port="${CHECK_HTTP_PORT:-8090}"
 s3_port="${CHECK_S3_PORT:-$((port + 4))}"
+gateway_port="${CHECK_GATEWAY_PORT:-$((port + 1))}"
 version="$(tr -d '[:space:]' <VERSION)"
 gateway_api="${CHECK_GATEWAY_API_VERSION:-v1.2.1}"
+envoy_gateway="${CHECK_ENVOY_GATEWAY_VERSION:-v1.10.0}"
 tag="${CHECK_IMAGE_TAG:-$version}"
 registry="${CADENCE_REGISTRY:-ghcr.io/cadence-lab-tech}"
 ns=cadence
 release=cadence
 host=localhost
 base="http://$host:$port"
+gw_base="http://$host:$gateway_port"
+# The NodePort of Envoy, fixed by the EnvoyProxy of the check: in the static
+# band of the range (30000-30085 of the default one), which the API server
+# gives a Service that asks for no port only when the rest of the range is
+# taken - the NodePorts of ingress-nginx do not take it.
+gateway_node_port=30080
 chart=charts/cadence
 failures=0
 work="$(mktemp -d)"
@@ -121,9 +175,22 @@ check() {
 }
 contains() { grep -qF -- "$2" <<<"$1"; }
 lacks() { ! grep -qF -- "$2" <<<"$1"; }
+# step WHAT CMD...: CMD must succeed; its output is shown when it does not.
+step() {
+  local what="$1" out
+  shift
+  if out="$("$@" 2>&1)"; then pass "$what"; else fail "$what"; printf '%s\n' "$out" | sed 's/^/      /' >&2; fi
+}
 http_code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 k() { kubectl -n "$ns" "$@"; }
 
+for p in "CHECK_HTTP_PORT=$port" "CHECK_GATEWAY_PORT=$gateway_port" "CHECK_S3_PORT=$s3_port"; do
+  case "${p#*=}" in '' | *[!0-9]*) die "$p: a port is a number" ;; esac
+done
+[ "$gateway_port" != "$port" ] ||
+  die "CHECK_GATEWAY_PORT ($gateway_port) is CHECK_HTTP_PORT, the port of the Ingress: give the Gateway a port of its own"
+[ "$gateway_port" != "$s3_port" ] ||
+  die "CHECK_GATEWAY_PORT ($gateway_port) is CHECK_S3_PORT, the port of the bucket: give the Gateway a port of its own"
 kind get clusters 2>/dev/null | grep -qxF "$cluster" &&
   die "a kind cluster '$cluster' exists: the check deletes the cluster it runs in - give it CHECK_CLUSTER of its own"
 
@@ -142,7 +209,7 @@ cleanup() {
 trap cleanup EXIT
 
 # --- the cluster -----------------------------------------------------------------------
-info "kind cluster $cluster, the Ingress on 127.0.0.1:$port"
+info "kind cluster $cluster, the Ingress on 127.0.0.1:$port, the Gateway on 127.0.0.1:$gateway_port"
 cat >"$work/kind.yaml" <<EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -153,6 +220,9 @@ nodes:
     extraPortMappings:
       - containerPort: 80
         hostPort: $port
+        listenAddress: 127.0.0.1
+      - containerPort: $gateway_node_port
+        hostPort: $gateway_port
         listenAddress: 127.0.0.1
 EOF
 kind create cluster --name "$cluster" --config "$work/kind.yaml" --kubeconfig "$KUBECONFIG" --wait 120s
@@ -401,8 +471,8 @@ info "HTTPRoute (Gateway API $gateway_api)"
 # The install above ran with no CRD of Gateway API in the cluster: the chart
 # with httpRoute off needs none. Now they go in (Standard channel, the
 # smallest version the guide names), and the API server validates the
-# HTTPRoute of the chart against their schema. There is no Gateway controller
-# here: the route is admitted, not served.
+# HTTPRoute of the chart against their schema. The route is served later,
+# through Envoy Gateway: see "Gateway API, live".
 check "the release installed with no CRD of Gateway API in the cluster" \
   [ -z "$(kubectl get crd -o name | grep -F 'gateway.networking.k8s.io' || true)" ]
 check "...and has no HTTPRoute among its manifests" lacks "$(helm get manifest "$release" -n "$ns")" "gateway.networking.k8s.io"
@@ -433,16 +503,36 @@ check "an HTTPRoute with backendRequest longer than request is refused by the sc
 bad_dry="$(route_manifest --set httpRoute.timeouts.request=an-hour | kubectl apply -n "$ns" --dry-run=server -f - 2>&1 || true)"
 check "an HTTPRoute with a timeout that is no duration is refused by the schema" contains "$bad_dry" "timeouts"
 
+# --- Envoy Gateway (CLAB-457) ---------------------------------------------------------------
+# Installed here, over the CRDs of the dry run, and waited for at the end:
+# the controller and Envoy start while the checks of the Ingress run.
+gw_ns=envoy-gateway-system
+info "Envoy Gateway $envoy_gateway over the CRDs of Gateway API $gateway_api"
+if ! out="$(kubectl apply --server-side -f "https://github.com/envoyproxy/gateway/releases/download/$envoy_gateway/install.yaml" 2>&1 >/dev/null)"; then
+  printf '%s\n' "$out" | tail -n 20 | sed 's/^/      /' >&2
+  die "the manifest of Envoy Gateway $envoy_gateway does not apply (kubectl apply --server-side)"
+fi
+pass "the manifest of Envoy Gateway $envoy_gateway applies over the CRDs of $gateway_api (kubectl apply --server-side)"
+crd_version() { kubectl get crd "$1" -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version} {.metadata.annotations.gateway\.networking\.k8s\.io/channel}'; }
+info "...the CRD of HTTPRoute is now $(crd_version httproutes.gateway.networking.k8s.io)"
+
 # --- through the Ingress --------------------------------------------------------------------
+# The checks of a route are functions of its name and its address: the
+# Ingress and the Gateway (at the end) go through the same ones.
+# route_checks VIA BASE: the probes, the version, the UI and no metrics.
+route_checks() {
+  local via="$1" b="$2" readyz instance
+  check "/healthz through $via is 200" [ "$(http_code "$b/healthz")" = 200 ]
+  readyz="$(curl -s "$b/readyz")"
+  check "/readyz through $via reports database ok" contains "$(tr -d ' ' <<<"$readyz")" '"database":"ok"'
+  instance="$(curl -sf "$b/v1/instance")"
+  check "/v1/instance through $via reports version $tag" contains "$instance" "\"version\":\"$tag\""
+  check "/v1/instance through $via reports tenancy single" contains "$instance" '"tenancy":"single"'
+  check "/ through $via is the UI" grep -qi '<html' <<<"$(curl -sf "$b/")"
+  check "/metrics through $via has no metrics" lacks "$(curl -s "$b/metrics")" "cadence_"
+}
 info "the Ingress"
-check "/healthz is 200" [ "$(http_code "$base/healthz")" = 200 ]
-readyz="$(curl -s "$base/readyz")"
-check "/readyz reports database ok" contains "$(tr -d ' ' <<<"$readyz")" '"database":"ok"'
-instance="$(curl -sf "$base/v1/instance")"
-check "/v1/instance reports version $tag" contains "$instance" "\"version\":\"$tag\""
-check "/v1/instance reports tenancy single" contains "$instance" '"tenancy":"single"'
-check "/ is the UI" grep -qi '<html' <<<"$(curl -sf "$base/")"
-check "/metrics through the Ingress has no metrics" lacks "$(curl -s "$base/metrics")" "cadence_"
+route_checks "the Ingress" "$base"
 
 # --- sign-in, team, project, bundle ------------------------------------------------------------
 info "clab with the token of the Secret"
@@ -466,13 +556,17 @@ done
 # --- MCP through the Ingress ---------------------------------------------------------------
 info "MCP"
 auth=(-H "Authorization: Bearer $admin_token")
-mcp_headers="$work/mcp-headers"
-mcp="$(curl -s -D "$mcp_headers" "${auth[@]}" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check-helm","version":"1"}}}' \
-  "$base/mcp/projects/CHECK")"
-check "initialize through the Ingress is 200" grep -qE '^HTTP/[0-9.]+ 200' "$mcp_headers"
-check "...with the result of the server" contains "$mcp" '"protocolVersion"'
-check "...as a stream (text/event-stream)" grep -qi '^content-type: text/event-stream' "$mcp_headers"
+# mcp_checks VIA BASE: initialize answered as a stream.
+mcp_checks() {
+  local via="$1" b="$2" mcp mcp_headers="$work/mcp-headers"
+  mcp="$(curl -s -D "$mcp_headers" "${auth[@]}" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check-helm","version":"1"}}}' \
+    "$b/mcp/projects/CHECK")"
+  check "initialize through $via is 200" grep -qE '^HTTP/[0-9.]+ 200' "$mcp_headers"
+  check "...with the result of the server" contains "$mcp" '"protocolVersion"'
+  check "...as a stream (text/event-stream)" grep -qi '^content-type: text/event-stream' "$mcp_headers"
+}
+mcp_checks "the Ingress" "$base"
 # The annotations of the guide reach the controller: every location of the
 # host keeps a stream open for an hour (the default cuts it after 60s),
 # does not buffer it, and takes an artifact up to the limit of the service.
@@ -486,12 +580,6 @@ check "...and takes 129m (client_max_body_size): a file of the limit of the serv
 
 # --- an artifact in the bucket -----------------------------------------------------------------
 info "artifact content in the bucket"
-# step WHAT CMD...: CMD must succeed; its output is shown when it does not.
-step() {
-  local what="$1" out
-  shift
-  if out="$("$@" 2>&1)"; then pass "$what"; else fail "$what"; printf '%s\n' "$out" | sed 's/^/      /' >&2; fi
-}
 step "clab create a task" "$clab" --host "$base" create --project CHECK --title "Helm task"
 step "clab transition CHECK-1 --to start" env SDLC_PROJECT=CHECK "$clab" --host "$base" transition CHECK-1 --to start
 agent_token="$("$clab" --host "$base" token create --project CHECK --name helm-agent --for agent:helm-bot --roles analyst --json | jq -r .token)"
@@ -507,8 +595,8 @@ step "the agent submits a brief of $(wc -c <"$work/brief.md" | tr -d ' ') bytes"
 artifact_id="$(curl -s "${auth[@]}" "$base/v1/tasks/CHECK-1/artifacts" |
   jq -r '[.. | objects | select(.kind? == "analysis.brief") | .id // empty] | .[0] // empty' || true)"
 if [ -n "$artifact_id" ]; then pass "the task lists the artifact $artifact_id"; else fail "the task lists the artifact"; fi
-# artifact_content: the content of the brief as the API serves it.
-artifact_content() { curl -sf "${auth[@]}" "$base/v1/artifacts/$artifact_id/content"; }
+# artifact_content [BASE]: the content of the brief as the API serves it.
+artifact_content() { curl -sf "${auth[@]}" "${1:-$base}/v1/artifacts/$artifact_id/content"; }
 after="$(s3_keys helm/ | grep -c . || true)"
 check "the brief is an object under helm/ in the bucket ($before -> $after)" [ "$after" -gt "$before" ]
 artifact_content >"$work/brief.out" 2>&1 || true
@@ -536,15 +624,15 @@ fi
 # an older VERSION have no such route, so the scenario is skipped for them;
 # CHECK_ATTACHMENTS=1 runs it on images of a branch built under the tag of an
 # older VERSION.
-if [ "${CHECK_ATTACHMENTS:-}" = 1 ] || ! version_lt "$version" v0.18.0; then
-  info "a file through the Ingress"
-  file_name="helm-model.bin"
+# file_checks VIA BASE: a file of 1 MiB up and down through the route.
+file_checks() {
+  local via="$1" b="$2" file_name="helm-model.bin" file_sha file_code file_id before after
   head -c 1048576 /dev/urandom >"$work/model.bin"
   file_sha="$(sha256_of "$work/model.bin")"
   before="$(s3_keys helm/ | grep -c . || true)"
   file_code="$(curl -s -o "$work/file.json" -w '%{http_code}' "${auth[@]}" -F "title=Helm model" \
-    -F "file=@$work/model.bin;filename=$file_name;type=application/octet-stream" "$base/v1/tasks/CHECK-1/attachments")"
-  check "a file of 1 MiB through the Ingress: 201 (got $file_code)" [ "$file_code" = 201 ]
+    -F "file=@$work/model.bin;filename=$file_name;type=application/octet-stream" "$b/v1/tasks/CHECK-1/attachments")"
+  check "a file of 1 MiB through $via: 201 (got $file_code)" [ "$file_code" = 201 ]
   file_id="$(jq -r '.id // empty' "$work/file.json" 2>/dev/null || true)"
   if [ -n "$file_id" ]; then pass "the answer names the artifact $file_id"; else
     fail "the answer names the artifact"
@@ -552,12 +640,46 @@ if [ "${CHECK_ATTACHMENTS:-}" = 1 ] || ! version_lt "$version" v0.18.0; then
   fi
   after="$(s3_keys helm/ | grep -c . || true)"
   check "the file is an object under helm/ in the bucket ($before -> $after)" [ "$after" -gt "$before" ]
-  file_code="$(curl -s -o "$work/model.out" -D "$work/model.hdr" -w '%{http_code}' "${auth[@]}" "$base/v1/artifacts/${file_id:-none}/content")"
-  check "the file downloads through the Ingress: 200 (got $file_code)" [ "$file_code" = 200 ]
+  file_code="$(curl -s -o "$work/model.out" -D "$work/model.hdr" -w '%{http_code}' "${auth[@]}" "$b/v1/artifacts/${file_id:-none}/content")"
+  check "the file downloads through $via: 200 (got $file_code)" [ "$file_code" = 200 ]
   check "...with the sha256 it was uploaded with" [ "$(sha256_of "$work/model.out")" = "$file_sha" ]
   check "...and its name in Content-Disposition" grep -qi "^content-disposition:.*filename=\"$file_name\"" "$work/model.hdr"
+}
+attachments=
+if [ "${CHECK_ATTACHMENTS:-}" = 1 ] || ! version_lt "$version" v0.18.0; then attachments=1; fi
+if [ -n "$attachments" ]; then
+  info "a file through the Ingress"
+  file_checks "the Ingress" "$base"
 else
   info "VERSION is $version: attachments come with v0.18.0, the scenario is skipped (CHECK_ATTACHMENTS=1 runs it on images of a branch)"
+fi
+
+# --- events by long poll through the Ingress (CLAB-457) -----------------------------------------
+# clab wait and the agent plugin long-poll GET /v1/tasks/:key/events: with no
+# event after the cursor the API holds the answer for wait seconds, and the
+# route passes it as it is. Through the Gateway (at the end) the wait is
+# longer than the default timeout of a route of Envoy. The images before
+# v0.19.0 have no such route; images of a branch (a pin variable empty) are
+# checked whatever VERSION says, as in ci/check-stack.sh.
+long_poll_on=
+if ! version_lt "$version" v0.19.0 || [ -z "$backend_digest" ]; then long_poll_on=1; fi
+# long_poll VIA BASE WAIT MIN MAX: 200, an object with events and a cursor,
+# held for MIN-MAX seconds.
+long_poll() {
+  local via="$1" b="$2" wait="$3" lo="$4" hi="$5" cursor code took
+  cursor="$(curl -sf "${auth[@]}" "$b/v1/tasks/CHECK-1/events" | jq -r '.cursor // empty' 2>/dev/null || true)"
+  check "the handshake of GET /v1/tasks/CHECK-1/events through $via names a cursor" [ -n "$cursor" ]
+  read -r code took < <(curl -s -o "$work/events.json" -w '%{http_code} %{time_total}\n' "${auth[@]}" \
+    --get --data-urlencode "after=$cursor" --data "wait=$wait" "$b/v1/tasks/CHECK-1/events" || echo "000 0")
+  check "a long poll with wait=$wait through $via: 200 (got $code)" [ "$code" = 200 ]
+  check "...an object with events and a cursor" [ "$(jq -r 'has("events") and (.cursor | type == "string")' "$work/events.json" 2>/dev/null)" = true ]
+  check "...held for $lo-$hi s (took $took s)" awk -v t="$took" -v lo="$lo" -v hi="$hi" 'BEGIN { exit !(t >= lo && t <= hi) }'
+}
+if [ -n "$long_poll_on" ]; then
+  info "events by long poll through the Ingress"
+  long_poll "the Ingress" "$base" 3 2.9 5
+else
+  info "VERSION is $version: the events endpoint comes with v0.19.0, the long poll is skipped"
 fi
 
 # --- metrics inside the cluster ------------------------------------------------------------------
@@ -632,5 +754,196 @@ check "the same token signs in" contains "$("$clab" --host "$base" whoami 2>&1)"
 check "the project CHECK is there" contains "$("$clab" --host "$base" project list --json)" '"CHECK"'
 check "the artifact is there with its content" grep -qF "line 400 of the brief" <(artifact_content 2>/dev/null)
 
+# --- Gateway API, live: Envoy Gateway (CLAB-457) -------------------------------------------------
+info "Gateway API through Envoy Gateway $envoy_gateway on 127.0.0.1:$gateway_port"
+# gateway_diag WHAT: what stands behind a Gateway that is not ready - the
+# status of the objects and the policies, the events and the logs of the
+# controller and of Envoy - then the end of the check, naming WHAT.
+gateway_diag() {
+  {
+    echo "--- GatewayClass envoy"
+    kubectl get gatewayclass envoy -o json 2>&1 | jq '.status' 2>/dev/null || true
+    echo "--- Gateway infra/gateway"
+    kubectl -n infra get gateway gateway -o json 2>&1 | jq '.status' 2>/dev/null || true
+    echo "--- HTTPRoute $ns/$release"
+    k get httproute "$release" -o json 2>&1 | jq '.status' 2>/dev/null || true
+    echo "--- policies of Envoy Gateway"
+    kubectl get clienttrafficpolicies.gateway.envoyproxy.io,backendtrafficpolicies.gateway.envoyproxy.io -A -o json 2>&1 |
+      jq '[.items[] | {kind, name: .metadata.name, namespace: .metadata.namespace, status}]' 2>/dev/null || true
+    echo "--- pods and events of $gw_ns"
+    kubectl -n "$gw_ns" get pods -o wide 2>&1 || true
+    kubectl -n "$gw_ns" get events --sort-by=.lastTimestamp 2>&1 | tail -n 30 || true
+    echo "--- the log of the controller"
+    kubectl -n "$gw_ns" logs deploy/envoy-gateway --tail=40 2>&1 || true
+    echo "--- the log of Envoy"
+    kubectl -n "$gw_ns" logs -l gateway.envoyproxy.io/owning-gateway-name=gateway --all-containers --tail=40 2>&1 || true
+  } | sed 's/^/      /' >&2
+  die "$1"
+}
+# until_ready SECONDS WHAT CMD...: CMD again every 2 s until it succeeds; by
+# the deadline the diagnostics of the Gateway and the end of the check.
+until_ready() {
+  local limit="$1" what="$2" deadline
+  shift 2
+  deadline=$((SECONDS + limit))
+  until "$@" >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || gateway_diag "$what: not within ${limit}s"
+    sleep 2
+  done
+  pass "$what"
+}
+# condition TYPE ARGS...: the condition TYPE of the object kubectl get ARGS
+# names is True.
+condition() {
+  local t="$1"
+  shift
+  kubectl get "$@" -o json | jq -e --arg t "$t" '.status.conditions[]? | select(.type == $t and .status == "True")'
+}
+# route_condition TYPE: the condition TYPE of the HTTPRoute is True for the
+# Gateway infra/gateway.
+route_condition() {
+  k get httproute "$release" -o json | jq -e --arg t "$1" \
+    '.status.parents[]? | select(.parentRef.name == "gateway" and .parentRef.namespace == "infra") | .conditions[] | select(.type == $t and .status == "True")'
+}
+# doc_block MARKER: the block of docs/admin.md whose first line is MARKER,
+# as ci/check-config.sh reads the examples; none ends the check naming it.
+doc_block() {
+  local block
+  block="$(awk -v m="$1" '$0 == m { on = 1 } on && /^```$/ { exit } on' docs/admin.md)"
+  [ -n "$block" ] || die "docs/admin.md has no block that starts with \"$1\": the check of the Gateway applies it"
+  printf '%s\n' "$block"
+}
+doc_block "# cadence-gateway.yaml" >"$work/gateway-doc.yaml"
+doc_block "# cadence-values-httproute.yaml" >"$work/httproute-doc.yaml"
+
+until_ready 240 "the controller of Envoy Gateway is Available" \
+  kubectl -n "$gw_ns" wait --for=condition=Available deploy/envoy-gateway --timeout=5s
+# The overrides for kind of the header, and nothing else: the listener https
+# as plain HTTP on 80 for localhost, the EnvoyProxy with the NodePort.
+kubectl create namespace infra >/dev/null
+cat >"$work/envoyproxy.yaml" <<EOF
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: kind
+  namespace: infra
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: NodePort
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              ports:
+                - port: 80
+                  nodePort: $gateway_node_port
+EOF
+step "the EnvoyProxy of kind (a NodePort on $gateway_node_port) applies" kubectl apply -f "$work/envoyproxy.yaml"
+if ! gateway_json="$(kubectl create --dry-run=client -o json -f "$work/gateway-doc.yaml" 2>&1)"; then
+  printf '%s\n' "$gateway_json" | sed 's/^/      /' >&2
+  die "the block \"# cadence-gateway.yaml\" of docs/admin.md is no manifest kubectl reads"
+fi
+# kubectl prints one object after another, or a List: jq takes them all.
+jq -s --arg host "$host" '
+  [.[] | if .kind == "List" then .items[] else . end]
+  | map(if .kind == "Gateway" then
+      .spec.listeners |= map(if .name == "https" then .protocol = "HTTP" | .port = 80 | .hostname = $host | del(.tls) else . end)
+      | .spec.infrastructure.parametersRef = {group: "gateway.envoyproxy.io", kind: "EnvoyProxy", name: "kind"}
+    else . end)
+  | {apiVersion: "v1", kind: "List", items: .}' <<<"$gateway_json" >"$work/gateway.json"
+check "the block of docs/admin.md is a GatewayClass and a Gateway with the listener https" \
+  [ "$(jq -r '([.items[].kind] | join(",")) + " " + ([.items[] | select(.kind == "Gateway") | .spec.listeners[].name] | join(","))' "$work/gateway.json")" = "GatewayClass,Gateway https" ]
+step "the GatewayClass and the Gateway of docs/admin.md apply" kubectl apply -f "$work/gateway.json"
+until_ready 60 "GatewayClass envoy is Accepted" condition Accepted gatewayclass envoy
+until_ready 240 "Gateway infra/gateway is Programmed" condition Programmed -n infra gateway gateway
+
+# Both routes, as in the move of the guide: the overlay of docs/admin.md with
+# the Ingress kept, and the hostnames of kind.
+cat >"$work/httproute-kind.yaml" <<EOF
+httpRoute:
+  hostnames: [$host]
+EOF
+gw_values=(-f "$work/values.yaml" -f "$work/httproute-doc.yaml" -f "$work/httproute-kind.yaml" --set config.shared.SDLC_LOG_LEVEL=debug)
+info "helm upgrade with the overlay of docs/admin.md and the Ingress kept: both routes"
+if out="$(helm upgrade "$release" "$chart" -n "$ns" "${gw_values[@]}" --set ingress.enabled=true --wait --timeout 6m 2>&1)"; then
+  pass "helm upgrade --wait succeeded"
+else
+  printf '%s\n' "$out" >&2
+  fail "helm upgrade --wait succeeded"
+fi
+check "the release has the Ingress and the HTTPRoute $release" \
+  [ "$(k get ingress,httproute -o name | sort | tr '\n' ' ')" = "httproute.gateway.networking.k8s.io/$release ingress.networking.k8s.io/$release " ]
+check "...with the timeouts of docs/admin.md on every rule" \
+  [ "$(k get httproute "$release" -o json | jq -r '[.spec.rules[].timeouts | "\(.request) \(.backendRequest)"] | unique | join(",")')" = "3600s 3600s" ]
+until_ready 60 "HTTPRoute $release is Accepted by the Gateway" route_condition Accepted
+until_ready 60 "HTTPRoute $release has ResolvedRefs" route_condition ResolvedRefs
+# Programmed comes before Envoy has the route: the first 200 is the sign.
+gateway_answers() { [ "$(http_code "$gw_base/readyz")" = 200 ]; }
+until_ready 90 "the Gateway answers /readyz with 200" gateway_answers
+route_checks "the Ingress" "$base"
+route_checks "the Gateway" "$gw_base"
+k get secret cadence -o go-template='{{index .data "admin-token" | base64decode}}' | "$clab" auth login --host "$gw_base" --with-token >/dev/null
+check "clab auth login through the Gateway, whoami is admin" contains "$("$clab" --host "$gw_base" whoami 2>&1)" "admin"
+mcp_checks "the Gateway" "$gw_base"
+if [ -n "$long_poll_on" ]; then
+  # Longer than 15 s, the timeout Envoy gives a route with no timeouts.
+  long_poll "the Gateway" "$gw_base" 20 19.5 23
+fi
+if [ -n "$attachments" ]; then
+  file_checks "the Gateway" "$gw_base"
+fi
+
+# The overlay as it is: ingress.enabled false, the route stays.
+info "helm upgrade with the overlay of docs/admin.md as it is: the Ingress goes"
+if out="$(helm upgrade "$release" "$chart" -n "$ns" "${gw_values[@]}" --wait --timeout 6m 2>&1)"; then
+  pass "helm upgrade --wait succeeded"
+else
+  printf '%s\n' "$out" >&2
+  fail "helm upgrade --wait succeeded"
+fi
+check "the release has no Ingress" [ -z "$(k get ingress -o name)" ]
+check "...and the HTTPRoute $release" [ -n "$(k get httproute "$release" -o name --ignore-not-found)" ]
+code="$(http_code "$base/v1/instance")"
+check "the port of the Ingress does not reach the instance (/v1/instance: $code)" [ "$code" != 200 ]
+check "/readyz through the Gateway is 200" [ "$(http_code "$gw_base/readyz")" = 200 ]
+check "the same token signs in through the Gateway" contains "$("$clab" --host "$gw_base" whoami 2>&1)" "admin"
+check "the project CHECK is there" contains "$("$clab" --host "$gw_base" project list --json)" '"CHECK"'
+check "the artifact is there with its content" grep -qF "line 400 of the brief" <(artifact_content "$gw_base" 2>/dev/null)
+
+# What the timeouts of the overlay are for: without them Envoy gives a
+# request 15 s, as docs/admin.md says, and cuts the long poll with a 504.
+if [ -n "$long_poll_on" ]; then
+  info "the route without the timeouts of the overlay: Envoy cuts the long poll"
+  route_generation() { k get httproute "$release" -o jsonpath='{.metadata.generation}'; }
+  generation="$(route_generation)"
+  if out="$(helm upgrade "$release" "$chart" -n "$ns" "${gw_values[@]}" --set httpRoute.timeouts=null --wait --timeout 3m 2>&1)"; then
+    pass "helm upgrade with httpRoute.timeouts null succeeded"
+  else
+    printf '%s\n' "$out" >&2
+    fail "helm upgrade with httpRoute.timeouts null succeeded"
+  fi
+  check "...and the HTTPRoute has no timeouts" [ "$(k get httproute "$release" -o json | jq -c '[.spec.rules[].timeouts // empty]')" = "[]" ]
+  # The Gateway has taken the new route: Accepted for its generation.
+  route_taken() {
+    [ "$(route_generation)" != "$generation" ] &&
+      k get httproute "$release" -o json | jq -e '.metadata.generation as $g | .status.parents[]?
+        | select(.parentRef.name == "gateway") | .conditions[] | select(.type == "Accepted" and .status == "True" and .observedGeneration == $g)'
+  }
+  until_ready 60 "...Accepted by the Gateway for its generation" route_taken
+  # Envoy gets the route a moment after the status: one more try if the
+  # first long poll still had the old one.
+  for try in 1 2; do
+    cursor="$(curl -sf "${auth[@]}" "$gw_base/v1/tasks/CHECK-1/events" | jq -r '.cursor // empty' 2>/dev/null || true)"
+    read -r code took < <(curl -s -o /dev/null -w '%{http_code} %{time_total}\n' "${auth[@]}" \
+      --get --data-urlencode "after=$cursor" --data wait=20 "$gw_base/v1/tasks/CHECK-1/events" || echo "000 0")
+    [ "$code" = 200 ] && [ "$try" = 1 ] || break
+  done
+  check "a long poll with wait=20 through the Gateway is cut: 504 (got $code)" [ "$code" = 504 ]
+  check "...after 15 s, the default of Envoy (took $took s)" awk -v t="$took" 'BEGIN { exit !(t >= 14.5 && t <= 17) }'
+fi
+
 [ "$failures" -eq 0 ] || die "$failures check(s) failed"
-ok "Helm chart checks passed"
+ok "Helm chart checks passed in ${SECONDS}s"

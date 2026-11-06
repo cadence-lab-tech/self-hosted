@@ -249,15 +249,18 @@ jobs:
           COMPOSE_PROJECT_NAME: cadence-check-ext
         run: ci/check-stack.sh
 
-  # The Helm chart (CLAB-201) in kind. Images before v0.13.0 do not read
-  # *_FILE, which the chart passes every secret by; the frontend image before
-  # v0.14.0 runs as root on :80, and the chart runs ui as uid 65532 on :8080
-  # under Pod Security restricted (CLAB-236); the frontend image before
-  # v0.16.0 carries a file capability for :80, and the chart drops ALL with
-  # nothing added, so its Caddy fails to exec (EPERM, CLAB-248). For an
-  # older VERSION the job prints a notice and skips, so main stays green
-  # until the release of the images catches up (the release pull request of
-  # v0.16.0 runs it).
+  # The Helm chart (CLAB-201) in kind, served live through two routes in one
+  # cluster: the Ingress through ingress-nginx and the HTTPRoute through
+  # Envoy Gateway (CLAB-457), both installed by the script from pinned
+  # manifests, the Gateway as docs/admin.md has it. Images before v0.13.0
+  # do not read *_FILE, which the chart passes every secret by; the frontend
+  # image before v0.14.0 runs as root on :80, and the chart runs ui as uid
+  # 65532 on :8080 under Pod Security restricted (CLAB-236); the frontend
+  # image before v0.16.0 carries a file capability for :80, and the chart
+  # drops ALL with nothing added, so its Caddy fails to exec (EPERM,
+  # CLAB-248). For an older VERSION the job prints a notice and skips, so
+  # main stays green until the release of the images catches up (the release
+  # pull request of v0.16.0 runs it).
   helm:
     needs: lint
     runs-on: ubuntu-latest
