@@ -935,11 +935,11 @@ if [ -n "$long_poll_on" ]; then
   until_ready 60 "...Accepted by the Gateway for its generation" route_taken
   # Envoy gets the route a moment after the status: one more try if the
   # first long poll still had the old one.
-  for try in 1 2; do
+  for _ in 1 2; do
     cursor="$(curl -sf "${auth[@]}" "$gw_base/v1/tasks/CHECK-1/events" | jq -r '.cursor // empty' 2>/dev/null || true)"
     read -r code took < <(curl -s -o /dev/null -w '%{http_code} %{time_total}\n' "${auth[@]}" \
       --get --data-urlencode "after=$cursor" --data wait=20 "$gw_base/v1/tasks/CHECK-1/events" || echo "000 0")
-    [ "$code" = 200 ] && [ "$try" = 1 ] || break
+    if [ "$code" != 200 ]; then break; fi
   done
   check "a long poll with wait=20 through the Gateway is cut: 504 (got $code)" [ "$code" = 504 ]
   check "...after 15 s, the default of Envoy (took $took s)" awk -v t="$took" 'BEGIN { exit !(t >= 14.5 && t <= 17) }'
