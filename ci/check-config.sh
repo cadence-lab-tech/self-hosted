@@ -1018,6 +1018,16 @@ fi
 route_example_json="$(render_json -f "$dist/example-values.yaml" -f "$dist/example-httproute-values.yaml" 2>/dev/null || true)"
 check "helm template with the example of the HTTPRoute: one HTTPRoute, no Ingress" \
   [ "$(jq -r '[.[] | .kind] | map(select(. == "HTTPRoute" or . == "Ingress")) | join(",")' <<<"${route_example_json:-[]}")" = HTTPRoute ]
+# The Gateway of Envoy Gateway the route attaches to (CLAB-457): ci/check-helm.sh
+# applies it from docs/admin.md; here it has to be what the overlay names.
+gateway_example="$(awk '/^# cadence-gateway.yaml$/ { on = 1 } on && /^```$/ { exit } on' docs/admin.md)"
+check "docs/admin.md has the GatewayClass and the Gateway (# cadence-gateway.yaml)" [ -n "$gateway_example" ]
+gateway_example_json="$(printf '%s\n' "$gateway_example" | yaml_json 2>/dev/null | jq -s -c . 2>/dev/null || true)"
+route_example_ref="$(jq -r '.[] | select(.kind == "HTTPRoute") | .spec.parentRefs[0] | "\(.namespace)/\(.name)/\(.sectionName)"' <<<"${route_example_json:-[]}")"
+check "...a GatewayClass and the Gateway $route_example_ref with the listener the overlay names, taking routes of the namespace cadence" \
+  [ "$(jq -r '([.[].kind] | join(",")) + " " + ([.[] | select(.kind == "Gateway") | .metadata as $m | .spec.listeners[]
+    | select(.allowedRoutes.namespaces.selector.matchLabels["kubernetes.io/metadata.name"] == "cadence")
+    | "\($m.namespace)/\($m.name)/\(.name)"] | join(","))' <<<"${gateway_example_json:-[]}")" = "GatewayClass,Gateway $route_example_ref" ]
 
 # The smallest values the chart takes: the URL of the database in a Secret,
 # the bucket and its keys, the administrator token, the host.

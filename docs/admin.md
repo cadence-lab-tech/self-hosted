@@ -807,7 +807,11 @@ no Caddy and no persistent volumes (the API gets one scratch directory,
   below do it; for another ingress controller set its equivalents, and for
   Gateway API see [what the route sets and what only the controller
   does](#gateway-api-httproute). The annotations of an Ingress apply to
-  every path of it, `/v1` included.
+  every path of it, `/v1` included. ingress-nginx is retired (its
+  maintainers ended updates in March 2026): the example stays for the
+  installations that run on it, checked on its last release
+  `controller-v1.15.1`; for a new cluster take Gateway API, with
+  [Envoy Gateway](#envoy-gateway) for one.
 - **PostgreSQL with pgvector**, as for an
   [external database](#server-extensions-and-the-role): the role, the
   extensions and `sslmode`. The pods reach it from the cluster.
@@ -1035,10 +1039,13 @@ httpRoute:
   of that API group and needs none. The chart does not install them and does
   not look for them (`helm template` and GitOps render with no cluster); with
   the CRDs missing `helm install` fails with "no matches for kind HTTPRoute".
-  Install the Standard channel yourself, v1.2 or newer:
-  `kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml`.
   The route needs `v1` of `HTTPRoute`; its `timeouts` field is in the Standard
-  channel from v1.2. An earlier release of the CRDs rejects the field.
+  channel from v1.2. An earlier release of the CRDs rejects the field. Take
+  the CRDs the way your controller asks: Envoy Gateway, for one, brings the
+  release it is built on, and older CRDs installed before it hold it back
+  ([below](#envoy-gateway)). A controller that leaves them to you takes the
+  Standard channel, v1.2 or newer:
+  `kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml`.
 - **`parentRefs` is required** while the route is on, and each entry needs a
   `name`: the rendering stops naming the key.
 - **`hostnames`** are optional, as in Gateway API: empty, the route takes the
@@ -1055,16 +1062,108 @@ httpRoute:
   default of your controller cuts the stream. The route cannot say whether
   responses are buffered, how large a request body may be
   (`2 x SDLC_BLOB_MAX_BYTES + 1 MiB`), or when an idle connection closes:
-  those are policies of the controller, which the chart does not create. For
-  Envoy Gateway they are [`BackendTrafficPolicy` and
-  `ClientTrafficPolicy`](https://gateway.envoyproxy.io/docs/api/extension_types/),
-  attached to the Gateway or to this route (named `cadence` for the release
-  `cadence`) as each policy allows; read their fields in that reference for
-  your version.
-  Another controller has its own.
+  those are policies of the controller, which the chart does not create.
+  Envoy Gateway v1.10.0 needs none: its defaults do it, see
+  [below](#envoy-gateway). Another controller has its own.
 - Check what you installed the same way as with an Ingress: the notes of
   `helm install` print the address, `kubectl -n cadence get httproute cadence`
   shows the `Accepted` and `ResolvedRefs` conditions of the Gateway.
+
+##### Envoy Gateway
+
+The check of the chart in this repository (`ci/check-helm.sh`) serves a
+release through [Envoy Gateway](https://gateway.envoyproxy.io) v1.10.0 with
+the Gateway below and the overlay above: the probes, the UI, sign-in with
+`clab`, MCP, the long poll of events and a file of 1 MiB go through it, the
+whole way from the listener to the pods.
+
+**Envoy Gateway and the CRDs.** Install it by its guide, from its manifest
+or its Helm chart:
+`kubectl apply --server-side -f https://github.com/envoyproxy/gateway/releases/download/v1.10.0/install.yaml`.
+Both bring, with the CRDs of Envoy Gateway, the CRDs of Gateway API it is
+built on: v1.6.1, experimental channel. Envoy Gateway v1.10 needs Gateway
+API v1.6, so do not install the Standard channel of the list above first:
+
+- The Helm chart of Envoy Gateway skips CRDs already in the cluster (Helm
+  installs CRDs, it never upgrades them), and Envoy Gateway runs on the old
+  ones.
+- Standard CRDs of v1.5 or newer, installed by the provider of the cluster
+  or by you, come with the admission policy
+  `safe-upgrades.gateway.networking.k8s.io`, which refuses experimental CRDs
+  over them. Keep them if they are v1.6 or newer, and install Envoy Gateway
+  without its Gateway API CRDs, as its guide says for CRDs the provider
+  manages.
+- Over CRDs of v1.2 to v1.4, which have no such policy, the manifest
+  applied with `kubectl apply --server-side` upgrades them in place; the
+  check does so over v1.2.1.
+
+**The GatewayClass and the Gateway**, in a namespace of their own
+(`infra` here, `kubectl create namespace infra`), with the certificate of
+the host in the Secret `cadence-tls` of that namespace:
+
+```yaml
+# cadence-gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gateway
+  namespace: infra
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: cadence.example.com
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: cadence-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              kubernetes.io/metadata.name: cadence
+```
+
+**`allowedRoutes`** lets the route of the release in from its namespace
+(`cadence`; the cluster sets the label `kubernetes.io/metadata.name` on
+every namespace). Without it a listener takes the routes of its own
+namespace only (`from: Same`): the HTTPRoute `cadence` gets
+`Accepted=False` with the reason `NotAllowedByListeners`, and Envoy
+answers 404. `from: All` lets every namespace in. Envoy Gateway serves
+the Gateway by a Service of type `LoadBalancer` in
+`envoy-gateway-system`; its address is the one for DNS of the host
+(`kubectl get gateway -n infra gateway` shows it once the Gateway is
+`Programmed`).
+
+**No policy.** On Envoy Gateway v1.10.0 the `timeouts` of the overlay are
+all the stream needs; no `ClientTrafficPolicy` and no
+`BackendTrafficPolicy`. What its defaults do:
+
+| the service needs | Envoy Gateway v1.10.0 |
+|---|---|
+| a request open for an hour | the timeout of a route is `timeouts.request`. Without it Envoy gives a request 15 seconds and answers 504: the long poll of `clab wait` (25 seconds) and a longer MCP request are cut |
+| no idle timeout that cuts a stream | a route with `timeouts.request` lets a stream be idle for the larger of an hour and that timeout (without it, 5 minutes); an idle connection closes after an hour |
+| responses of `/mcp` not buffered | Envoy passes a response on as it comes; only a filter a policy adds buffers it |
+| a request body of `2 x SDLC_BLOB_MAX_BYTES + 1 MiB` | Envoy streams a request body to the API and sets no limit on it |
+
+A policy of your own on that Gateway or route changes this: a
+`ClientTrafficPolicy` with a shorter `timeout.http.streamIdleTimeout` or
+`idleTimeout`, a `BackendTrafficPolicy` with a shorter
+`timeout.http.streamIdleTimeout`, or with `requestBuffer` (it buffers
+every request body and caps it at its `limit`; MCP and uploads need
+neither). Fields are in the
+[reference](https://gateway.envoyproxy.io/docs/api/extension_types/) of
+your version.
 
 ### S3 without keys: Pod Identity and IRSA
 
