@@ -746,6 +746,70 @@ for v in $otel_vars; do
 done
 check "docs/admin.md says OTLP over gRPC is not supported" contains "$admin" "Only OTLP over HTTP with protobuf is supported"
 
+# Sign-in of MCP clients by OAuth (since v0.30.0, CLAB-487): six variables
+# with the defaults of the service, so an .env written before them works
+# unchanged. The five of the sign-in go to the API and the worker (the
+# worker cleans up what has expired), the public address to the API only:
+# compose.tls.yml sets it from SDLC_DOMAIN, the proxy mode leaves it empty
+# (the API reads the request) - "https://" from an empty SDLC_DOMAIN would
+# stop the API on start. .env.example has each of them only commented out,
+# docs/admin.md describes each; no service, port or volume is added.
+info "OAuth sign-in of MCP clients (SDLC_OAUTH_*, SDLC_PUBLIC_URL)"
+oauth_vars="SDLC_OAUTH_ENABLED SDLC_OAUTH_DCR_ENABLED SDLC_OAUTH_CIMD_ENABLED SDLC_OAUTH_ACCESS_TTL SDLC_OAUTH_REFRESH_TTL"
+oauth_defaults="true,true,true,1h,720h"
+oauth_config() {
+  env -u CADENCE_REGISTRY -u CADENCE_BACKEND_DIGEST -u CADENCE_FRONTEND_DIGEST \
+    -u SDLC_OAUTH_ENABLED -u SDLC_OAUTH_DCR_ENABLED -u SDLC_OAUTH_CIMD_ENABLED -u SDLC_OAUTH_ACCESS_TTL \
+    -u SDLC_OAUTH_REFRESH_TTL -u SDLC_PUBLIC_URL "$@" \
+    POSTGRES_PASSWORD=x CADENCE_VERSION="$version" docker compose --profile '*' config --format json
+}
+oauth_of() { # SERVICE JSON: the five variables, comma-joined
+  jq -r --arg s "$1" '.services[$s].environment | [.SDLC_OAUTH_ENABLED, .SDLC_OAUTH_DCR_ENABLED, .SDLC_OAUTH_CIMD_ENABLED, .SDLC_OAUTH_ACCESS_TTL, .SDLC_OAUTH_REFRESH_TTL] | join(",")' <<<"$2"
+}
+for v in $oauth_vars SDLC_PUBLIC_URL; do
+  check ".env.example documents $v, commented out" grep -qE "^# $v=" .env.example
+  check ".env.example does not set $v" lacks "$(grep -v '^#' <<<"$env_example")" "$v="
+  check "docs/admin.md describes $v" grep -qF "\`$v\`" docs/admin.md
+done
+check ".env.example gives the defaults true, true, true, 1h and 720h, and an empty SDLC_PUBLIC_URL" \
+  [ "$(grep -cxE '# SDLC_OAUTH_ENABLED=true|# SDLC_OAUTH_DCR_ENABLED=true|# SDLC_OAUTH_CIMD_ENABLED=true|# SDLC_OAUTH_ACCESS_TTL=1h|# SDLC_OAUTH_REFRESH_TTL=720h|# SDLC_PUBLIC_URL=' .env.example)" = 6 ]
+for mode in tls proxy; do
+  oauth="$(oauth_config SDLC_DOMAIN=cadence.example.com COMPOSE_FILE="docker-compose.yml:compose.$mode.yml")"
+  check "[$mode] api and worker get $oauth_defaults without a line in .env" \
+    [ "$(oauth_of api "$oauth") $(oauth_of worker "$oauth")" = "$oauth_defaults $oauth_defaults" ]
+  off="$(oauth_config SDLC_OAUTH_ENABLED=false SDLC_OAUTH_DCR_ENABLED=false SDLC_OAUTH_CIMD_ENABLED=false SDLC_OAUTH_ACCESS_TTL=5m \
+    SDLC_OAUTH_REFRESH_TTL=24h SDLC_DOMAIN=cadence.example.com COMPOSE_FILE="docker-compose.yml:compose.$mode.yml")"
+  check "[$mode] the values of .env reach api and worker" \
+    [ "$(oauth_of api "$off") $(oauth_of worker "$off")" = "false,false,false,5m,24h false,false,false,5m,24h" ]
+  check "[$mode] the worker has no SDLC_PUBLIC_URL (only the API builds addresses)" \
+    [ "$(jq -r '.services.worker.environment | has("SDLC_PUBLIC_URL")' <<<"$oauth")" = false ]
+  # No service, port or volume is added (AC of the task; the lists are those
+  # of v0.29.0, change them together with a service that is really added).
+  check "[$mode] the services are those of v0.29.0" \
+    [ "$(jq -r '.services | keys | join(" ")' <<<"$oauth")" = "api caddy pg-upgrade-dump pg-upgrade-load postgres ui worker" ]
+  check "[$mode] the volumes are those of v0.29.0" \
+    [ "$(jq -r '.volumes | keys | join(" ")' <<<"$oauth")" = "blobs caddy_config caddy_data pgdata postgres" ]
+done
+tls_url="$(oauth_config SDLC_DOMAIN=cadence.example.com COMPOSE_FILE=docker-compose.yml:compose.tls.yml | jq -r '.services.api.environment.SDLC_PUBLIC_URL')"
+check "[tls] SDLC_PUBLIC_URL of api is https://<SDLC_DOMAIN>: $tls_url" [ "$tls_url" = https://cadence.example.com ]
+proxy_url="$(oauth_config SDLC_DOMAIN= COMPOSE_FILE=docker-compose.yml:compose.proxy.yml | jq -r '.services.api.environment.SDLC_PUBLIC_URL')"
+check "[proxy] SDLC_PUBLIC_URL of api is empty, not 'https://' ($proxy_url)" [ -z "$proxy_url" ]
+check "[proxy] SDLC_PUBLIC_URL of .env reaches api" \
+  [ "$(oauth_config SDLC_PUBLIC_URL=https://cadence.example.org COMPOSE_FILE=docker-compose.yml:compose.proxy.yml | jq -r '.services.api.environment.SDLC_PUBLIC_URL')" = https://cadence.example.org ]
+check "[proxy] a docker-compose.yml with no domain still renders (the proxy mode has no SDLC_DOMAIN)" \
+  [ -n "$(oauth_config SDLC_DOMAIN= COMPOSE_FILE=docker-compose.yml:compose.proxy.yml)" ]
+check "docs/admin.md has the section Sign-in of MCP clients (OAuth) and its routes, network and public address" \
+  [ "$(grep -cE '^(## Sign-in of MCP clients \(OAuth\)|### Switching it off|### The public address|### Routes for the sign-in|### Network of the sign-in of MCP clients)$' docs/admin.md)" = 5 ]
+check "docs/admin.md has Upgrading to v0.30.0" contains "$admin" "### Upgrading to v0.30.0"
+check "the Upgrading to v0.30.0 note names the migration, the switch, the proxy header and CIMD" \
+  [ "$(awk '/^### Upgrading to v0.30.0$/ { on = 1; next } on && /^#/ { exit } on' docs/admin.md | grep -cE '000049_oauth|SDLC_OAUTH_ENABLED=false|X-Forwarded-Proto|SDLC_OAUTH_CIMD_ENABLED=false|well-known')" -ge 5 ]
+check "'Behind your reverse proxy' tells X-Forwarded-Proto, SDLC_PUBLIC_URL and the .well-known paths" \
+  [ "$(awk '/^## Behind your reverse proxy$/ { on = 1; next } on && /^## / { exit } on' docs/admin.md | grep -cE 'X-Forwarded-Proto|SDLC_PUBLIC_URL|oauth-authorization-server|oauth-protected-resource')" -ge 4 ]
+check "'Behind your reverse proxy' no longer says that nothing in .env needs the public host name" \
+  lacks "$(awk '/^## Behind your reverse proxy$/ { on = 1; next } on && /^## / { exit } on' docs/admin.md)" "nothing in \`.env\` needs the public host name"
+check "docs/admin.md tells the one-origin rule and the NAT64 limit of CIMD" \
+  [ "$(grep -cE 'must be one origin|NAT64 prefix' docs/admin.md)" -ge 2 ]
+
 # Attachments (since v0.18.0, CLAB-300): the limit of a file goes to the API
 # and the worker, the upload and download times to the API only. All three
 # have defaults in compose, so an .env written before them still works;
@@ -944,8 +1008,21 @@ check "[tls] issues the certificate with ACME and the e-mail" contains "$tls" '"
 proxy="$(adapt -e CADENCE_MODE=proxy -e SDLC_DOMAIN= -e ACME_EMAIL=)"
 check "[proxy] listens on :80" contains "$proxy" '":80"'
 check "[proxy] has no TLS automation" lacks "$proxy" '"acme"'
+# Behind your proxy Caddy believes X-Forwarded-Proto of a private address (the
+# API builds the address of the sign-in of MCP clients from it); in the tls
+# mode Caddy is the edge and trusts nobody.
+check "[proxy] trusts the private ranges: trusted_proxies static" contains "$proxy" '"trusted_proxies":{"ranges":['
+check "[proxy] ...10/8, 172.16/12, 192.168/16, loopback and fd00::/8 among them" \
+  [ "$(jq -r '[.apps.http.servers[].trusted_proxies.ranges[]] | sort | join(" ")' <<<"$proxy")" = "10.0.0.0/8 127.0.0.1/8 172.16.0.0/12 192.168.0.0/16 ::1 fd00::/8" ]
+check "[proxy] ...and no public range" lacks "$proxy" '"0.0.0.0/0"'
+check "[tls] trusts no proxy: no trusted_proxies" lacks "$tls" 'trusted_proxies'
 for cfg in "$tls" "$proxy"; do
-  check "routes /v1 /mcp /webhooks /healthz /readyz to the API" contains "$cfg" '"/v1/*","/mcp/*","/webhooks/*","/healthz","/readyz"'
+  check "routes /v1 /mcp /mcp/* /webhooks /healthz /readyz and the two OAuth documents of /.well-known to the API" \
+    contains "$cfg" '"/v1/*","/mcp","/mcp/*","/webhooks/*","/healthz","/readyz","/.well-known/oauth-authorization-server","/.well-known/oauth-protected-resource","/.well-known/oauth-protected-resource/*"'
+  # Only those two documents: the rest of /.well-known (and the OIDC
+  # document, which the instance does not serve) is the UI's.
+  check "no catch-all of /.well-known and no openid-configuration goes to the API" \
+    [ -z "$(grep -oE '"/\.well-known/(\*|oauth-\*|openid-configuration)"' <<<"$cfg" || true)" ]
   check "MCP is proxied without buffering" contains "$cfg" '"flush_interval":-1'
   # The frontend image listens on :8080 only since v0.16.0 (CLAB-248); its
   # images of v0.14.x and v0.15.x answer there too.
@@ -1108,6 +1185,27 @@ check "...the same with database: empty in a values file" db_from_secret -f "$di
 check "ingress.tls: null renders, the Ingress without TLS" \
   [ "$(render_json -f "$dist/min-values.yaml" --set ingress.tls=null | jq -r '.[] | select(.kind == "Ingress") | "\(.spec.rules[0].host) \(.spec.tls)"')" = "cadence.example.com null" ]
 
+# The public address of the API (SDLC_PUBLIC_URL, CLAB-487): https://<host> of a
+# TLS Ingress, else empty (the API reads Host and X-Forwarded-Proto); a value
+# of config.api.SDLC_PUBLIC_URL wins. The five variables of the sign-in are in
+# config.shared with the defaults of the service.
+public_url_of() { jq -r '[.[] | select(.kind == "Deployment" and .metadata.name == "cadence-api") | .spec.template.spec.containers[0].env[] | select(.name == "SDLC_PUBLIC_URL") | .value] | join(",")' <<<"$1"; }
+check "[chart] no TLS on the Ingress: SDLC_PUBLIC_URL of api is empty" [ "$(public_url_of "$min_json")" = "" ]
+check "[chart] the worker has no SDLC_PUBLIC_URL" \
+  [ "$(jq -r '[.[] | select(.kind == "Deployment" and .metadata.name == "cadence-worker") | .spec.template.spec.containers[0].env[] | select(.name == "SDLC_PUBLIC_URL")] | length' <<<"$min_json")" = 0 ]
+check "[chart] ingress.tls.secretName set: SDLC_PUBLIC_URL of api is https://<ingress.host>" \
+  [ "$(public_url_of "$(render_json -f "$dist/min-values.yaml" --set ingress.tls.secretName=cadence-tls)")" = https://cadence.example.com ]
+check "[chart] TLS Ingress with config.api.SDLC_PUBLIC_URL: the value of config wins" \
+  [ "$(public_url_of "$(render_json -f "$dist/min-values.yaml" --set ingress.tls.secretName=cadence-tls --set config.api.SDLC_PUBLIC_URL=https://mcp.example.org)")" = https://mcp.example.org ]
+check "[chart] no TLS, config.api.SDLC_PUBLIC_URL set: the value of config" \
+  [ "$(public_url_of "$(render_json -f "$dist/min-values.yaml" --set config.api.SDLC_PUBLIC_URL=https://mcp.example.org)")" = https://mcp.example.org ]
+check "[chart] ingress.tls: null: SDLC_PUBLIC_URL of api is empty" [ "$(public_url_of "$(render_json -f "$dist/min-values.yaml" --set ingress.tls=null)")" = "" ]
+check "[chart] the sign-in defaults: api and worker get true, true, true, 1h, 720h" \
+  [ "$(jq -r '[.[] | select(.kind == "Deployment" and (.metadata.name == "cadence-api" or .metadata.name == "cadence-worker")) | .spec.template.spec.containers[0].env | map({(.name): .value}) | add
+    | [.SDLC_OAUTH_ENABLED, .SDLC_OAUTH_DCR_ENABLED, .SDLC_OAUTH_CIMD_ENABLED, .SDLC_OAUTH_ACCESS_TTL, .SDLC_OAUTH_REFRESH_TTL] | join(",")] | unique | join(" ")' <<<"$min_json")" = "true,true,true,1h,720h" ]
+check "[chart] config.shared.SDLC_OAUTH_ENABLED=false reaches api and worker" \
+  [ "$(render_json -f "$dist/min-values.yaml" --set-string config.shared.SDLC_OAUTH_ENABLED=false | jq -r '[.[] | select(.kind == "Deployment" and (.metadata.name == "cadence-api" or .metadata.name == "cadence-worker")) | .spec.template.spec.containers[0].env[] | select(.name == "SDLC_OAUTH_ENABLED") | .value] | join(",")')" = "false,false" ]
+
 # What the chart installs: three Deployments, their Services, one Ingress,
 # the hook of the precheck; no database, no Caddy, no volume claims.
 kinds="$(jq -r '[.[] | "\(.kind)/\(.metadata.name)"] | sort | join(" ")' <<<"$min_json")"
@@ -1117,7 +1215,11 @@ check "no image of postgres, pgvector or caddy" lacks "$(images_of "$min_json")"
 check "...nor of caddy" lacks "$(images_of "$min_json")" "caddy:"
 routes="$(jq -r '.[] | select(.kind == "Ingress") | .spec.rules[0].http.paths[] | "\(.path) \(.pathType) \(.backend.service.name):\(.backend.service.port.name)"' <<<"$min_json" | tr '\n' ',')"
 check "the Ingress routes as the Caddyfile: $routes" \
-  [ "$routes" = "/v1 Prefix cadence-api:http,/mcp Prefix cadence-api:http,/webhooks Prefix cadence-api:http,/healthz Exact cadence-api:http,/readyz Exact cadence-api:http,/ Prefix cadence-ui:http," ]
+  [ "$routes" = "/v1 Prefix cadence-api:http,/mcp Prefix cadence-api:http,/webhooks Prefix cadence-api:http,/.well-known/oauth-authorization-server Prefix cadence-api:http,/.well-known/oauth-protected-resource Prefix cadence-api:http,/healthz Exact cadence-api:http,/readyz Exact cadence-api:http,/ Prefix cadence-ui:http," ]
+# The two documents of /.well-known are two paths of their own: a Prefix of an
+# Ingress compares whole segments, "/.well-known/oauth-" would match nothing.
+check "the Ingress has no general /.well-known or /.well-known/oauth- path" \
+  [ -z "$(jq -r '.[] | select(.kind == "Ingress") | .spec.rules[0].http.paths[].path | select(. == "/.well-known" or . == "/.well-known/" or . == "/.well-known/oauth-" or . == "/.well-known/oauth")' <<<"$min_json")" ]
 check "the Ingress routes no metrics port" lacks "$(jq -c '.[] | select(.kind == "Ingress")' <<<"$min_json")" "metrics"
 check "the Services are ClusterIP" [ "$(jq -r '[.[] | select(.kind == "Service") | .spec.type] | unique | join(" ")' <<<"$min_json")" = ClusterIP ]
 
@@ -1166,12 +1268,16 @@ check "HTTPRoute only: the other objects are those of the defaults" \
 check "HTTPRoute: parentRefs as set (name, namespace, sectionName)" \
   [ "$(route_obj | jq -c '.spec.parentRefs')" = '[{"name":"gw","namespace":"infra","sectionName":"https"}]' ]
 check "HTTPRoute: hostnames as set" [ "$(route_obj | jq -c '.spec.hostnames')" = '["cadence.example.com"]' ]
+check "[chart] HTTPRoute only, TLS values left over in ingress: SDLC_PUBLIC_URL of api is empty" \
+  [ "$(public_url_of "$(render_json -f "$dist/min-values.yaml" -f "$dist/httproute-values.yaml" --set ingress.tls.secretName=cadence-tls 2>/dev/null || true)")" = "" ]
 check "HTTPRoute: the annotation of httpRoute.annotations" [ "$(route_obj | jq -r '.metadata.annotations.a')" = b ]
 check "HTTPRoute: the labels of the chart and httpRoute.labels" \
   [ "$(route_obj | jq -r '.metadata.labels | [.["app.kubernetes.io/name"], .["app.kubernetes.io/instance"], .["app.kubernetes.io/version"], .["app.kubernetes.io/managed-by"], .["helm.sh/chart"], .team] | join(" ")')" = "cadence cadence $version Helm cadence-${version#v} x" ]
 route_paths="$(route_obj | jq -r '.spec.rules[] as $r | $r.matches[] | "\(.path.value) \(.path.type) \($r.backendRefs[0].name):\($r.backendRefs[0].port)"' | tr '\n' ',')"
 check "the HTTPRoute routes as the Ingress, ports by number: $route_paths" \
-  [ "$route_paths" = "/v1 PathPrefix cadence-api:8080,/mcp PathPrefix cadence-api:8080,/webhooks PathPrefix cadence-api:8080,/healthz Exact cadence-api:8080,/readyz Exact cadence-api:8080,/ PathPrefix cadence-ui:80," ]
+  [ "$route_paths" = "/v1 PathPrefix cadence-api:8080,/mcp PathPrefix cadence-api:8080,/webhooks PathPrefix cadence-api:8080,/.well-known/oauth-authorization-server PathPrefix cadence-api:8080,/.well-known/oauth-protected-resource PathPrefix cadence-api:8080,/healthz Exact cadence-api:8080,/readyz Exact cadence-api:8080,/ PathPrefix cadence-ui:80," ]
+check "the HTTPRoute has no general /.well-known or /.well-known/oauth- path" \
+  [ -z "$(route_obj | jq -r '.spec.rules[].matches[].path.value | select(. == "/.well-known" or . == "/.well-known/" or . == "/.well-known/oauth-" or . == "/.well-known/oauth")')" ]
 check "the HTTPRoute has one backend per rule" [ "$(route_obj | jq -r '[.spec.rules[].backendRefs | length] | join(",")')" = "1,1" ]
 check "the HTTPRoute routes no metrics port" lacks_pattern -E "9090|metrics" "$(route_obj)"
 check "the HTTPRoute carries no TLS (ingress.tls stays with the Ingress)" lacks_pattern -i "tls" "$(route_obj)"

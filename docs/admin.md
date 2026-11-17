@@ -29,6 +29,11 @@ public address of your proxy in the `proxy` mode.
   [optional stages](#optional-stages))
 - [GitHub App](#github-app)
 - [Single sign-on with OIDC](#single-sign-on-with-oidc)
+- [Sign-in of MCP clients (OAuth)](#sign-in-of-mcp-clients-oauth)
+  ([switching it off](#switching-it-off),
+  [the public address](#the-public-address),
+  [routes](#routes-for-the-sign-in),
+  [network](#network-of-the-sign-in-of-mcp-clients))
 - [CLI and agents](#cli-and-agents)
   ([cost of a run](#cost-of-a-run),
   [usage policy](#usage-policy-of-a-project),
@@ -39,7 +44,8 @@ public address of your proxy in the `proxy` mode.
   [upgrading to v0.19.0](#upgrading-to-v0190),
   [upgrading to v0.20.0](#upgrading-to-v0200),
   [upgrading to v0.21.0](#upgrading-to-v0210),
-  [upgrading to v0.22.0](#upgrading-to-v0220))
+  [upgrading to v0.22.0](#upgrading-to-v0220),
+  [upgrading to v0.30.0](#upgrading-to-v0300))
 - [Stage limits](#stage-limits): reviews and the time of a stage
 - [Embeddings](#embeddings)
 - [Attachments](#attachments): the file limit, time limits, your proxy,
@@ -335,6 +341,21 @@ terminates TLS and forwards everything for `<host>` there. It must:
   [Waiting for an approval](#waiting-for-an-approval)). A proxy that cuts
   earlier loses nothing — the client asks again — but it makes more
   requests;
+- **pass `X-Forwarded-Proto` (`https`)**, or set `SDLC_PUBLIC_URL` in `.env`:
+  the sign-in of MCP clients names the instance by an address, and the API
+  takes the scheme of it from this header ([The public
+  address](#the-public-address)). Caddy of the package keeps the header of a
+  proxy at a private address (loopback, `10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`, `fd00::/8`) and replaces it with `http` for any other
+  source, so a proxy at a public address needs `SDLC_PUBLIC_URL`. The nginx
+  example below sends the header;
+- **send to the stack, along with the rest, the paths of the sign-in of MCP
+  clients**: `/.well-known/oauth-authorization-server`,
+  `/.well-known/oauth-protected-resource` (and what follows it) and `/mcp`
+  without a trailing slash as well as `/mcp/`. A proxy that forwards
+  everything needs no rule for them; one that routes by path must not send
+  `/.well-known/` to another site ([Routes for the
+  sign-in](#routes-for-the-sign-in));
 - if you use GitHub webhooks, keep `https://<host>/webhooks/github`
   reachable from GitHub, even if the rest of the instance is internal-only.
   Webhooks are optional: without them the worker polls GitHub, minutes
@@ -374,8 +395,12 @@ server {
 
 A proxy on another machine needs `CADENCE_HTTP_ADDR=0.0.0.0:8080` (or the
 address of the internal interface) and a firewall that admits only the proxy.
-Sign-in redirects are built from the address in the browser, so nothing in
-`.env` needs the public host name in this mode.
+The UI and the API must be one origin behind your proxy: the same host and
+the same scheme for both. Sign-in redirects of people are built from the
+address in the browser, so `.env` needs no host name for them; the sign-in of
+MCP clients needs the address as described above, from `X-Forwarded-Proto` or
+from `SDLC_PUBLIC_URL`. Behind a proxy that does not fit that (another port or
+a path prefix), set `SDLC_PUBLIC_URL`.
 
 ## External PostgreSQL
 
@@ -1001,11 +1026,17 @@ to you. Each way has its own switch:
   | path | match | Service | port |
   |---|---|---|---|
   | `/v1`, `/mcp`, `/webhooks` | prefix | `cadence-api` | 8080 |
+  | `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource` | prefix, each of its own | `cadence-api` | 8080 |
   | `/healthz`, `/readyz` | exact | `cadence-api` | 8080 |
   | `/` | prefix | `cadence-ui` | 80 |
 
-  Port 9090 (the metrics of the API and the worker) is not routed. With no
-  route from the chart, the notes of `helm install` print no address and
+  The two paths of `/.well-known` are the OAuth metadata of the sign-in of
+  MCP clients ([Routes for the sign-in](#routes-for-the-sign-in)); the rest of
+  `/.well-known/` goes to the UI. They are two paths, not one
+  `/.well-known/oauth-`, since a prefix of an Ingress matches whole path
+  segments. `/mcp` is one prefix and covers the address of the instance and
+  of the projects. Port 9090 (the metrics of the API and the worker) is not
+  routed. With no route from the chart, the notes of `helm install` print no address and
   say that the route is yours.
 
 #### Gateway API (HTTPRoute)
@@ -2210,6 +2241,151 @@ mapping is set by the administrator, roles inside the team stay manual:
 ```bash
 clab team groups platform --set cadence-platform
 ```
+
+## Sign-in of MCP clients (OAuth)
+
+Hosted AI clients (claude.ai, ChatGPT, Codex and other clients of the MCP
+authorization specification) connect to the MCP address of the instance
+without a token that a person copies: the client finds the sign-in of
+the instance by itself (OAuth 2.1 with PKCE), the person signs in in the
+browser, approves the client on a consent page and the client gets a token of
+their own, with the rights of that person. It is on by default from v0.30.0
+and needs nothing in `.env`: the defaults below are what the stack
+runs when no line is set. A token, `clab` and the agents of earlier versions
+work as before.
+
+It acts in the token mode only (`SDLC_AUTH_MODE=token`, what the package
+sets); with `SDLC_AUTH_MODE=header` the metadata is not served.
+
+| variable | default | what it does |
+|---|---|---|
+| `SDLC_OAUTH_ENABLED` | `true` | The whole sign-in. `false` turns it off, see [below](#switching-it-off) |
+| `SDLC_OAUTH_DCR_ENABLED` | `true` | Dynamic client registration (RFC 7591): a client registers itself at `/v1/oauth/register` |
+| `SDLC_OAUTH_CIMD_ENABLED` | `true` | Client ID metadata documents: the client names an `https` address of a document about itself and the API fetches it. Needs outbound `https`, see [the network](#network-of-the-sign-in-of-mcp-clients) |
+| `SDLC_OAUTH_ACCESS_TTL` | `1h` | How long an access token lives (a Go duration) |
+| `SDLC_OAUTH_REFRESH_TTL` | `720h` | How long a refresh token lives without being used; the client that keeps connecting stays signed in |
+| `SDLC_PUBLIC_URL` | empty | The public address of the instance, [below](#the-public-address) |
+
+The values are in `.env.example` (commented out: the defaults apply) and, for
+Kubernetes, in `config.shared` and `config.api` of the chart. The API and the
+worker read the same OAuth values: the worker removes what has expired.
+
+### Switching it off
+
+`SDLC_OAUTH_ENABLED=false` in `.env` and `docker compose up -d` (or
+`config.shared.SDLC_OAUTH_ENABLED: "false"` and a Helm upgrade) removes the
+sign-in as if it did not exist: the metadata and `/v1/oauth/*` answer
+`404`, MCP answers `401` without `WWW-Authenticate`, tokens that clients got
+by OAuth stop being accepted and cannot be refreshed. Nothing is deleted from
+the database, so turning it on again brings the grants back. The administrator
+token, the tokens of people and agents, `clab` and the addresses of
+projects are not touched. `SDLC_OAUTH_DCR_ENABLED=false` and
+`SDLC_OAUTH_CIMD_ENABLED=false` close one way of registering a client: the
+metadata stops announcing it and a client falls back to the other.
+
+### The public address
+
+The metadata names the instance by an address: the `issuer` of the sign-in and
+the `resource` of MCP. A client takes it for the address it opened and
+refuses the sign-in when it differs or is not `https`.
+
+- **tls mode**: `compose.tls.yml` sets `SDLC_PUBLIC_URL` to
+  `https://<SDLC_DOMAIN>`. Do not set it in `.env`: the line of the mode
+  wins. A different address in this mode goes into your
+  `compose.override.yml`.
+- **proxy mode**: empty, and the API builds the address of each request from
+  `Host` and `X-Forwarded-Proto`, which **your proxy must send**
+  ([Behind your reverse proxy](#behind-your-reverse-proxy)). Caddy of the
+  package believes `X-Forwarded-Proto` of a proxy at a private address
+  (loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fd00::/8`) and
+  replaces it with `http` for any other source. A proxy at a public address,
+  or one that cannot send the header, is the case for setting the address:
+  `SDLC_PUBLIC_URL=https://cadence.example.com` in `.env`. Without either, the API
+  builds an `http://` address, answers anyway, and writes one line to its log
+  (`docker compose logs api`): set `SDLC_PUBLIC_URL` or pass
+  `X-Forwarded-Proto`. Clients do not sign in by `http`.
+- **Kubernetes**: the chart sets it to `https://<ingress.host>` when the
+  Ingress has TLS (`ingress.tls.secretName`). Without that, and with an
+  HTTPRoute, it is empty and the API reads the request: set
+  `config.api.SDLC_PUBLIC_URL` when TLS ends before your controller or
+  Gateway and the controller does not send `X-Forwarded-Proto`. A value in
+  `config.api.SDLC_PUBLIC_URL` wins over the computed one.
+
+The value is a scheme and a host (`https://cadence.example.com`, a port if it
+is not the default one), no path: the API refuses to start on a path or a
+wrong scheme and names the variable in the log. Behind a proxy of a kind not
+described here (a path prefix, another port) the UI and the API must stay on
+one origin: the browser needs no CORS, and the sign-in assumes it. Set
+`SDLC_PUBLIC_URL` there.
+
+### Routes for the sign-in
+
+Three groups of paths belong to the API besides `/v1`, `/webhooks`,
+`/healthz` and `/readyz`:
+
+| path | what it is |
+|---|---|
+| `/.well-known/oauth-authorization-server` | the metadata of the sign-in (RFC 8414) |
+| `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/*` | the metadata of MCP, for the instance and for each project address (RFC 9728) |
+| `/mcp` (exactly) and `/mcp/*` | MCP: the address of the instance and the addresses of projects `/mcp/projects/<KEY>` |
+
+The Caddyfile of the package routes them in both modes. The rest of
+`/.well-known/` stays with the UI; `/.well-known/openid-configuration` is
+not served by the instance. Your own routing has to carry the same paths:
+
+- **A proxy in front of the stack** that forwards everything to Caddy needs
+  no change. One that routes by path (a site next to Cadence Lab, a split of
+  `/v1` and the UI) sends these paths to the stack too ([Behind your reverse
+  proxy](#behind-your-reverse-proxy)).
+- **The Ingress and the HTTPRoute of the chart** carry them since v0.30.0:
+  `/.well-known/oauth-authorization-server` and
+  `/.well-known/oauth-protected-resource` as two paths of their own, with
+  `Prefix` (`PathPrefix`) matching, and `/mcp` is a prefix already. Do not
+  replace them with one `/.well-known/oauth-`: a `Prefix` of an Ingress
+  compares whole path segments and would match nothing.
+- **Your own route in Kubernetes** (`ingress.enabled: false`): add these rows
+  to the table in [Routes: the Ingress, an HTTPRoute, or your own](#routes-the-ingress-an-httproute-or-your-own).
+
+Check it from outside, with a project key of yours:
+
+```bash
+curl -s https://<host>/.well-known/oauth-authorization-server | jq .issuer
+curl -s https://<host>/.well-known/oauth-protected-resource/mcp/projects/<KEY> | jq '.resource, .authorization_servers'
+curl -si -X POST https://<host>/mcp/projects/<KEY> | grep -i '^HTTP\|^www-authenticate'   # 401 and resource_metadata=
+```
+
+The first two are JSON (the `issuer` and the `resource` start with the address
+people open) and the last is `401` with a `WWW-Authenticate: Bearer
+resource_metadata="..."` header. HTML in place of JSON means the path reached
+the UI: the route above is missing.
+
+### Network of the sign-in of MCP clients
+
+- **Incoming.** A hosted client calls from the cloud of its provider, not
+  from the device of the person. An instance that the internet cannot reach
+  (a network of the company, a VPN) cannot be connected to claude.ai or
+  ChatGPT; the clients on a machine of the network (Codex, Claude Code) still
+  sign in by OAuth with a loopback address, and `clab` works as before. To
+  open the instance to a hosted client, allow its addresses at your firewall
+  or proxy, for the paths of MCP and the sign-in only if you can. Anthropic
+  publishes the addresses of its outbound requests (for example `160.79.104.0/21`
+  and `153.61.208.0/20`, from
+  [platform.claude.com/docs/en/api/ip-addresses](https://platform.claude.com/docs/en/api/ip-addresses),
+  checked on 2026-11-18); take the current list from the page of the provider,
+  it changes.
+- **Outgoing.** With `SDLC_OAUTH_CIMD_ENABLED=true` the API fetches the
+  document of a client at the `https` address the client names (port 443 by
+  default, no redirects, 5 KiB, 5 seconds), so the API needs outbound `https`
+  to the internet. Without it set `SDLC_OAUTH_CIMD_ENABLED=false`: clients
+  register themselves (DCR), and nothing else changes. The API refuses
+  addresses of loopback, private and reserved ranges (IPv4 forms inside
+  IPv6 too) and connects to the address it checked. That check is by
+  address: it cannot see an internal IPv4 address behind **a NAT64 prefix of
+  your own**. What keeps the API from your internal addresses there is the
+  policy for its outgoing connections (a firewall, a `NetworkPolicy`, a
+  security group), not the API. Allow the API `https` to the internet and
+  nothing inside.
+- **Nothing else.** The sign-in adds no port, no service and no volume.
 
 ## CLI and agents
 
@@ -4545,6 +4721,59 @@ needs none, and the data is not changed.
 After the upgrade update `clab` on the machines (`brew upgrade clab`, or the
 install script with the version of the server): `clab` of v0.28.0 and older
 is built with Go 1.26.10 and carries GO-2026-6859.
+
+### Upgrading to v0.30.0
+
+The upgrade (`./upgrade.sh v0.30.0`, or `clab server upgrade`) needs no step
+in the common case: the migration `000049_oauth` (four small tables of the
+sign-in of MCP clients) is applied by the API on start, `.env` is not
+changed and needs no new line, and there are no new services, ports or
+volumes. The starter bundle and the addresses of projects are not changed. The
+cases below are for a proxy or a Caddyfile of your own, for Kubernetes
+routing of your own and for a closed network.
+
+- **New: sign-in of MCP clients by OAuth**, on by default. Hosted clients
+  (claude.ai, ChatGPT, Codex) connect to the MCP address of the instance with
+  no token: see [Sign-in of MCP clients (OAuth)](#sign-in-of-mcp-clients-oauth).
+  A token, `clab` and the agents of an earlier version work as before. A
+  stack that must not offer it sets `SDLC_OAUTH_ENABLED=false` in `.env`
+  (`config.shared.SDLC_OAUTH_ENABLED: "false"` in the chart).
+- **A proxy of your own in front of the stack** (the `proxy` mode) that
+  routes by path: send the paths `/.well-known/oauth-authorization-server`,
+  `/.well-known/oauth-protected-resource` (with what follows it) and `/mcp`
+  (with and without a trailing slash) to the stack, as everything else
+  ([Routes for the sign-in](#routes-for-the-sign-in)). One that forwards
+  everything needs no change.
+- **The `proxy` mode: the scheme of the address.** Pass `X-Forwarded-Proto:
+  https` from your proxy (the nginx example sends it), or set
+  `SDLC_PUBLIC_URL=https://<host>` in `.env`; without either the sign-in of
+  clients builds an `http://` address and clients refuse it, with one
+  warning line in `docker compose logs api`. Caddy of the package now keeps
+  `X-Forwarded-Proto` of a proxy at a private address and replaces it for any
+  other source ([The public address](#the-public-address)). The `tls` mode
+  needs nothing: `compose.tls.yml` sets the address from `SDLC_DOMAIN`.
+- **Kubernetes.** The Ingress and the HTTPRoute of the chart get the two
+  `/.well-known` paths with a Helm upgrade to the chart of v0.30.0, and the
+  chart sets `SDLC_PUBLIC_URL` to `https://<ingress.host>` when the Ingress
+  has TLS. A route of your own (`ingress.enabled: false`) gets the rows of
+  [Routes: the Ingress, an HTTPRoute, or your own](#routes-the-ingress-an-httproute-or-your-own).
+- **A `Caddyfile` of your own** (carried over after `upgrade --force`, or
+  mounted in `compose.override.yml`) is not replaced: add to its `@backend`
+  matcher the paths `/mcp`, `/.well-known/oauth-authorization-server`,
+  `/.well-known/oauth-protected-resource` and
+  `/.well-known/oauth-protected-resource/*`, and in the `proxy` mode
+  `servers { trusted_proxies static private_ranges }` to the global options,
+  as the Caddyfile of the package has them.
+- **The network.** The API fetches the document of a client over `https`
+  (CIMD): with no outbound `https` from the API set
+  `SDLC_OAUTH_CIMD_ENABLED=false`, and clients register themselves. A
+  hosted client reaches the instance from the cloud of its provider: an
+  instance closed to the internet cannot be connected to it ([Network of the
+  sign-in of MCP clients](#network-of-the-sign-in-of-mcp-clients)).
+- **Rolling back.** The way back is the general one, [Upgrades and
+  rollback](#upgrades-and-rollback): the database from the backup and the
+  package of the old version. The tables of the migration are only added;
+  OAuth grants made after the upgrade go with the backup you restore.
 
 ## Stage limits
 
