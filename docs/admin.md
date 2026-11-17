@@ -4494,9 +4494,11 @@ the upgrade takes, with the images of the old version.
 
 ### Upgrading to v0.29.0
 
-The upgrade needs no manual step for the change of the parent of a task:
-there is no migration for it, no new variable in `.env`, and the data is not
-changed.
+The upgrade (`./upgrade.sh v0.29.0`, or `clab server upgrade`) has no
+migration, no new variable in `.env`, no new services, ports or volumes, and
+the starter bundle is not changed. The only manual step is for a `Caddyfile`
+of your own with `acme_server` (below); the change of the parent of a task
+needs none, and the data is not changed.
 
 - **A task can change its parent.** `clab edit <KEY> --parent <KEY>` (and
   `--parent ""`), the line «Родитель» in the task card, `PUT
@@ -4524,6 +4526,25 @@ changed.
   is nested deeper than one level.
 - `clab` of an earlier version keeps working against a v0.29.0 server; only
   the creation of a third level is refused, with the reason in the message.
+- **Caddy without the ACME server.** The entry point `caddy` runs a Caddy
+  built without the ACME server module. If your own `Caddyfile` uses the
+  `acme_server` directive, `caddy validate` fails with `unrecognized
+  directive: acme_server` after the upgrade; the Caddyfile of the package does
+  not use it, and no step is needed unless you changed it. Certificates from
+  Let's Encrypt and `tls internal` work as before.
+- **Security fixes.** The binaries are built with Go 1.26.11, and Caddy with
+  `klauspost/compress` v1.20.2 and OpenTelemetry 1.47.0, which fixes
+  GO-2026-6859, GO-2026-6865 and GHSA-q7gw-24fr-5p69; three findings of
+  `go-jose/v3` in Caddy are stated as not affected in the VEX of the frontend
+  image. See [Known scanner findings](#known-scanner-findings).
+- **New base images.** Both images are built on new digests of their base
+  images (`gcr.io/distroless/static-debian13:nonroot`, `caddy:2-alpine`).
+  The user and group stay `nonroot` (65532), so the `blobs` volume needs no
+  change.
+
+After the upgrade update `clab` on the machines (`brew upgrade clab`, or the
+install script with the version of the server): `clab` of v0.28.0 and older
+is built with Go 1.26.10 and carries GO-2026-6859.
 
 ## Stage limits
 
@@ -6364,6 +6385,9 @@ at the tag of the release, attached to the image as a signed attestation
 | [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) | `golang.org/x/crypto` in `/api` of the backend image | not affected, vulnerable code not present | the advisory is about the `golang.org/x/crypto/openpgp` packages; none of them is in the binaries, the module is there for other packages |
 | [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) | `golang.org/x/crypto` in `/usr/bin/caddy` of the frontend image | not affected, vulnerable code not present | the same advisory; we build Caddy from source, and the build fails if any `golang.org/x/crypto/openpgp` package gets into it |
 | [CVE-2026-85091](https://nvd.nist.gov/vuln/detail/CVE-2026-85091) | `zlib` 1.3.2-r0 of the Alpine base of the frontend image | not affected, vulnerable code not in execute path | the only process of the image is Caddy, a static Go binary without cgo that does not load libz; only `apk` and `curl` link it, and neither the image nor the package runs them. It goes away when `caddy:2-alpine` is republished with zlib 1.3.2-r1 |
+| [GHSA-mgcc-cww5-fp2q](https://github.com/advisories/GHSA-mgcc-cww5-fp2q) (CVE-2026-116587) | `github.com/go-jose/go-jose/v3` in `/usr/bin/caddy` of the frontend image | not affected, vulnerable code not in execute path | go-jose v3 has no fixed version (the advisory covers 3.0.5 and older). The finding needs a JWK with an RSA key from an adversary; the only place where Caddy takes such input from the network is its ACME server (`acme_server`), and we build Caddy without it: the build fails if the package comes back. The built-in CA of Caddy uses the library only to sign certificates. Check: `docker run --rm <frontend image> caddy list-modules` has no `http.handlers.acme_server` |
+| [GHSA-4w3g-jfj2-cw2q](https://github.com/advisories/GHSA-4w3g-jfj2-cw2q) (CVE-2026-116585) | the same | not affected, vulnerable code not in execute path | the same advisory family (panic in CBC-HMAC processing of a JWE), the same reason |
+| [GHSA-vvm8-gf78-28g4](https://github.com/advisories/GHSA-vvm8-gf78-28g4) (CVE-2026-116586) | the same | not affected, vulnerable code not in execute path | the same advisory family (panics in JSON parsing of a JWS or JWE), the same reason |
 
 ```bash
 v=$(cat VERSION)
@@ -6398,6 +6422,21 @@ upgrade, not a VEX statement. From the release after v0.18.0 both images
 carry `golang.org/x/net` v0.62.0 and the findings are gone; run
 `./upgrade.sh` to get them.
 
+**`net/http`, `klauspost/compress` and OpenTelemetry in the images up to
+v0.28.0.** The binaries of the releases up to and including v0.28.0 are
+built with Go 1.26.10 or older — `/api` and `/worker` of the backend image,
+`/usr/bin/caddy` of the frontend image and `clab` — and Caddy carries
+`github.com/klauspost/compress` v1.20.1. `govulncheck` and scanners that
+match by version report [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859)
+(`net/http`) in all of them and
+[GO-2026-6865](https://pkg.go.dev/vuln/GO-2026-6865) (`klauspost/compress`)
+in Caddy. They are fixed, not suppressed: from v0.29.0 the binaries are built
+with Go 1.26.11 and Caddy with `klauspost/compress` v1.20.2. The Caddy of the
+frontend image is built with OpenTelemetry 1.47.0 (`caddy build-info`);
+[GHSA-q7gw-24fr-5p69](https://github.com/advisories/GHSA-q7gw-24fr-5p69) in
+`go.opentelemetry.io/otel/sdk`, `otel/trace` and `otel/sdk/log` is fixed in
+v0.29.0. Run `./upgrade.sh` and update `clab` to get them.
+
 **The backend image.** The operating system layer has no known findings:
 from the release after v0.11.0 the image is built on
 `gcr.io/distroless/static-debian13:nonroot`. Up to v0.11.0 it was built on
@@ -6410,9 +6449,13 @@ change.
 
 **The frontend image and the entry point.** From the release after v0.12.0
 the frontend image runs Caddy built from source by its `Dockerfile` — the
-same release of Caddy and the same standard modules as the official
-distribution, compiled on the current patch of Go 1.26 with the current
-`golang.org/x/net` and without cgo. The same image runs both `ui` (the
+same release of Caddy as the official distribution, compiled on the current
+patch of Go 1.26 with the current `golang.org/x/net` and without cgo. Up to
+v0.28.0 it had the same standard modules as the official distribution; from
+v0.29.0 it has all of them except the ACME server (`caddypki/acmeserver`,
+the directive `acme_server`), and the build fails if that module comes back.
+The built-in CA (`tls internal`) and getting certificates over ACME are
+there as before; `caddy list-modules` shows what is in the binary. The same image runs both `ui` (the
 static files) and `caddy`, the entry point of the stack: `caddy` is pinned
 by the digest of the frontend image, its signature is verified with the
 release, and the `Caddyfile` of the package is mounted over the one inside,
