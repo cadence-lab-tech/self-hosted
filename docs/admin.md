@@ -1479,8 +1479,9 @@ apart by the kind of their token.
   - edits the brief of a task and chooses its stages ([Who chooses the stages
     of a task](#optional-stages)), creates tasks (also without a parent and
     outside the repositories of the parent), assigns, links, changes the
-    repositories and the properties of a task, and puts it in its place in the
-    backlog;
+    repositories and the properties of a task, puts it in its place in the
+    backlog, and from v0.29.0 moves a task under another parent or makes it
+    top-level ([Moving a task to another parent](#moving-a-task-to-another-parent));
   - requests any transition of the cycle out of the current status, of any
     kind (`advance`, `reject`, `cancel`, `reassign`, a transition from any
     status), also out of a status that has no executor, and moves a task to
@@ -1510,16 +1511,18 @@ apart by the kind of their token.
   stage, edits the task whose stage (or the stage of whose parent) it holds
   by a lease and creates children of the task it holds, in its repositories.
   It cannot take a transition from any status, cancel a task, decide a
-  limit, give a `waived`, fail a checklist, move a task to a status or change
-  its repositories, and it never puts an approval (see below). It assigns and
+  limit, give a `waived`, fail a checklist, move a task to a status or to
+  another parent or change its repositories, and it never puts an approval
+  (see below). It assigns and
   links tasks as before.
 - **A stage executor** is an agent with a task token (the token that a claim
   of a stage issues for the run). It writes only into its own task and its
   children, and creates only children of its own task, in its repositories.
   It requests `advance` and `reject` of its own run and ticks the checklist
   of its own stage. The stages and the repositories of its own task, its
-  properties, a move to a status, an approval and the limits are closed to
-  it, whatever the level of the person who holds the lease.
+  properties, a move to a status or to another parent, an approval and the
+  limits are closed to it, whatever the level of the person who holds the
+  lease.
 
 An approval is never put by an agent: `human_approval` is closed by a person
 (an employee or a maintainer), never by a bot or a task token, and the audit
@@ -2313,6 +2316,43 @@ prints, with the level of the project, the line `С задачами:` ("With
 tasks") with what the server lets this actor do with the tasks of the
 project: for an employee, any task of the project, without a lease.
 
+### Moving a task to another parent
+
+From v0.29.0 an employee or a maintainer moves a task under another parent,
+or takes it off its parent, instead of creating it again and cancelling the
+original. The key, the runs, the artifacts, the links, the repositories and
+the status stay with the task:
+
+```bash
+clab edit PLAT-42 --parent PLAT-10   # under PLAT-10
+clab edit PLAT-42 --parent ""        # off its parent, to the top level
+```
+
+The same is the line «Родитель» ("parent") in the details of the task card
+and the MCP tool `sdlc_set_task_parent` of a person's AI. The task goes to
+the end of the backlog of its new parent (or of the top level); the feeds of
+the task and of both parents get `task.reparented`. A move to the parent the
+task already has changes nothing.
+
+**Nesting is one level.** A task either has a parent or has children, not
+both:
+
+- the parent must be a task without a parent of its own. This holds for a
+  move and, from v0.29.0, for creating a task with a parent too:
+  `clab create --parent`, `sdlc_create_task` with `parent` and
+  `POST /v1/projects/<KEY>/tasks` with `parent_key` answer `400` naming the
+  chosen parent and its own parent;
+- a task with children (any of them, closed and cancelled too) is not put
+  under a parent: `400` names the task and the number of its children;
+- taking a task off its parent always works;
+- the type of the parent is not checked, and neither are the repositories:
+  a task may go under a parent whose repositories it does not share.
+
+A bot gets `403` (a decision of a person), and a task token is refused.
+A newer `clab` against an older server answers `сервер не поддерживает смену
+родителя` ("the server does not support changing the parent") and exits with
+a non-zero code.
+
 ### Connecting developers
 
 Send your colleagues to `https://<host>/docs` (the "Подключение" item of the
@@ -2978,6 +3018,9 @@ makes role versions (maintainer and above; a task token cannot):
   clab edit PLAT-12 --model-level-for development=high --model-level-for qa=low
   clab create --parent PLAT-10 --title "Split the importer" --model-level-for analysis=low
   ```
+
+  (`--parent` is a task without a parent of its own: nesting is one level,
+  see [Moving a task to another parent](#moving-a-task-to-another-parent).)
 
 - MCP: `sdlc_create_task` and `sdlc_update_task` with `model_level` and
   `stage_settings`, for example `{"development": {"model_level": "high"}}`;
@@ -3737,7 +3780,8 @@ clab rank PLAT-12 --before PLAT-15 | --after PLAT-15 | --top | --bottom
 
 `clab backlog` prints the backlog in the order of the server, the top level
 of the project or, with `--parent`, the children of one epic that have not
-started:
+started (nesting is one level, so a group is the top level or the children of
+one top-level task; a task changes its group with `clab edit --parent`):
 
 ```
 №  КЛЮЧ     ТИП   ПРИОРИТЕТ  ЗАДАЧ  ПОМЕТКИ              ЗАГОЛОВОК
@@ -4447,6 +4491,39 @@ optional.
 The way back is the general one, [Upgrades and rollback](#upgrades-and-rollback):
 the migrations only go forward, so it is the database from the backup that
 the upgrade takes, with the images of the old version.
+
+### Upgrading to v0.29.0
+
+The upgrade needs no manual step for the change of the parent of a task:
+there is no migration for it, no new variable in `.env`, and the data is not
+changed.
+
+- **A task can change its parent.** `clab edit <KEY> --parent <KEY>` (and
+  `--parent ""`), the line «Родитель» in the task card, `PUT
+  /v1/tasks/<KEY>/parent`, the MCP tool `sdlc_set_task_parent` and the right
+  `actor_rights.reparent` of the card are new and only add; see [Moving a
+  task to another parent](#moving-a-task-to-another-parent).
+- **Nesting is one level, and creating a task changes with it.** Creating a
+  task under a parent that has a parent of its own (a third level) was
+  allowed before and is now `400 invalid_input`. If your agents or scripts
+  create such tasks, they have to create them under the top-level task.
+  Creating under a top-level task works as before.
+- **Deeper trees stay as they are.** Chains of three levels or more that an
+  earlier version let you create are read, shown and judged by the gate
+  `dependencies_closed` as before. New operations on them follow the rule: a
+  child of a middle task cannot be created and a middle task cannot be moved
+  under another parent, while taking any task off its parent always works,
+  so a person flattens such a chain by hand. This read-only query lists the
+  tasks that have a parent and children at the same time:
+
+  ```bash
+  docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -c "SELECT t.key, p.key FROM tasks t JOIN tasks p ON p.id = t.parent_id WHERE EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id) ORDER BY t.key"'
+  ```
+
+  Each line is a middle task and its parent; nothing printed means no task
+  is nested deeper than one level.
+- `clab` of an earlier version keeps working against a v0.29.0 server; only
+  the creation of a third level is refused, with the reason in the message.
 
 ## Stage limits
 
