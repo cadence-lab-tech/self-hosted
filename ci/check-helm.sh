@@ -180,6 +180,22 @@ check() {
   shift
   if "$@" >/dev/null 2>&1; then pass "$what"; else fail "$what"; fi
 }
+# wait_until SECONDS CMD...: CMD again every second until it succeeds or the
+# limit is over; $waited is the whole seconds it took. For the state that
+# is a moment behind the command that causes it (a controller dropping a
+# route, a pod going out), where the first look may still see the old one.
+# The caller reports it: pass when it succeeds, fail when it does not, so a
+# state that never comes still fails the check and does not stop it.
+wait_until() {
+  local limit="$1" start="$SECONDS"
+  shift
+  until "$@" >/dev/null 2>&1; do
+    waited=$((SECONDS - start))
+    [ "$waited" -lt "$limit" ] || return 1
+    sleep 1
+  done
+  waited=$((SECONDS - start))
+}
 contains() { grep -qF -- "$2" <<<"$1"; }
 lacks() { ! grep -qF -- "$2" <<<"$1"; }
 # step WHAT CMD...: CMD must succeed; its output is shown when it does not.
@@ -749,7 +765,14 @@ else
 fi
 check "the API runs with SDLC_LOG_LEVEL=debug" [ "$(k get deploy "$release-api" -o json |
   jq -r '.spec.template.spec.containers[0].env[] | select(.name == "SDLC_LOG_LEVEL") | .value')" = debug ]
-check "one api pod after the upgrade (api.replicas back to 1)" [ "$(ready api)" = 1 ]
+# helm --wait waits for the new ReplicaSet, not for the old pods to be gone:
+# one that is going out still counts as Ready for a moment (CLAB-473).
+one_api_pod() { [ "$(ready api)" = 1 ]; }
+if wait_until 60 one_api_pod; then
+  pass "one api pod after the upgrade (api.replicas back to 1; after ${waited}s)"
+else
+  fail "one api pod after the upgrade (api.replicas back to 1): $(ready api) still Ready after ${waited}s"
+fi
 check "the same token signs in" contains "$("$clab" --host "$base" whoami 2>&1)" "admin"
 check "the project CHECK is there" contains "$("$clab" --host "$base" project list --json)" '"CHECK"'
 check "the artifact is there with its content" grep -qF "line 400 of the brief" <(artifact_content 2>/dev/null)
@@ -906,8 +929,19 @@ else
 fi
 check "the release has no Ingress" [ -z "$(k get ingress -o name)" ]
 check "...and the HTTPRoute $release" [ -n "$(k get httproute "$release" -o name --ignore-not-found)" ]
-code="$(http_code "$base/v1/instance")"
-check "the port of the Ingress does not reach the instance (/v1/instance: $code)" [ "$code" != 200 ]
+# helm --wait does not wait for ingress-nginx to forget the Ingress that is
+# gone: for a moment the port still reaches the instance (CLAB-473). Wait for
+# the route to go; a 200 that stays for the whole limit is the failure.
+code=""
+ingress_route_gone() {
+  code="$(http_code --max-time 5 "$base/v1/instance")"
+  [ "$code" != 200 ]
+}
+if wait_until 60 ingress_route_gone; then
+  pass "the port of the Ingress does not reach the instance (/v1/instance: $code after ${waited}s)"
+else
+  fail "the port of the Ingress does not reach the instance (/v1/instance: $code still after ${waited}s)"
+fi
 check "/readyz through the Gateway is 200" [ "$(http_code "$gw_base/readyz")" = 200 ]
 check "the same token signs in through the Gateway" contains "$("$clab" --host "$gw_base" whoami 2>&1)" "admin"
 check "the project CHECK is there" contains "$("$clab" --host "$gw_base" project list --json)" '"CHECK"'
