@@ -1498,8 +1498,10 @@ apart by the kind of their token.
   and also changes the rules of the project: the cycle (a draft, activation,
   importing a bundle), roles and the approval of proposed role versions, the
   library of instructions, the documents and repositories of the project, its
-  members and the access of teams, and the values of the limits in the cycle.
-  An `admin` also issues invites and tokens to others, removes a repository,
+  members and the access of teams, the values of the limits in the cycle and,
+  from v0.28.0, the [agent settings](#agent-settings-of-a-project) (models of
+  the levels and prices): a person only, never a bot of any level or a task
+  token. An `admin` also issues invites and tokens to others, removes a repository,
   sets the [usage policy](#usage-policy-of-a-project) and deletes the project.
 - **A bot** is an agent: an agent principal with the `agent` level and its own
   token (`clab token create --for agent:…`, the token of a runner). It works at
@@ -1683,7 +1685,7 @@ The page replaced «Роли» and «Цикл» in v0.21.0; the old addresses
 найдена» ("Page not found"). Or round-trip them through the CLI:
 
 ```bash
-clab export > my-bundle.json        # repositories, roles, documents, the active cycles
+clab export > my-bundle.json        # repositories, roles, documents, the active cycles, the agent settings
 # edit my-bundle.json
 clab import --file my-bundle.json   # new role versions and a new draft of the cycle
 ```
@@ -1752,7 +1754,8 @@ clab token create --name analyst-bot --for agent:analyst-bot --project PLAT --ro
 On the developer's machine, `clab mcp install` registers the MCP server of
 the project with the agent (see [CLI and agents](#cli-and-agents)); the
 prompt `work_on_task` in it takes a task, submits the artifacts of the role's
-contract and requests the transition. The gates that need a human —
+contract and requests the transition. An agent that has no MCP prompts starts
+from `clab prompt work <KEY>`, which prints the same text. The gates that need a human —
 "Approved by a human" after analysis and the final approval after QA — are
 closed in the task card in the UI or from the CLI:
 
@@ -2253,14 +2256,21 @@ Sign in and connect an agent:
 clab auth login --host https://<host>       # opens the browser; --no-browser prints the link
 clab auth status
 cd ~/src/my-repo
-clab mcp install                            # registers the MCP server of the project with Claude Code
+clab mcp install                            # registers the MCP server of the project with each agent it finds
 ```
 
 `clab mcp install` writes the MCP server `https://<host>/mcp/projects/<KEY>`
-of your instance with the CLI's token into the agent's configuration. The
-project comes from the `origin` remote of the current directory, or from
-`--project <KEY>`. For other agents, `clab mcp config` prints the JSON to
-paste.
+of your instance into the configuration of an agent, the way that agent
+takes it (see [What `clab setup` writes for each agent](#what-clab-setup-writes-for-each-agent)):
+for Claude Code with the CLI's token, for Codex without any token in a file.
+The agent is `--agent auto|claude|codex|generic` (`auto`, the default, is
+every one of `claude` and `codex` found in `PATH`; `generic` prints the
+configuration instead of installing it; `other` is the old name of
+`generic`). The project comes from `--project <KEY>`, `SDLC_PROJECT`, a
+[line in `AGENTS.md` or `CLAUDE.md`](#the-line-that-binds-a-directory-to-a-project)
+or the `origin` remote of the current directory, in this order.
+`clab mcp config` prints the JSON to paste for any agent that reads MCP over
+HTTP.
 
 ### Moving a task to a status
 
@@ -2307,39 +2317,283 @@ project: for an employee, any task of the project, without a lease.
 
 Send your colleagues to `https://<host>/docs` (the "Подключение" item of the
 side menu): the page has the commands for your instance and the project they
-pick, each with a copy button - install the CLI, sign in, link the local
-project, connect MCP by hand, and the list of agent skills. In short, after
-`clab auth login`, in the root of a local clone of the project's repository:
+pick and the agent they use, each with a copy button - install the CLI, sign
+in, link the local project, connect MCP by hand, and the list of agent
+skills. In short, after `clab auth login`, in the root of a local clone of the
+project's repository:
 
 ```bash
-clab setup                                  # MCP of the project + the agent kit in .claude/
+clab setup                                  # every agent found in PATH: its kit and MCP of the project
 clab setup --dry-run                        # what it would do, changing nothing
-clab setup --scope user                     # the kit in ~/.claude/ and MCP for every directory
-clab setup --agent other                    # no Claude Code: print the MCP configuration for another agent
+clab setup --agent codex                    # only Codex (claude, codex, generic; auto is the default)
+clab setup --scope user                     # Claude Code: the kit in ~/.claude/ and MCP for every directory
+clab setup --agent generic                  # any other agent: the kit core in .agents/skills and the MCP configuration to print
 ```
 
-`clab setup` registers the project's MCP server with Claude Code (as
-`clab mcp install` does) and writes the agent kit - the skills `clab-work`,
-`clab-run`, `clab-backlog`, `clab-status`, `clab-rules`, the reference
-`clab-guide` and the sub-agent `clab-stage` - into `.claude/` of the
-project, with a manifest `.claude/clab-kit.json`. The project comes from
-`--project <KEY>`, `SDLC_PROJECT` or the `origin` remote. No token is
-written to any of these files; `--scope project` with a token is refused,
-as with `clab mcp install`.
+The agent is not a name wired into the service but a binding of the agent kit
+of your instance, and the kit has three: `claude` (Claude Code), `codex`
+(Codex) and `generic` (any other agent). Since v0.28.0 `clab setup` and
+`clab mcp install` take `--agent auto|claude|codex|generic`:
+
+- `auto`, the default, is every one of `claude` and `codex` that is found in
+  `PATH`; with none of them it is `generic`, so without Claude Code in `PATH`
+  `clab setup` installs for a generic agent instead of refusing;
+- `claude` or `codex` is that agent alone, found or not (not found, the kit is
+  written, the MCP connection is not, and `clab setup` says why and exits
+  with an error);
+- `generic` is the kit core for an agent without a binding and the MCP
+  configuration to paste; `other`, the name of v0.27.0 and older, is the same
+  as `generic`.
+
+For each agent `clab setup` writes the kit - the skills `clab-work`,
+`clab-run`, `clab-backlog`, `clab-status`, `clab-rules` and the reference
+`clab-guide`, and for the agents that have them the sub-agent `clab-stage`
+that runs a stage - and connects the MCP server of the project. The project
+comes from `--project <KEY>`, `SDLC_PROJECT`, the
+[line of the directory](#the-line-that-binds-a-directory-to-a-project) or the
+`origin` remote. No token is written to any of the files of the kit;
+`--scope project` with a token is refused for Claude Code, as with
+`clab mcp install`.
 
 The kit comes from your instance (`GET /v1/agent-kit`, open like
 `/v1/instance`), and its version is the version of your server: after
 `./upgrade.sh`, running `clab setup` again updates it. GitHub is needed only
 to install the CLI, not for the kit. A second run changes nothing that is
 already up to date, and files a developer edited after installation are
-kept with a warning (`--force` overwrites them). A server released before
-`clab setup` existed answers 404 there: `clab setup` then connects MCP only
-and names the server's version. What the skills do with the model level
-the server recommends for a run is in
-[Recommended model level](#recommended-model-level).
+kept with a warning (`--force` overwrites them). The summary of `clab setup`
+names, for each agent, what it did, and the model each level gets for that
+agent and where it comes from (see [Recommended model level](#recommended-model-level));
+`--json` prints the same as one object.
 
-**The Claude plugin.** `clab-plugin` is a panel next to a Claude Code or
-Claude Desktop chat: it shows the tasks that chat works on, what in the
+#### What `clab setup` writes for each agent
+
+| | Claude Code (`claude`) | Codex (`codex`) | any other agent (`generic`) |
+|---|---|---|---|
+| chosen | `claude` is in `PATH` | `codex` is in `PATH` | `--agent generic`, or `auto` found no agent |
+| skills | `.claude/skills/<name>/SKILL.md` | `.agents/skills/<name>/SKILL.md` | `.agents/skills/<name>/SKILL.md`, the neutral core of the skills |
+| stage executor | `.claude/agents/clab-stage.md` | `.codex/agents/clab-stage.toml` | none |
+| manifest | `.claude/clab-kit.json` | `.agents/clab-kit.json` | `.agents/clab-kit.json` |
+| MCP server | `claude mcp add` with the token as a header, into the local configuration of Claude Code outside the repository | `codex mcp add <name> --url <url> --bearer-token-env-var SDLC_TOKEN`: a table `[mcp_servers.<name>]` in `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`), without a token | not connected: the configuration is printed, with `${SDLC_TOKEN}` in place of the token |
+| `--scope` | `local` (the default: this directory), `user` (every directory; the kit goes to `~/.claude/`, or `CLAUDE_CONFIG_DIR`), `project` (`.mcp.json`, only without a token) | `user` (the default), `project` (`.codex/config.toml` of the project root, without a token) | none |
+| name of the MCP server (`--name`) | `sdlc` | `sdlc-<key of the project in lower case>` at `user`, `sdlc` at `project` | `sdlc` |
+| the token | in the arguments of `claude mcp add` | never written: the agent reads `SDLC_TOKEN` of its environment | `SDLC_TOKEN` of the environment of the agent |
+| start a task | `/clab-work PLAT-<number>` | `$clab-work PLAT-<number>` | `clab guide`, then `clab prompt work` |
+
+The kit is written into the root of the git clone (the current directory
+outside git), next to the manifest, the sha256 of each file in it is how
+`clab setup` tells a file a developer edited from a file it wrote; a file
+that left the kit is removed when nobody edited it. Claude Code with
+`--scope user` is the one case of a kit outside the project. All flags of
+`clab setup` and `clab mcp install`:
+
+| flag | meaning |
+|---|---|
+| `--agent auto\|claude\|codex\|generic` | the agent (above); `other` is `generic` |
+| `--scope` | where the MCP server and, for Claude Code, the kit go (the table) |
+| `--name` | the name of the MCP server at the agent |
+| `--project <KEY>` | the project, instead of `SDLC_PROJECT`, the line of the directory or `origin` |
+| `--dry-run` | what it would do, changing nothing and calling no agent (`clab setup` only) |
+| `--force` | overwrite the files of the kit that were edited after installation (`clab setup` only) |
+| `--trust` | Codex: write the trust of the project into `config.toml` (below; `clab setup` only) |
+| `--marker-file AGENTS.md\|CLAUDE.md` | write the [line of the directory](#the-line-that-binds-a-directory-to-a-project) only into this file; repeatable (`clab setup` only) |
+| `--no-marker` | write no line of the directory (`clab setup` only; not together with `--marker-file`) |
+| `--plugin` | the Claude plugin, with its own command (below) |
+
+`clab mcp install` takes `--project`, `--agent`, `--name` and `--scope` only,
+and writes no kit; with `auto` and no agent found it prints the configuration
+and exits with an error, as it did when Claude Code was the only agent.
+
+**Codex.** Codex reads the token of the MCP server from its environment:
+`export SDLC_TOKEN="$(clab auth token)"` in the shell that runs `codex`. Neither `clab setup` nor `clab mcp install` writes it anywhere, and a
+server that `codex mcp add` already holds under that name with the same
+address and the same variable is left as it is (with another address it is
+replaced; in `.codex/config.toml` of the project it is left alone and
+reported, since that file is the project's). Codex reads `.codex/config.toml`
+only of a project it trusts: `clab setup --trust` adds
+`[projects."<root of the project>"]` with `trust_level = "trusted"` to
+`~/.codex/config.toml`, for the main working copy of the repository, so one
+entry covers its git worktrees; a different level that is already recorded for
+that path is never changed. Without `--trust` it only prints the two lines to
+add yourself, and it is the only way the trust is written. A command in the
+sandbox of Codex reaches the network only with
+`sandbox_workspace_write.network_access = true` in `config.toml`: `clab setup`
+prints this and never writes it (a stage that [`clab exec`](#clab-exec-a-stage-as-a-process)
+or the runner starts passes it for that run itself). Codex reads `AGENTS.md`
+only: the line of the directory goes there, and when a directory has only a
+`CLAUDE.md`, the summary says so (`--marker-file AGENTS.md` adds it).
+
+**Versions of the agents.** The kit is made for Claude Code 2.1.296 and newer
+and for Codex 0.167.0 and newer. `clab setup` asks the agent for its version
+and, when it is older (or cannot be read), warns; the installation goes on.
+
+**Older servers.** `clab` v0.28.0 against a server that has no bindings
+installs the kit for Claude Code from the old list of files and says so; for
+Codex it refuses (`codex: сервер … не раздаёт привязку codex …`, "the server
+does not give the binding of codex") and asks to upgrade the instance, since
+the Codex kit exists only in the bindings. A binding of an agent that this `clab`
+does not know (a newer server) is skipped with a warning, and the agents it
+knows are set up as usual. A server released before `clab setup` existed
+answers 404 for the kit: `clab setup` then connects MCP only and names the
+server's version.
+
+#### The line that binds a directory to a project
+
+`clab setup` also writes a block of four lines into `AGENTS.md` or `CLAUDE.md`
+of the directory it runs in (not the root of the git clone: the kit and the
+block are in different places when you run it in a subdirectory). Both the
+agent that reads the file and `clab` read it:
+
+```
+<!-- cadence-lab:begin -->
+<!-- cadence-lab: project=PLAT host=https://cadence.example.com -->
+Cadence Lab: this directory works with project PLAT at https://cadence.example.com; the `clab` CLI takes the project from this block.
+<!-- cadence-lab:end -->
+```
+
+Only the second line, the marker, is read by `clab`: `project=` is the key
+of the project and `host=` the address of the instance (written by hand, a
+marker may leave the host out: then the host is `default_host`), and any
+other attribute makes the marker invalid. A marker has no token and no model,
+and a host with a login, parameters or a fragment is refused. `clab` reads
+nothing of the file but this line.
+
+- **Who writes it.** `clab setup`, in the directory where it runs: into each
+  of `AGENTS.md` and `CLAUDE.md` that exists there, or a new `AGENTS.md` when
+  neither does; `--marker-file` narrows this to one file, `--no-marker`
+  writes nothing. A second run changes only the text between `begin` and
+  `end` (one block, never a second), keeps the rest of the file byte for byte
+  and its line endings, and a file that is a link is written through the link.
+  Nothing is committed: the block is an ordinary change of the working copy
+  for the developer to review. A marker written by hand outside the block, a
+  damaged block (an `end` without `begin` and the other way round, two blocks)
+  and a file that ends inside an unclosed fenced code block are left alone,
+  with the reason.
+- **Where `clab` looks.** From the current directory up to the root of the
+  file system, in each directory `AGENTS.md` and then `CLAUDE.md`; the nearest
+  directory with a marker wins. A marker inside a fenced code block (``` or
+  `~~~`) does not count, so the example above in a document binds nothing. Two
+  markers in one file, or two different ones in the two files of a directory,
+  are an error (the same marker in both is not: that is how `clab setup`
+  writes them).
+- **The project** is, in this order: `--project`, `SDLC_PROJECT`, the marker,
+  the `origin` remote. The marker is a person's word, and the remote is only
+  an inference.
+- **The host** is, in this order: `--host`, `SDLC_API_URL`, the host of the
+  marker, `default_host` of the configuration. A marker with a host that has
+  no entry in `~/.config/clab` is an error with the advice `clab auth login
+  --host <address>`: `clab` does not quietly go to `default_host` instead.
+  `clab auth login` without `--host` signs in to the host of the marker and
+  leaves `default_host` as it was, filling it only when it was empty;
+  `--with-token` is refused for the host of a marker (name `--host` yourself:
+  a ready token goes only where a person said, not where a file of the
+  repository says).
+- **Where it does not apply.** With `CLAB_CONFIG_DIR` set the marker is not
+  read at all, neither in the directory of the token of a stage executor nor
+  in a configuration of your own: the project then comes from
+  `SDLC_PROJECT` or `origin` and the host from the configuration of that
+  directory.
+- **What shows it.** `clab whoami --json` has `host_source` and, in
+  `project`, `project_source` (`flag`, `env`, `marker`, `git_remote`) and, for
+  a marker, `marker_path`; `clab whoami` prints them as words, and `clab auth
+  status` has a block "Каталог" ("Directory") with the project and the host of
+  the marker, and `directory` in `--json`.
+
+Without a home directory (no `CLAB_CONFIG_DIR`, `XDG_CONFIG_HOME` or `$HOME`,
+as in some CI) `clab` refuses: `нет домашнего каталога: задайте
+CLAB_CONFIG_DIR` ("no home directory: set CLAB_CONFIG_DIR"). It no longer
+falls back to `./.clab`, since a token in the current directory would end up
+in the repository.
+
+#### Entering a stage: `clab guide`, `clab prompt work` and `clab exec`
+
+An agent that has no MCP prompts and no skills still has a way into a stage,
+and all three commands need a server of v0.28.0 or newer. Against an older
+one each answers that it cannot, naming the version of the server, for example:
+
+```
+clab prompt work: сервер v0.27.0 не отдаёт стартовую инструкцию этапа — команде нужен сервер v0.28.0 или новее.
+Войти в этап можно и с этим сервером: clab claim PLAT-12 — инструкция роли придёт в ответе захвата
+```
+
+("the server v0.27.0 does not give the starting instruction of the stage: the
+command needs a server v0.28.0 or newer. You can enter a stage with this
+server too: `clab claim PLAT-12`, the instruction of the role comes in the
+answer of the claim"); the other commands of `clab` keep working.
+
+- `clab guide [--json]` prints the guide of the agent kit: the commands of
+  `clab`, the path of a task, the artifacts, the approvals and the tokens of
+  a task. It needs no sign-in (the kit is open) but needs a host; `--json` is
+  `{version, name, text}`.
+- `clab prompt work <KEY> [--role <role>] [--usage runner] [--json]` prints
+  the instruction that starts the work on a stage: the same text as the MCP
+  prompt `work_on_task` with the same arguments, built by the server.
+  `--role` names the role when the stage is addressed to one, `--usage
+  runner` says that whoever starts the agent reports its cost, and the cost
+  step of the text is replaced by a ban on reporting it. For an agent without
+  MCP prompts it is the only entrance to a stage; Claude Code takes the
+  prompt as `/mcp__sdlc__work_on_task <KEY>`. A task token reads it for its
+  own task only.
+
+#### `clab exec`: a stage as a process
+
+`clab exec <KEY> --dir <run directory> [--agent claude|codex|generic]
+[--model <id>] [--effort <effort>] [--note-file <file>] [--dry-run]
+[-- <command of the agent> [arguments]]` starts the executor of a stage as a
+child process: whoever drives the cycle (a person's chat, an orchestrator of
+any agent) uses it where a sub-agent cannot be started. The agent works with
+the [task token](#what-the-runner-gives-the-agent) of the stage, as an agent
+of the runner does, and with no other credentials of its own.
+
+- **The run directory** (`--dir`, required) is the parent of `clab/` with
+  the configuration of the task token made by `clab token task <KEY>
+  --config-dir <run directory>/clab`. `clab exec` builds its client only from
+  that file; the personal configuration of the person, `SDLC_API_URL` and
+  `SDLC_TOKEN` are not read until the agent has exited (the one exception is
+  the cost line, below).
+- **The agent** is `--agent`, else the program of the command after `--`
+  (`claude` and `codex` are their bindings, any other program is `generic`),
+  else the agent that started `clab exec`, recognised by its environment
+  (exactly one; none or several is a refusal that asks for `--agent`). With no
+  command, the command is the template `run` of the binding.
+- **The model** is `--model`, else the model of the level for this agent from
+  the [agent settings](#agent-settings-of-a-project) of the run, else the
+  table of the binding, else none (the agent's own default); `--effort` is the
+  same for the effort.
+- **The environment of the agent** is that of the caller without `SDLC_*`,
+  `CLAB_*` and the markers of other agents, plus `CLAB_CONFIG_DIR` (the run
+  directory's `clab/`) and `SDLC_PROJECT`; `SDLC_TOKEN` only when the agent
+  takes the MCP server by a reference to the variable (Codex). The token is not
+  in the command line, in a file or in the output.
+- **The hook.** A binding that attaches its guard hook at launch (Codex)
+  gets it from `clab exec`: the line "хук-страховка крепится к запуску"
+  ("the guard hook is attached to the launch") of the plan says so. Claude
+  Code keeps its hook in the definition of the sub-agent, so in a process of
+  `clab exec` it is not attached ("хук-страховка не крепится: изоляция
+  окружением", "the guard hook is not attached: isolation is by the
+  environment").
+- **The instruction** is `clab prompt work` plus the note of `--note-file`
+  (working copies, the folder for temporary files, the format of the report),
+  as the argument `{prompt}` of the command or, without it, on stdin.
+- **The command.** After `--` it is yours; the substitutions
+  `{model} {effort} {mcp_config} {mcp_url} {config_dir} {run_dir}
+  {allowed_tools} {disallowed_tools} {task} {role} {workdir} {hook_script}
+  {prompt}` are expanded in it as in the template, and a substitution with an
+  empty value drops its word together with the flag before it.
+- **`--dry-run`** starts nothing, renews no lease and writes no file: it
+  prints the agent and why it was chosen, the model, the hook, the MCP
+  connection, the environment (the names set and removed), the instruction
+  and the command, and the warnings.
+- **The exit code** is the code of the agent. A refusal before the start (no
+  run directory, no token of the task in it, an unknown agent, a server
+  without the instruction) is the line `clab exec: …` and the code 125.
+  The lease is renewed while the agent works, as by `clab heartbeat`.
+- **The cost.** For a binding that has a parser of the output, `clab exec`
+  reports the cost of the run itself: [Cost of a run](#cost-of-a-run).
+
+#### The Claude plugin
+
+`clab-plugin` is a mod of Claude, not of every agent: a panel next to a Claude
+Code or Claude Desktop chat: it shows the tasks that chat works on, what in the
 project waits for a person's decision and the tasks of the project, and a
 maintainer can approve, return or tick a checklist from it (see below; the
 panel decides by the level `maintainer`, not by the rights of an employee). It
@@ -2447,6 +2701,8 @@ return and checklist marks from a card work there too. Against a server
 older than that, the panel shows what the server has. After `clab` is
 upgraded, run `clab setup --plugin` again to update the plugin.
 
+#### Hosts, signing in and unattended agents
+
 One configuration (`~/.config/clab`) holds several hosts. The one you signed
 in to last is the default; `--host` picks another for one command:
 
@@ -2454,6 +2710,10 @@ in to last is the default; `--host` picks another for one command:
 clab auth login --host https://cadence.acme.internal
 clab --host https://cadence.acme.internal tasks
 ```
+
+The host of a command is, in this order, `--host`, `SDLC_API_URL`, the host
+of [the line of the directory](#the-line-that-binds-a-directory-to-a-project)
+and the default host of the configuration.
 
 The CLI has no default host. Until you sign in with
 `clab auth login --host https://<host>` (or set
@@ -2489,6 +2749,93 @@ the variable and exits with code 2, before any request. This is so from
 clab-runner v0.10.2; older runners without the variable went to
 `http://localhost:8088/v1`.
 
+### Which agent the runner starts
+
+The runner does not know an agent by name. The command that starts it, the
+form of its starting instruction, how its output is read for the cost, the
+variables of its environment, the pause on a subscription limit and the
+translation of the tool policy of a role come from a **binding** of the agent
+kit of your instance, the same bindings `clab setup` uses
+([Connecting developers](#connecting-developers)). Since v0.28.0 the runner
+takes them from `GET /v1/agent-kit` of the instance at its start (an open
+route, asked for five seconds at most); when the instance does not answer, it
+logs the warning `набор агента инстанса недоступен: раннер берёт встроенные
+привязки` ("the agent kit of the instance is unavailable: the runner takes
+the bindings built into it") and goes on with those. So the command of the
+agent is set by the server, and an administrator who wants another one pins
+it with `SDLC_RUNNER_COMMAND`.
+
+**Which agent.** There is no variable that names the agent
+(`SDLC_RUNNER_AGENT` does not exist). The runner takes:
+
+1. the program of the first word of `SDLC_RUNNER_COMMAND`, without its
+   path: `claude` and `codex` are their own bindings, any other program is
+   `generic`;
+2. without `SDLC_RUNNER_COMMAND`, the agents of the bindings that have a
+   template `run` (`claude` and `codex`) that are found in `PATH`: `claude`
+   if it is there, else the only one found. None found, or several without
+   `claude`, stops the runner at start with an error that lists the programs
+   (exit code 2), and no task is claimed.
+
+It logs its choice at start:
+
+```
+level=INFO msg="агент раннера" agent=claude agent_from=PATH bindings=инстанс output=claude-json prompt=mcp_slash
+```
+
+(`agent_from` is `SDLC_RUNNER_COMMAND` or `PATH`; `bindings` is `инстанс`, the
+instance, or `встроенные`, the built-in ones; `output` is the parser of the
+output, `нет` for none; `prompt` is the form of the instruction.)
+
+**Your own command.** `SDLC_RUNNER_COMMAND` replaces the template `run` of
+the binding of its program. The words of the command may carry
+substitutions: `{task}`, `{role}`, `{model}`, `{effort}`, `{allowed_tools}`,
+`{disallowed_tools}`, `{mcp_config}`, `{mcp_url}`, `{config_dir}`, `{run_dir}`,
+`{workdir}` and `{prompt}`. A word whose substitution
+is empty is dropped together with the flag before it, so a run without a
+model has no `--model`. A command without `{prompt}` gets the instruction on
+its stdin; a command without `{model}` ignores the levels (the log warns when
+a model was chosen and does not reach the command).
+
+A command that wraps an agent (`env X=1 claude ...`, your own script) starts
+with another program, so the runner takes it for `generic`. That has four
+consequences, and the administrator who writes such a command answers for
+them:
+
+- the instruction comes as text (the answer of `clab prompt work`), not as the
+  slash command of the MCP prompt;
+- no pause on a subscription limit: the output is not read for it, and an
+  exit with an error is a plain failure of the run;
+- the variables `ANTHROPIC_*` and `CLAUDE_*` are not passed: name those the
+  agent needs in `SDLC_RUNNER_ENV`;
+- the runner does not read the output for the cost, so the agent reports
+  the tokens of the run itself.
+
+A command whose program is `claude` or `codex` keeps its binding with all of
+that, so it must keep the flag of the output format in it (`--output-format
+json` for `claude`, `--json` for `codex`): without it the output cannot be
+read, the runner logs `стоимость неизвестна: вывод агента не разобран` ("the
+cost is unknown: the output of the agent was not parsed") and, since the
+instruction forbids the agent to report, the run has no cost line.
+
+**The tool policy.** A role may carry a `tool_policy` (`allow` and `deny`
+lists of tools). The binding `claude` passes `allow` as `--allowedTools` and
+`deny` as `--disallowedTools` of the command. Where the binding does not pass
+a part of it (`codex`, `generic`, or a command of yours without
+`{allowed_tools}` or `{disallowed_tools}`), the runner logs a warning that
+says which part did not reach the agent, and starts it without that
+restriction. The role's own restriction is then yours to enforce, the same as
+the isolation of the agent below.
+
+**The hook.** The binding `codex` attaches a guard hook to the launch of the
+agent (a `PreToolUse` check of the shell commands), and the runner does not
+attach it: the agent is bounded by the task token and the environment (below),
+and the log says `хук-страховка не крепится: изоляция окружением` ("the guard
+hook is not attached: isolation is by the environment"). A stage started by
+[`clab exec`](#clab-exec-a-stage-as-a-process) has the hook attached for
+that binding. `claude` keeps its hook in the definition of a sub-agent that
+a process of the runner does not use.
+
 ### What the runner gives the agent
 
 The runner's own token (`SDLC_TOKEN`) stays with the runner: it polls the
@@ -2507,15 +2854,23 @@ runner also revokes it. The token is never written to the runner's log, to
 the agent's command line or to the output of `SDLC_RUNNER_DRY_RUN` (a dry
 run issues no token at all).
 
-The agent gets the task token in two places, both in a temporary directory
-(mode `0700`) removed after the agent exits:
+The agent gets the task token where its binding takes it (see
+[Which agent the runner starts](#which-agent-the-runner-starts)); the files
+are in a temporary directory (mode `0700`) removed after the agent exits:
 
 - `mcp.json` - the MCP server `sdlc` of the project with
-  `Authorization: Bearer <task token>`;
+  `Authorization: Bearer <task token>`, for a command that has `{mcp_config}`
+  (the binding `claude`);
+- `SDLC_TOKEN` of the environment - for a command that names the MCP server
+  by the address and the variable (the binding `codex`: the token is in no
+  file and in no argument, and the command keeps it out of the environment of
+  the shell commands of the agent);
 - `CLAB_CONFIG_DIR` - a `clab` configuration with this one host and the task
   token, so `clab` inside the agent goes with the task token, not with the
   configuration of the person who runs the runner. `clab whoami` there shows
-  the task and the role of the run.
+  the task and the role of the run. The line of a directory in `AGENTS.md`
+  or `CLAUDE.md` is not read there
+  ([the line that binds a directory to a project](#the-line-that-binds-a-directory-to-a-project)).
 
 The agent does not inherit the runner's environment. It gets only these
 variables, if the runner has them:
@@ -2525,7 +2880,7 @@ variables, if the runner has them:
 | shell and user | `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`, `TZ`, `LANG`, `LC_*`, `XDG_*` |
 | proxy and certificates | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and in lower case), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS` |
 | git over SSH | `SSH_AUTH_SOCK` |
-| Claude Code | `ANTHROPIC_*`, `CLAUDE_*` |
+| the agent itself | the field `env` of its binding: `claude` - `ANTHROPIC_*`, `CLAUDE_*`; `codex` - `OPENAI_*`, `CODEX_*`; `generic` - nothing |
 
 plus `SDLC_API_URL`, `SDLC_PROJECT`, `SDLC_TOKEN` (the task token) and
 `CLAB_CONFIG_DIR`, which the runner sets itself. Anything else the agent
@@ -2541,11 +2896,13 @@ SDLC_RUNNER_ENV=GH_TOKEN,AWS_* SDLC_API_URL=https://<host>/v1 SDLC_TOKEN=<token>
 starting with `SDLC_` or `CLAB_` are never passed, even if named in
 `SDLC_RUNNER_ENV`: the runner logs a warning at start and ignores them.
 
-The default agent command runs Claude Code with `--strict-mcp-config`: the
-agent sees only the `sdlc` server from the runner's `mcp.json`, not the MCP
-servers in the Claude Code settings of the person running the runner (where
-`clab mcp install` puts the person's own token). If you set your own
-`SDLC_RUNNER_COMMAND`, isolating the MCP configuration of your agent is up
+The MCP servers of the agent are those of its command. The template of
+`claude` passes `--strict-mcp-config`, so the agent sees only the `sdlc` server
+from the runner's `mcp.json`, not the MCP servers in the Claude Code settings
+of the person running the runner (where `clab mcp install` puts the person's
+own token); the template of `codex` ignores the user configuration of Codex
+(`--ignore-user-config`) and names the `sdlc` server itself. If you set your
+own `SDLC_RUNNER_COMMAND`, isolating the MCP configuration of your agent is up
 to you.
 
 A runner talking to a server that cannot issue task tokens (older than
@@ -2567,8 +2924,9 @@ process is the job of a sandbox, which is not part of the runner yet.
 This is so from clab-runner v0.11.0.
 
 Which model the runner starts the agent with follows the level the server
-recommends for the run and the runner's table `SDLC_RUNNER_MODEL_LEVELS`:
-see [Recommended model level](#recommended-model-level), "The runner".
+recommends for the run, the [agent settings](#agent-settings-of-a-project) of
+the project and the runner's table `SDLC_RUNNER_MODEL_LEVELS`: see
+[Recommended model level](#recommended-model-level), "The runner".
 
 ### Recommended model level
 
@@ -2576,8 +2934,11 @@ A task, a stage of a task and a role can carry a recommended model level:
 `low`, `medium` or `high`, or none at all. The server knows levels, not
 models: it accepts only these three values (anything else is a 400) and
 never names a model. Which model answers a level is decided by whoever runs
-the agent - the runner by its table, the `clab-run` skill by its own, a
-person by choice. This is so from v0.16.0.
+the agent - the runner by its table, the `clab-run` skill by the model the
+claim names for the agent, a person by choice. Since v0.28.0 the model of a
+level for each agent is a setting of the project, see
+[Agent settings of a project](#agent-settings-of-a-project). This is so from
+v0.16.0.
 
 **Who sets levels.** Levels are optional: without them the cycle runs as
 before and every agent works on its own model. Which role sets the levels
@@ -2658,8 +3019,32 @@ quoted as it prints it:
 `задача`, `роль` - task stage, task, role), or `Рекомендованный уровень: не задан`
 ("not set"). `clab show` prints the levels currently set on the task.
 
+From v0.28.0 the answer also has `execution.agent_settings_version` (the
+version of the [agent settings](#agent-settings-of-a-project) the run was
+claimed with, `null` when the project has none) and, when there is a level and
+a version, `execution.models`: for each agent that has an entry for this level,
+its `model` and `effort`. `clab claim` and `clab show` then print, under the
+level, the model of the agent they run in, quoted as they print it:
+
+```
+Модель уровня: gpt-6.1-sol, усилие high (agent_settings: агент codex, настройка агентов v3)
+```
+
+("the model of the level: ..., effort high (agent settings: agent codex,
+agent settings v3)"). The source is `agent_settings` (the entry of the
+version), `binding` (`... таблица привязки по умолчанию`, "the default table
+of the binding") or `agent_default` (`Модель уровня: не задана, модель агента
+по умолчанию`, "the model of the level is not set, the agent's own model").
+The agent is recognised by the environment of the process (Claude Code
+by `CLAUDECODE=1` or an `AI_AGENT` that starts with `claude-code_`, Codex by
+a non-empty `CODEX_THREAD_ID`); when it is not recognised, the lines name the
+models of the level for all agents of the version, none of them as "yours".
+
 **The runner.** `SDLC_RUNNER_MODEL_LEVELS` is the table "level → model" of
-the runner, under the subscription of whoever runs it. For Claude Code:
+the runner, above the agent settings of the project and for any agent, under
+the subscription of whoever runs it. Written for Claude Code, whose aliases
+are `haiku`, `sonnet` and `opus` (the values are whatever the agent takes in
+its model flag):
 
 ```bash
 SDLC_RUNNER_MODEL_LEVELS=low=haiku,medium=sonnet,high=opus SDLC_API_URL=https://<host>/v1 SDLC_TOKEN=<token> SDLC_PROJECT=PLAT clab-runner
@@ -2669,46 +3054,63 @@ Any entry may be left out, and an empty variable means no table. A
 malformed value - an unknown level, an entry without `=`, an empty model, a
 space inside a model name, a level given twice - stops the runner at start
 with an error naming the variable (exit code 2). The runner logs the table
-at start. For each run it picks the model in three steps:
+at start. For each run it picks the model in five steps, the first that gives
+one wins:
 
-1. the entry of the table for the recommended level;
-2. otherwise the `model_hint` of the role, with a warning in the log
+1. the entry of `SDLC_RUNNER_MODEL_LEVELS` for the recommended level;
+2. the entry for the level of the agent of the run in the agent settings the
+   run was claimed with (`execution.models`), with its effort, which goes
+   into `{effort}`;
+3. the table of levels of the binding of the agent (for `claude`:
+   `low → haiku`, `medium → sonnet`, `high → opus`; `codex` and `generic`
+   have none);
+4. otherwise the `model_hint` of the role, with a warning in the log
    (`model_hint устарел, задайте SDLC_RUNNER_MODEL_LEVELS…` - "model_hint is
    deprecated, set SDLC_RUNNER_MODEL_LEVELS");
-3. otherwise no model: `--model` is not passed and the agent runs on the
-   default model of its CLI.
+5. otherwise no model: `{model}` is empty, the flag of the model is not
+   passed and the agent runs on its own default model.
 
-Against a server without levels (no `execution` in the claim answer) the
-runner goes straight to `model_hint`, without the warning, as older runners
-did. The model goes into `{model}` of the command (the default command has
-`--model {model}`, and an empty model drops the flag); your own
-`SDLC_RUNNER_COMMAND` without `{model}` ignores levels. The log line of the
-agent start and the output of `SDLC_RUNNER_DRY_RUN` carry `model_level`,
-`model_level_source`, `model` and `model_from` (`table`, `model_hint` or
-`none`); `model_level_source=absent` there means the server sent no
-`execution` - a server older than levels. The variable belongs to the
-runner, which lives outside the stack: nothing goes into `.env` or compose,
-and `.env.example` does not have it.
+So a runner without the variable takes its models from the agent settings of
+the project, and from the table of the binding where the project has none, and
+the variable is the way to override both on one machine. Against a server
+without levels (no `execution` in the claim answer) the runner goes straight to
+`model_hint`, without the warning, as older runners did. The model goes into
+`{model}` of the command (an empty model drops the flag together with the
+word before it); your own `SDLC_RUNNER_COMMAND` without `{model}` ignores
+levels. The log line of the agent start and the output of `SDLC_RUNNER_DRY_RUN`
+carry `model_level`, `model_level_source`, `model`, `model_from` (`table` - the
+variable, `agent_settings`, `binding`, `model_hint` or `none`) and
+`model_source` (`explicit`, `agent_settings`, `binding`, `model_hint` or
+`agent_default`: the same names `clab exec` prints), and, for a model of the
+settings, `effort` and `agent_settings_version`;
+`model_level_source=absent` there means the server sent no `execution` - a
+server older than levels. The variable belongs to the runner, which lives
+outside the stack: nothing goes into `.env` or compose, and `.env.example`
+does not have it.
 
 **`model_hint` is deprecated.** It stays on role versions for `clab` and
-`clab-runner` of older versions and as the second step of the runner above;
-the UI no longer shows it. Set new things with levels and the runner's
-table.
+`clab-runner` of older versions and as the fourth step of the runner above;
+the UI no longer shows it. Set new things with levels and the agent settings.
 
 **The agent kit.** The skills of `clab setup` (see
 [Connecting developers](#connecting-developers)) read the same `execution`:
 
-- `/clab-run` starts the stage executor `clab-stage` on a model by its own
-  table: `low → haiku`, `medium → sonnet`, `high → opus`; with no level it
-  keeps the chat's model (`inherit`). It names its choice in the chat
-  before each start;
-- `/clab-work` and the MCP prompt `work_on_task` only say "recommended level
-  X, you are working on Y" when they differ; the person chooses the model.
+- `/clab-run` and `$clab-run` start the stage executor on the model that the
+  claim names for the agent that runs them (`execution.models`); without such
+  an entry, on the default table of the binding of that agent (the table
+  `low → haiku`, `medium → sonnet`, `high → opus` is the one of `claude`, the
+  others have none); with no level or no model it keeps the model of the
+  chat. It names its choice in the chat before each start;
+- `/clab-work` and the MCP prompt `work_on_task` say "recommended level X, you
+  are working on Y" when the model of the level of their agent and the model
+  they run on differ; the person chooses the model. A text asked by
+  `clab prompt work` is the same.
 
-The table of `/clab-run` lives in the skill file
-(`.claude/skills/clab-run/SKILL.md` of the project, or of `~/.claude/` with
-`--scope user`); edit it for another provider. A second `clab setup` keeps
-a file you edited, with a warning.
+The default table of `claude` is the field `levels` of its binding, and the
+notes for Claude Code in the skill `clab-run` repeat it. To run a stage on
+other models (another provider's, or full ids), set them in the agent
+settings, which come first; there is no need to edit the skill file. A second
+`clab setup` keeps a skill file you edited, with a warning.
 
 **Recommended and actual.** In the task card each run has a line such as
 `рекомендован high · фактически claude-opus-5-5` ("recommended high ·
@@ -2731,49 +3133,288 @@ into an older server loses the field silently. After the upgrade run
 `clab setup` again on the developers' machines to get the skills that read
 levels.
 
+### Agent settings of a project
+
+From v0.28.0 a project can say, for each agent, which model and effort stand on
+each [recommended level](#recommended-model-level), which models its team may
+use, and what the models cost. It is data of the project, like its cycle and
+its roles, kept in versions: an administrator of the instance does not edit a
+file for it, and the people who run agents do not carry a table of their own.
+It needs a server of v0.28.0 or newer; a newer `clab` against an older server
+answers `clab agents: сервер v0.27.0 не знает настройки агентов — нужен сервер
+v0.28.0 или новее` ("the server v0.27.0 does not know the agent settings: a
+server of v0.28.0 or newer is needed").
+
+Nothing is required of a project: **without settings** every agent takes the
+default table of its binding (`claude`: `low → haiku`, `medium → sonnet`,
+`high → opus`; `codex` and `generic` have none, so they run on their own
+default model), as before, and the cost of a run is what the agent reported.
+The server does not choose a model, does not check that one exists and does
+not force it: a level stays a recommendation, and the settings say which model
+whoever runs the agent recommends to itself.
+
+**The document.** A version is one JSON object (the model ids and the prices
+here are examples; write the ids your agents take):
+
+```json
+{
+  "agents": {
+    "claude": {
+      "models": ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5-5"],
+      "levels": {
+        "low": {"model": "claude-haiku-4-5"},
+        "medium": {"model": "claude-sonnet-5"},
+        "high": {"model": "claude-opus-5-5", "effort": "high"}
+      }
+    },
+    "codex": {
+      "levels": {
+        "high": {"model": "gpt-6.1-sol", "effort": "high"}
+      }
+    }
+  },
+  "pricing": {
+    "as_of": "2026-11-01",
+    "models": {
+      "claude-opus-5-5": {"input": 1.0, "output": 2.0, "cache_read": 0.1, "cache_write": 1.25},
+      "gpt-6.1-sol": {"input": 1.0, "output": 2.0, "cache_read": 0.1, "cache_write": 1.25}
+    }
+  }
+}
+```
+
+| path | what it is |
+|---|---|
+| `agents` | optional; the key is the name of a binding (`claude`, `codex`, `generic`) or a name of your own, lower case letters, digits, `_` and `-`, up to 32 characters |
+| `agents.<agent>.models` | optional; the full ids of the models available to the team at this agent; when it is given, the model of every level must be in it |
+| `agents.<agent>.levels.<level>.model` | the level is `low`, `medium` or `high` and any of them may be left out; the full id of the model as the agent takes it (up to 200 characters, no spaces); the server does not normalise names |
+| `agents.<agent>.levels.<level>.effort` | optional; the effort of the agent's reasoning, letters, digits, `_` and `-`, up to 32 characters; the server does not interpret it |
+| `pricing.as_of` | the date `YYYY-MM-DD` the prices are true for; required when there is a `pricing` |
+| `pricing.models.<id>` | the prices of one model; the key is the full id, matched exactly (case and spaces count) |
+| `pricing.models.<id>.input`, `.output` | required: USD for 1 000 000 tokens |
+| `pricing.models.<id>.cache_read`, `.cache_write` | optional, the same for the tokens of a cache read and write |
+
+An empty document `{}` is valid, and means the same as no settings. The
+server refuses a bad document with `400 invalid_input` and the path of the
+field in `details.path`; the same check runs on a draft, on the activation
+(again) and on the import of a bundle:
+
+```
+HTTP 400  {"error": {"code": "invalid_input",
+  "message": "настройка агентов, agents.claude.levels.low.model: модели нет в models этого агента",
+  "details": {"path": "agents.claude.levels.low.model"}}}
+```
+
+("agent settings, ...: the model is not in `models` of this agent"; `clab
+agents` prints it as `документ не принят: agents.claude.levels.low.model:
+модели нет в models этого агента`). A field the schema does not have is
+refused by name too, `agents.claude.levls: поле не поддерживается, допустимы
+models, levels` ("the field is not supported, `models, levels` are allowed"):
+a typo should not quietly switch the setting off. A document is at most 64 KiB
+of JSON. **There are no secrets in it:** a key that has `token`, `secret`,
+`api_key`, `apikey` or `password` in its name, and a key or a string value
+that starts with `sdlc_`, is refused, and the answer names the place but never
+the value. An agent name that the kit does not know (`claude`, `codex`,
+`generic`) is a warning in `warnings` of the answer, not a refusal: a company
+may keep an agent of its own on the binding `generic`.
+
+**Versions.** A version is a draft, active or retired. A project has at most
+one draft and one active version. A draft is edited; **activating** it turns
+it into the active version and retires the previous one in one transaction;
+an active or a retired version is never edited, so the history of what the
+project said, who changed it and when stays (`clab agents versions`). A run
+remembers the version it was claimed with (`execution.agent_settings_version`
+and `execution.models` of the claim answer): activating a new version does
+not change a stage that is already going, only the next claims, and the prices
+of a run are those of its version.
+
+**Where to edit.**
+
+- The web interface: «Агенты и модели» ("Agents and models") in the settings
+  of the project.
+- The CLI (v0.28.0; the project is `--project`, `SDLC_PROJECT` or the
+  directory):
+
+  ```bash
+  clab agents show                            # the active version: levels, models, prices (--version N for another; --json)
+  clab agents versions                        # the history
+  clab agents draft --file settings.json      # a draft from a file (- is stdin); without --file: a copy of the active version, --empty: an empty one
+  clab agents put --file settings.json        # replace the document of the draft (there must be a draft: clab agents draft)
+  clab agents diff                            # the draft against the active version (--version N: that version)
+  clab agents activate                        # the draft becomes active (--version N: the number of the draft you saw)
+  clab agents discard                         # delete the draft
+  ```
+
+  `--changelog "..."` on `draft` and `put` is the note of the version, at most
+  2000 characters.
+- REST, under `/v1/projects/<KEY>/agent-settings`: `GET` (the active
+  version; `{"version": null}` when there is none), `GET /versions`,
+  `GET /versions/<N>`, `POST /draft` (`document`, or `from`: `active` or
+  `empty`; `changelog`), `PUT /draft` (replace), `DELETE /draft`,
+  `POST /draft/activate` (`version`: the draft you saw, `409` for another).
+- MCP: `sdlc_get_agent_settings`, `sdlc_list_agent_settings_versions`,
+  `sdlc_put_agent_settings_draft` (creates the draft or replaces it),
+  `sdlc_discard_agent_settings_draft`, `sdlc_activate_agent_settings`.
+
+**Who edits.** A person of the `maintainer` level or above. An agent principal
+of any level, an `admin` bot included, and a task token get `403`, so does an
+employee (a person of the `agent` level) and someone who is no member:
+prices drive the cost and the budget of a team, and an agent should not make
+itself cheaper. Every member of the project reads the settings, and a task
+token reads them too. The refusal is `403` with `level` or `human_action` in
+`details.reason`; `clab agents` says `агентскому принципалу правка закрыта`
+("editing is closed to an agent principal") or `править настройку агентов
+может человек уровня maintainer и выше` ("agent settings are edited by a
+person of the maintainer level or above"). Every change is in the
+[audit log](#audit-log) with the size and sha256 of the document.
+
+**Carried by a bundle.** `clab export` has a field `agent_settings`
+(`document` and `changelog` of the active version), written by
+`clab export --dir` as `agent-settings.json`, and `clab import` applies it
+the way it applies a cycle: the same document is `unchanged`, a different one
+makes a draft (`draft_created`) or replaces the draft that is there
+(`updated`), and a person activates it after looking at it. The import is
+refused for whoever may not edit the settings. A server older than v0.28.0
+drops the field in silence, and the new `clab` says so (`сервер не применил
+настройку агентов — обновите сервер`, "the server did not apply the agent
+settings: upgrade the server"). The [starter bundle](#first-cycle-and-roles)
+has no agent settings: it names no provider.
+
+**Prices and the cost.** When a run has a version of the settings and its
+usage row gives a model that is in `pricing.models` and both the input and the
+output tokens, the server counts the cost of the row itself, by the
+version of the run: `(input × price of input + output × price of output +
+cache read × price of cache read + cache write × price of cache write) /
+1 000 000` USD, rounded to six places. **A term of the cache is in the sum
+only when there are both its tokens and its price: with no `cache_write` price
+the tokens of a cache write cost 0, and the server does not warn about a price
+that is missing.** Set `cache_write` (and `cache_read`) for every model that
+writes (reads) a cache. The output of Claude Code and the output of Codex
+both tell the cache writes apart from the input, and the runner and
+`clab exec` report them as such. Without input and output tokens the row is
+not counted by the price. For the rest see [Cost of a run](#cost-of-a-run). An
+example with a model `my-model` that costs 1 for input and 2 for output and
+has no `cache_write` price:
+
+```bash
+clab usage PLAT-12 --model my-model --input 1000000 --output 500000 --cache-write 1000000
+```
+
+The row costs 2.000000 USD (1 + 0.5 × 2; the cache write is 0). With
+`"cache_write": 1.25` in the prices of `my-model` it costs 3.250000.
+
 ### Cost of a run
 
 From v0.17.0 the cost a project sees is more complete and says who paid
 for it. Nothing in this subsection needs a setting on the server: the
 runner and the agents report more, and the server keeps it apart.
 
-**One report per run under the runner.** Under `clab-runner` v0.17.0 only
-the runner reports the cost of a run. It starts the agent with the prompt
-`work_on_task` and the argument `usage=runner`, which tells the agent not to
-report the cost itself (no `sdlc_report_usage`, no `clab usage`), and
+**One report per run, by whoever starts the agent.** Under `clab-runner`
+(v0.17.0 and newer) only the runner reports the cost of a run. It starts the
+agent with the instruction `work_on_task` and the argument `usage=runner`
+(`clab prompt work --usage runner` in the form of text), which tells the agent
+not to report the cost itself (no `sdlc_report_usage`, no `clab usage`), and
 reports it from the agent's output with its own token: a run gets one usage
-row, not two. The cost of an agent that failed is recorded too - Claude Code
-prints its result also when it exits with an error - and the runner reports
-it before it releases the task. The server takes a report from the
-principal that claimed the run also after the release and after the lease
-expired. A runner of v0.16.x does not pass `usage=runner`: its agent
-reports by itself, the rows of a run may double as before v0.17.0, and the
-cost of a failed agent is not recorded. Upgrade the runner (see
+row, not two. The cost of an agent that failed is recorded too - the output of
+Claude Code has its result also when it exits with an error, the output of
+Codex has the events up to the failure - and the runner reports it before it
+releases the task. The server takes a report from the principal that claimed
+the run also after the release and after the lease expired. A runner of
+v0.16.x does not pass `usage=runner`: its agent reports by itself, the rows of
+a run may double as before v0.17.0, and the cost of a failed agent is not
+recorded. Upgrade the runner (see
 [Upgrading to v0.17.0](#upgrading-to-v0170)).
+
+From v0.28.0 who reports is decided by the binding of the agent, not by the
+name of the agent. A binding that has a parser of the output (the field
+`output`: `claude-json` for the JSON of Claude Code, `codex-jsonl` for the
+events of `codex exec --json`) has its output read by the runner and by
+[`clab exec`](#clab-exec-a-stage-as-a-process): one usage row per run, with
+the counters of the output itself, which an agent's own report tends to
+understate. Where nothing reads the output (the binding `generic`, a wrapper
+of your own over an agent, a command of yours that does not print the format
+of the parser), the agent reports by itself, as before; so it does for Codex
+when no model was chosen for it, since its output does not name a model and
+whoever starts the agent can name only the one it passed in `{model}`. The log
+of the runner and the plan of `clab exec` say who reports and why.
+
+`clab exec` reports after the agent has exited, with one line, and with the
+credentials of the person who started it (their environment and their
+configuration, as any `clab` command), not with the task token, which is gone
+by then; the agent never sees those credentials. It sends the line only to the
+host of the task token. When it cannot (no sign-in, another host, a refusal
+of the server), the body of the line is saved to `<run directory>/usage.json`
+(mode `0600`) and `clab exec` prints the command to report it by hand, `сдать
+вручную: clab --host <address> usage <KEY> --run <run> --model ...` ("report by
+hand"); the exit code stays the code of the agent. The copy of the output for
+the parser is up to 64 MiB (more than that, and no line is sent, the output
+goes through whole and a warning says so), and after the agent exits `clab
+exec` waits for the end of its output for 5 seconds, so a background process
+that holds it does not hold `clab exec`. An output with no token counter in it
+gives no line: the cost is unknown, not zero.
+
+**What a row costs.** A usage row has three sources of the cost, in this
+order, and `cost_usd` is the result:
+
+1. **By the price list**, when the run has a version of the
+   [agent settings](#agent-settings-of-a-project), its price list has the
+   model of the row and the row has the input and output tokens: the server
+   counts the sum itself, so the sums of different agents are comparable and
+   the budget of a team goes by one price list. What the agent named stays
+   next to it as `reported_cost_usd`.
+2. **As reported**, the `--cost` of the row, otherwise.
+3. **Unknown**, when there is neither: the row has the tokens and no sum, which
+   is not the same as 0.
+
+The answer of `clab usage` and of `sdlc_report_usage` has `cost_source`
+(`pricing`, `reported` or `null`), `pricing_version`, `reported_cost_usd` and
+`warnings`, and `clab usage` explains the choice in one line to stderr (the
+JSON on stdout is read by scripts and does not change):
+
+```
+сумма 2 USD по прайсу версии 3, агент назвал 0.42 USD
+сумма 0.42 USD как сообщена
+суммы нет
+```
+
+("the sum 2 USD by the price list of version 3, the agent named 0.42 USD",
+"the sum 0.42 USD as reported", "there is no sum"). A model that is in the
+price list while the row lacks the input or the output tokens is not counted
+by it: the answer warns, and the row is kept as reported or with no sum. Rows
+written before v0.28.0 and rows of a run with no version of the settings are
+as they were, and nothing is counted again when the price list changes. The
+output of Codex has no money in it, so for Codex the sum comes from the price
+list or does not exist.
 
 **Money or subscription.** A usage row carries `billing`:
 
 | `billing` | what the cost is | team budget |
 |---|---|---|
 | `api` | money: the agent ran on an API key | counted |
-| `subscription` | notional: Claude Code on a subscription prints the price of the run at API rates, though nothing beyond the subscription is paid | shown next to it, never counted |
+| `subscription` | notional: an agent on a subscription reports the price of the run at API rates, or the server counts it by the price list of the project, though nothing beyond the subscription is paid | shown next to it, never counted |
 | not given | unknown, counted as money - like every row written before v0.17.0 | counted |
 
 It is given where the cost is reported:
 
 ```bash
-clab usage PLAT-12 --model claude-sonnet-5 --input 1200 --output 800 --cost 0.42 --billing subscription
+clab usage PLAT-12 --model my-model --input 1200 --output 800 --cost 0.42 --billing subscription
 ```
+
+`--model` is the full id of the model as the agent names it; the other
+counters are `--cache-read`, `--cache-write` and `--duration-ms`, and `--run`
+names the run (without it, the run you hold).
 
 `sdlc_report_usage` over MCP takes `billing`, and so does the body of
 `POST /v1/tasks/{KEY}/usage`; any other value is refused with the list of
 allowed ones. The runner takes it from `SDLC_RUNNER_BILLING` (`api` or
 `subscription`) and puts it on every row it reports. A misspelled value
 stops the runner at start with an error naming the variable (exit code 2);
-without the variable its rows carry no `billing`. The runner does not
-guess: Claude Code signed in through the Anthropic Console is billed by API
-too and looks the same from outside. Like the other `SDLC_RUNNER_*`
-variables it belongs to the runner, not to `.env`.
+without the variable its rows carry no `billing`. `clab exec` has no such
+variable: its rows carry no `billing` either, and a row is given one with
+`clab usage --billing`. The runner does not guess: an agent signed in with an
+API key or a console account is billed by API too and looks the same from
+outside, and `billing` is a fact about whoever pays, not about the agent. Like
+the other `SDLC_RUNNER_*` variables it belongs to the runner, not to `.env`.
 
 The budget of a team (`clab team budget <team>`, the budget of a team in the
 UI) counts only money against its limit: `spent_usd` is the sum of `api`
@@ -2937,10 +3578,10 @@ than in 1m", "failure 3 of 3, skipped until the runner restarts"). A run
 this runner skips stays in the queue for other runners and for people.
 Stopping the runner is not a failure.
 
-**The subscription limit.** When the output of Claude Code says the
+**The subscription limit.** When the output of the agent says the
 subscription limit is reached, with any exit code, the runner reports the
 cost, releases the task and pauses all its slots: until the reset time
-Claude Code printed, or for `SDLC_RUNNER_LIMIT_PAUSE` when the time is not
+the agent printed, or for `SDLC_RUNNER_LIMIT_PAUSE` when the time is not
 printed or cannot be read. While paused the runner does not poll the
 queue. Agents already running are not stopped; if one of them hits the
 limit too, the pause is extended to the later time, never shortened. A
@@ -2961,9 +3602,15 @@ polls again"). The reason of the release in the task's feed reads
 `лимит подписки агента исчерпан, раннер на паузе до <time>` ("... the runner
 is paused until <time>").
 
-The limit is recognised in the output of Claude Code only: with your own
-`SDLC_RUNNER_COMMAND` that prints something else there is no pause on a
-limit, and an agent that exits with an error counts as a failure.
+The limit is recognised only in an output that the binding reads as
+`claude-json` (the binding `claude`), which is where the runner knows how a
+limit is printed (see
+[Which agent the runner starts](#which-agent-the-runner-starts)). The output
+of `codex` and of `generic` is not looked at for it, and an agent of theirs
+that exits with an error is a failure, which counts towards
+`SDLC_RUNNER_MAX_FAILURES`. With your own `SDLC_RUNNER_COMMAND` that prints
+something else there is no pause on a limit either, and an agent that exits
+with an error counts as a failure.
 
 **Lifting a pause early.** The pause and the failure counts live in the
 memory of the runner: restart it to lift a pause on the limit before the
@@ -3729,6 +4376,77 @@ of the routes.
 - The change is in the chart, its checks and this guide: the service does not
   read the new settings, and `docker-compose.yml`, `.env` and the scripts of
   the package are not touched.
+
+### Upgrading to v0.28.0
+
+The upgrade (`./upgrade.sh v0.28.0`, or `clab server upgrade`) needs no manual
+step. There are no new variables in `.env`, no new services, ports or volumes,
+and the starter bundle is not changed. Two migrations run when the service
+starts, and both only add:
+
+- `000047_agent_settings` adds the table `agent_settings_versions` (the
+  versions of the [agent settings](#agent-settings-of-a-project) of a
+  project) and the column `stage_runs.agent_settings_version_id`, the version a
+  run was claimed with;
+- `000048_usage_pricing` adds three columns to `stage_run_usage`:
+  `cost_source`, `pricing_version_id` and `reported_cost_usd`, which say where
+  the sum of a usage row comes from.
+
+The columns are added with no default value, so no table is rewritten, and
+every row that was there before the upgrade gets `NULL` in the new columns:
+the runs and the usage rows of the past are not changed or counted again. The
+API waits for the migrations at start as for any migration, which takes
+seconds.
+
+What the release brings, and what you may want to do about it:
+
+- **Any agent.** `clab setup` and `clab mcp install` take
+  `--agent auto|claude|codex|generic`, so Codex and any other agent connect
+  to a project as Claude Code does, and `clab setup` writes the
+  [line that binds a directory to a project](#the-line-that-binds-a-directory-to-a-project)
+  into `AGENTS.md` or `CLAUDE.md` of the directory it runs in. That is a change
+  of the working copy that a developer sees and commits (or does not). Run
+  `clab setup` again on the developers' machines: it is the only way the Codex
+  kit and the line reach them. `clab guide`, `clab prompt work` and
+  `clab exec` are new commands for an agent without MCP prompts and for a
+  stage run as a process (see [CLI and agents](#cli-and-agents)).
+- **Agent settings.** Models of the levels and a price list are now set per
+  project, by a maintainer. Nothing changes until a project sets them. Once it
+  has a price list, the sum of a usage row is counted by it for the models
+  that are in it (see [Cost of a run](#cost-of-a-run)), and the `cache_write`
+  price matters: with none, the tokens of a cache write cost 0.
+- **The runner.** It takes the command of the agent, the form of the
+  instruction, the reading of the output, the environment of the agent and the
+  pause on a limit from the bindings of the instance (see
+  [Which agent the runner starts](#which-agent-the-runner-starts)), and
+  reports the cost of Claude Code and of Codex runs by their output. Look at
+  one behaviour, which a runner of `claude` has without any change on your
+  side: the model of a level now comes from the agent settings of the project,
+  and with none from the table of the binding (`low → haiku`, `medium →
+  sonnet`, `high → opus`), where a runner without `SDLC_RUNNER_MODEL_LEVELS`
+  had passed no model (or the `model_hint` of the role) before. To run on other
+  models, set them in the agent settings or in `SDLC_RUNNER_MODEL_LEVELS`.
+  A runner that finds only `codex` in `PATH` now starts Codex; with both
+  `claude` and `codex` it takes `claude`, as before.
+- **The API and MCP only add.** `GET /v1/agent-kit` has the bindings,
+  `GET /v1/tasks/<KEY>/prompts/work` the starting instruction, the routes of
+  `/v1/projects/<KEY>/agent-settings` and the five tools of MCP the settings;
+  usage rows have `cost_source`, `pricing_version` and `reported_cost_usd`,
+  and `execution` of a claim has `agent_settings_version` and `models`.
+  `clab` and `clab-runner` of earlier versions keep working against a v0.28.0
+  server (an earlier runner picks its model by `model_hint`, as it did). A
+  new `clab` against an older server refuses the commands that need a v0.28.0
+  server, with the version of the server in the message, and the other
+  commands work.
+
+After the upgrade update `clab` on the machines (`brew upgrade clab`, or the
+install script with the version of the server) and the runner that comes with
+it, then run `clab setup` again in the clones. Setting up agent settings is
+optional.
+
+The way back is the general one, [Upgrades and rollback](#upgrades-and-rollback):
+the migrations only go forward, so it is the database from the backup that
+the upgrade takes, with the images of the old version.
 
 ## Stage limits
 
