@@ -158,11 +158,14 @@ versions shipped amd64-only images and ran under emulation; see
 production: when the evaluation is over, deploy on a server.
 `brew install cadence-lab-tech/tap/clab` gives a native CLI;
 `clab auth login --host http://127.0.0.1:8080` signs it in, and `clab setup`
-in a local clone connects it to a project: MCP and the agent skills, from
-the instance itself ([connecting developers](docs/admin.md#connecting-developers),
-or `/docs` in the UI). `clab setup --plugin` adds the Claude plugin
-`clab-plugin`, which ships inside `clab` - no GitHub needed, only Claude
-Code (`--dry-run` shows what it would do). When done,
+in a local clone connects it to a project: MCP and the agent skills of each
+agent it finds (Claude Code, Codex, or any other agent: its skills and the
+MCP configuration to paste), from the instance itself
+([CLI and agents](docs/admin.md#cli-and-agents),
+[connecting developers](docs/admin.md#connecting-developers), or `/docs` in
+the UI). `clab setup --plugin` adds the plugin `clab-plugin`, a mod of
+Claude: it ships inside `clab` - no GitHub needed, only Claude Code
+(`--dry-run` shows what it would do). When done,
 `docker compose down -v` in `cadence-lab` removes the containers and the data.
 
 ## What is in here
