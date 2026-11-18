@@ -2303,7 +2303,14 @@ refuses the sign-in when it differs or is not `https`.
   `SDLC_PUBLIC_URL=https://cadence.example.com` in `.env`. Without either, the API
   builds an `http://` address, answers anyway, and writes one line to its log
   (`docker compose logs api`): set `SDLC_PUBLIC_URL` or pass
-  `X-Forwarded-Proto`. Clients do not sign in by `http`.
+  `X-Forwarded-Proto`. Clients do not sign in by `http`. The trust is by the
+  address of the sender, not by who it is: any machine at a private address
+  that reaches `CADENCE_HTTP_ADDR` (another container of the Docker network, a
+  host of your LAN) can set `X-Forwarded-Proto` and `X-Forwarded-For` for its
+  own requests. The API takes no client address from them and reads
+  `X-Forwarded-Proto` only to name the address in the metadata that machine
+  gets back, so nothing is gained from it; keep the port open to your proxy
+  alone (the default `127.0.0.1:8080`, or a firewall for another address).
 - **Kubernetes**: the chart sets it to `https://<ingress.host>` when the
   Ingress has TLS (`ingress.tls.secretName`). Without that, and with an
   HTTPRoute, it is empty and the API reads the request: set
