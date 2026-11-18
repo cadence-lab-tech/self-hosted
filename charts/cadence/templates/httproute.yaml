@@ -26,7 +26,7 @@ spec:
   {{- end }}
   rules:
     - matches:
-        {{- range list "/v1" "/mcp" "/webhooks" }}
+        {{- range list "/v1" "/mcp" "/webhooks" "/.well-known/oauth-authorization-server" "/.well-known/oauth-protected-resource" }}
         - path:
             type: PathPrefix
             value: {{ . }}

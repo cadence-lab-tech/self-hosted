@@ -9,19 +9,47 @@
 #   proxy  plain HTTP on port 80 inside the container, published on
 #          CADENCE_HTTP_ADDR (compose.proxy.yml); TLS is the job of your
 #          reverse proxy. No certificates, no ACME.
+# Which proxies Caddy believes about the client's address and scheme
+# (X-Forwarded-For, X-Forwarded-Proto). A snippet must be defined before the
+# line that imports it, so these two stand above the global options.
+#
+# tls    nobody to trust: Caddy is the edge, it overwrites the headers.
+# proxy  your reverse proxy sits in front of Caddy. Without trust Caddy
+#        replaces its X-Forwarded-Proto with its own "http", and the API would
+#        build the public address (the issuer of the sign-in of MCP clients,
+#        docs/admin.md, "Sign-in of MCP clients (OAuth)") on http. With trust
+#        the header of a proxy at a private address (loopback, 10/8,
+#        172.16/12, 192.168/16, fd00::/8) goes through. A proxy at a public
+#        address is not trusted: set SDLC_PUBLIC_URL then.
+(trust-tls) {
+}
+
+(trust-proxy) {
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
 {
 	# Global options must come first, and the block must exist: without it
 	# Caddy would read the imported site block at the bottom as global
 	# options. Let in-flight requests (MCP streams) finish on reload.
 	grace_period 10s
+	import trust-{$CADENCE_MODE:tls}
 }
+
 # The routes are the same in both modes.
 (routes) {
 	encode zstd gzip
 
-	# What the service handles: /v1 is REST, /mcp is agents, /webhooks is
-	# GitHub, /healthz and /readyz are probes. Everything else is the UI.
-	@backend path /v1/* /mcp/* /webhooks/* /healthz /readyz
+	# What the service handles: /v1 is REST, /mcp is agents (the address of
+	# the instance, /mcp, and of a project, /mcp/projects/<KEY>), /webhooks
+	# is GitHub, /healthz and /readyz are probes, and the two documents under
+	# /.well-known/oauth-* are the metadata of the sign-in of MCP clients
+	# (RFC 8414, RFC 9728). Only those two: the rest of /.well-known is the
+	# UI. Everything else is the UI. /mcp without a slash is a path of its
+	# own, /mcp/* does not catch it.
+	@backend path /v1/* /mcp /mcp/* /webhooks/* /healthz /readyz /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/*
 	handle @backend {
 		# MCP answers with a stream (SSE): buffering the response would
 		# break it.

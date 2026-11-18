@@ -19,7 +19,9 @@
 # bucket; a file of 1 MiB uploaded through the Ingress (multipart, spooled to
 # the emptyDir of /tmp of the read-only API) and downloaded with its sha256
 # and name (CLAB-300); the long poll of events through the Ingress; the
-# metrics inside the cluster only; Pod Security; no value of a
+# metrics inside the cluster only; the sign-in of MCP clients (CLAB-487): the OAuth
+# metadata of /.well-known and the 401 of MCP through the Ingress and the
+# Gateway; Pod Security; no value of a
 # secret in the values of the release or the manifests; a key missing in the
 # Secret; a refused upgrade keeps the pods; an upgrade with a changed value
 # keeps the data; the manifests of the bucket without keys (Pod Identity and
@@ -583,6 +585,46 @@ mcp_checks() {
   check "...as a stream (text/event-stream)" grep -qi '^content-type: text/event-stream' "$mcp_headers"
 }
 mcp_checks "the Ingress" "$base"
+# The sign-in of MCP clients by OAuth (CLAB-487): the two documents of
+# /.well-known/oauth-* reach the API through the route of the chart, the rest
+# of /.well-known is the UI, MCP without a token is a 401 that names the
+# metadata of the resource, and /mcp without a slash is not the UI's. The
+# chart has no SDLC_PUBLIC_URL here (the Ingress of this check has no TLS), so
+# the address of the answers is the one asked, http://localhost:PORT. Images
+# of v0.30.0 and later, and images of a branch (a pin variable set).
+# reaches_api STATUS-LINE CONTENT-TYPE HEADERS: not what the UI answers to a POST
+# (405, Allow: GET, HEAD) or to a GET (HTML).
+reaches_api() {
+  [ "$(awk '{print $2}' <<<"$1")" != 405 ] && ! grep -qF text/html <<<"$2" && ! grep -qiF 'allow: get, head' <<<"$3"
+}
+oauth_checks() {
+  local via="$1" b="$2" meta res head inst inst_line inst_type
+  if version_lt "$version" v0.30.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+    info "skipped: the images of $version have no OAuth sign-in (v0.30.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+    return 0
+  fi
+  meta="$(curl -s "$b/.well-known/oauth-authorization-server")"
+  check "GET /.well-known/oauth-authorization-server through $via: JSON with the issuer $b" \
+    [ "$(jq -r '.issuer' <<<"$meta" 2>/dev/null)" = "$b" ]
+  res="$(curl -s "$b/.well-known/oauth-protected-resource/mcp/projects/CHECK")"
+  check "GET /.well-known/oauth-protected-resource/mcp/projects/CHECK through $via: resource $b/mcp/projects/CHECK" \
+    [ "$(jq -r '.resource' <<<"$res" 2>/dev/null)" = "$b/mcp/projects/CHECK" ]
+  check "...and authorization_servers starts with $b" [ "$(jq -r '.authorization_servers[0]' <<<"$res" 2>/dev/null)" = "$b" ]
+  check "GET /.well-known/openid-configuration through $via is the UI (HTML)" \
+    grep -qi '^content-type: text/html' <<<"$(curl -s -D - -o /dev/null "$b/.well-known/openid-configuration")"
+  head="$(curl -s -D - -o /dev/null -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$b/mcp/projects/CHECK" | tr -d '\r')"
+  check "POST /mcp/projects/CHECK without a token through $via: 401" contains "$(head -n 1 <<<"$head")" " 401"
+  check "...with WWW-Authenticate resource_metadata=\"$b/.well-known/oauth-protected-resource/mcp/projects/CHECK\"" \
+    contains "$head" "resource_metadata=\"$b/.well-known/oauth-protected-resource/mcp/projects/CHECK\""
+  inst="$(curl -s -D - -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$b/mcp" | tr -d '\r')"
+  inst_line="$(head -n 1 <<<"$inst")"
+  inst_type="$(tr '[:upper:]' '[:lower:]' <<<"$inst" | sed -n 's/^content-type: *//p' | head -n 1)"
+  # The UI answers a POST with 405 and "Allow: GET, HEAD", a GET with HTML.
+  check "POST /mcp through $via reaches the API, not the UI: no 405 of the UI, no HTML ($inst_line, ${inst_type:-no content type})" \
+    reaches_api "$inst_line" "$inst_type" "$inst"
+}
+oauth_checks "the Ingress" "$base"
 # The annotations of the guide reach the controller: every location of the
 # host keeps a stream open for an hour (the default cuts it after 60s),
 # does not buffer it, and takes an artifact up to the limit of the service.
@@ -911,6 +953,7 @@ route_checks "the Gateway" "$gw_base"
 k get secret cadence -o go-template='{{index .data "admin-token" | base64decode}}' | "$clab" auth login --host "$gw_base" --with-token >/dev/null
 check "clab auth login through the Gateway, whoami is admin" contains "$("$clab" --host "$gw_base" whoami 2>&1)" "admin"
 mcp_checks "the Gateway" "$gw_base"
+oauth_checks "the Gateway" "$gw_base"
 if [ -n "$long_poll_on" ]; then
   # Longer than 15 s, the timeout Envoy gives a route with no timeouts.
   long_poll "the Gateway" "$gw_base" 20 19.5 23

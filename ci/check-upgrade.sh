@@ -81,6 +81,11 @@
 #     runs it has the reminder: always for a clone (it runs the scripts of
 #     this checkout), for a package once FROM is a release with it; "nothing
 #     to do", the refusals and the failed upgrades do not remind
+#   - the sign-in of MCP clients (CLAB-487, TO is v0.30.0 or newer, or images
+#     of a branch): the migration 000049_oauth is applied, .env has no line of
+#     it, the OAuth metadata answers 200 with no line added, MCP without a
+#     token is a 401 with resource_metadata, and the token of FROM still
+#     works on /v1 and on the address of a project
 #   - the roles carry their documents over the upgrade (TO is v0.21.0 or
 #     newer, the release that has them, CLAB-350): the claim of a role taken
 #     on FROM and taken again after the upgrade hands the instructions with
@@ -940,6 +945,62 @@ JSON
     pass "the content of the artifact is unchanged"
   else
     fail "the content of the artifact differs or is gone"
+  fi
+  # --- the sign-in of MCP clients after the upgrade (CLAB-487) --------------------------
+  # The service of v0.30.0 applies the migration 000049_oauth by itself and
+  # serves the OAuth metadata with no line added to .env (the defaults of
+  # compose), the proxy mode with no SDLC_PUBLIC_URL (the address from Host and
+  # X-Forwarded-Proto); the token of FROM, the administrator one the installer
+  # wrote before, still works on /v1 and on the address of a project. .env is
+  # byte for byte the one of FROM (the list "kept" above). Skipped while TO is
+  # older than v0.30.0, unless the images are those of a branch.
+  if version_lt "$to" v0.30.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+    info "skipped: $to has no OAuth sign-in (v0.30.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+  else
+    info "the sign-in of MCP clients after the upgrade"
+    local oauth_host=cadence.example.com oauth_meta oauth_res oauth_head
+    if [ "$(pg_q "SELECT count(*) FROM schema_migrations WHERE version = 49 AND name = 'oauth'" 2>/dev/null)" = 1 ] &&
+      [ "$(pg_q "SELECT concat_ws(' ', to_regclass('oauth_clients') IS NOT NULL, to_regclass('oauth_grants') IS NOT NULL, to_regclass('oauth_refresh_tokens') IS NOT NULL)" 2>/dev/null)" = "t t t" ]; then
+      pass "the migration 000049_oauth is in schema_migrations: the tables of the sign-in are there"
+    else
+      fail "the migration 000049_oauth is not applied: no version 49 in schema_migrations, or no tables of the sign-in"
+    fi
+    if ! grep -qE '^(SDLC_OAUTH_[A-Z_]*|SDLC_PUBLIC_URL)=' .env; then
+      pass ".env has no line of the sign-in: the defaults of docker-compose.yml are in force"
+    else
+      fail ".env got a line of the sign-in during the upgrade"
+    fi
+    oauth_meta="$(curl -s -H "Host: $oauth_host" -H 'X-Forwarded-Proto: https' "$base/.well-known/oauth-authorization-server")"
+    if [ "$(jq -r '.issuer' <<<"$oauth_meta" 2>/dev/null)" = "https://$oauth_host" ]; then
+      pass "/.well-known/oauth-authorization-server answers with the issuer https://$oauth_host, without a line in .env"
+    else
+      fail "/.well-known/oauth-authorization-server after the upgrade: $oauth_meta"
+    fi
+    oauth_res="$(curl -s -H "Host: $oauth_host" -H 'X-Forwarded-Proto: https' "$base/.well-known/oauth-protected-resource/mcp/projects/UPG")"
+    if [ "$(jq -r '.resource' <<<"$oauth_res" 2>/dev/null)" = "https://$oauth_host/mcp/projects/UPG" ]; then
+      pass "/.well-known/oauth-protected-resource/mcp/projects/UPG: resource https://$oauth_host/mcp/projects/UPG"
+    else
+      fail "/.well-known/oauth-protected-resource after the upgrade: $oauth_res"
+    fi
+    oauth_head="$(curl -s -D - -o /dev/null -X POST -H "Host: $oauth_host" -H 'X-Forwarded-Proto: https' -H 'Content-Type: application/json' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$base/mcp/projects/UPG" | tr -d '\r')"
+    if [ "$(head -n 1 <<<"$oauth_head" | awk '{print $2}')" = 401 ] && grep -qF 'resource_metadata="https://'"$oauth_host"'/.well-known/oauth-protected-resource/mcp/projects/UPG"' <<<"$oauth_head"; then
+      pass "POST /mcp/projects/UPG without a token: 401 with resource_metadata"
+    else
+      fail "POST /mcp/projects/UPG without a token after the upgrade: $oauth_head"
+    fi
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $admin_token" "$base/v1/projects")" = 200 ] &&
+      curl -s -H "Authorization: Bearer $admin_token" "$base/v1/projects" | grep -qF '"UPG"'; then
+      pass "the token of $from still lists the projects on /v1/projects, UPG among them"
+    else
+      fail "the token of $from does not work on /v1/projects after the upgrade"
+    fi
+    if curl -s -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$base/mcp/projects/UPG" | grep -qF sdlc_claim_task; then
+      pass "...and calls tools on /mcp/projects/UPG"
+    else
+      fail "the token of $from does not list tools on /mcp/projects/UPG after the upgrade"
+    fi
   fi
   # --- roles after the upgrade (CLAB-350): documents, byte for byte ------------------
   # The migration of TO carries the instructions of every version of a role

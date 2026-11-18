@@ -113,6 +113,15 @@ x-shared-env: &shared-env
   # Prometheus in: docs/admin.md, "Monitoring". An empty value in .env turns
   # the listeners off.
   SDLC_METRICS_ADDR: ${SDLC_METRICS_ADDR-:9090}
+  # Sign-in of remote MCP clients by OAuth (since v0.30.0): on by default,
+  # SDLC_OAUTH_ENABLED=false turns it off. The worker reads the same values:
+  # it cleans up expired tokens and clients. docs/admin.md, "Sign-in of MCP
+  # clients (OAuth)".
+  SDLC_OAUTH_ENABLED: ${SDLC_OAUTH_ENABLED:-true}
+  SDLC_OAUTH_DCR_ENABLED: ${SDLC_OAUTH_DCR_ENABLED:-true}
+  SDLC_OAUTH_CIMD_ENABLED: ${SDLC_OAUTH_CIMD_ENABLED:-true}
+  SDLC_OAUTH_ACCESS_TTL: ${SDLC_OAUTH_ACCESS_TTL:-1h}
+  SDLC_OAUTH_REFRESH_TTL: ${SDLC_OAUTH_REFRESH_TTL:-720h}
 
 services:
   # PostgreSQL 18 on Debian 13. An installation made by an earlier release,
@@ -204,6 +213,13 @@ services:
       SDLC_OIDC_ISSUER: ${SDLC_OIDC_ISSUER:-}
       SDLC_OIDC_CLIENT_ID: ${SDLC_OIDC_CLIENT_ID:-}
       SDLC_OIDC_GROUPS_CLAIM: ${SDLC_OIDC_GROUPS_CLAIM:-groups}
+      # The public address of the instance, the issuer of the sign-in of MCP
+      # clients by OAuth (since v0.30.0). Empty by default: the API takes it
+      # from the request (Host and X-Forwarded-Proto). compose.tls.yml sets it
+      # from SDLC_DOMAIN; it is not derived here, because SDLC_DOMAIN is empty
+      # in the proxy mode and "https://" would stop the API on start.
+      # docs/admin.md, "Sign-in of MCP clients (OAuth)".
+      SDLC_PUBLIC_URL: ${SDLC_PUBLIC_URL:-}
       # How long the API takes to receive an uploaded file and to send one
       # back (since v0.18.0); 0 is no limit. docs/admin.md, "Attachments".
       SDLC_UPLOAD_TIMEOUT: ${SDLC_UPLOAD_TIMEOUT:-10m}

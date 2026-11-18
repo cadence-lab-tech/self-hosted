@@ -1,7 +1,13 @@
 # CADENCE_MODE=tls: Caddy terminates TLS for SDLC_DOMAIN with a certificate
 # from Let's Encrypt. Ports 80 and 443 must be reachable from the internet:
-# 80 answers the ACME challenge and redirects to HTTPS.
+# 80 answers the ACME challenge and redirects to HTTPS. The API takes its
+# public address, the issuer of the sign-in of MCP clients, from the domain
+# (the proxy mode leaves SDLC_PUBLIC_URL empty and the API reads the address
+# from the request).
 services:
+  api:
+    environment:
+      SDLC_PUBLIC_URL: https://${SDLC_DOMAIN}
   caddy:
     ports:
       - "80:80"

@@ -316,6 +316,10 @@ the metrics listener, the secret files and extraEnv.
 {{- $_ := set $fixed "SDLC_BLOB_S3_STS_ENDPOINT" (default "" $v.blobs.s3.stsEndpoint) -}}
 {{- $_ := set $fixed "SDLC_METRICS_ADDR" (ternary ":9090" "" (ne (toString $v.metrics.enabled) "false")) -}}
 {{- $config := merge (deepCopy (default dict (index $v.config $reader))) (deepCopy (default dict $v.config.shared)) -}}
+{{- /* The public address of the API for the sign-in of MCP clients: the host of a TLS Ingress, unless config.api.SDLC_PUBLIC_URL says otherwise. Without TLS on the Ingress, and with an HTTPRoute, it stays empty and the API takes it from the request. */ -}}
+{{- if and (eq $reader "api") (not (index $config "SDLC_PUBLIC_URL")) (eq (include "cadence.ingressEnabled" $root) "true") $v.ingress.host (default dict $v.ingress.tls).secretName -}}
+{{- $_ := set $config "SDLC_PUBLIC_URL" (printf "https://%s" $v.ingress.host) -}}
+{{- end -}}
 {{- range $name, $_ := $config -}}
 {{- if hasKey $fixed $name -}}
 {{- fail (printf "config.%s: %s is set by the chart and cannot be changed (docs/admin.md, \"Kubernetes (Helm)\")" $reader $name) -}}

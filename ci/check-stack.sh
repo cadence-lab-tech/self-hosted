@@ -51,6 +51,17 @@
 # out - longer than the 45 s after which the healthcheck of v0.21.0 called
 # the API unhealthy - and starts the worker.
 #
+# Sign-in of MCP clients (CLAB-487): through Caddy in the proxy mode, the
+# metadata /.well-known/oauth-authorization-server and
+# /.well-known/oauth-protected-resource/mcp/projects/CHECK (JSON of the API;
+# the issuer follows X-Forwarded-Proto of the proxy, http with a warning in the
+# log of the API without it), /.well-known/openid-configuration stays with the
+# UI, POST /mcp/projects/CHECK without a token is 401 with resource_metadata,
+# POST /mcp reaches the API; then SDLC_OAUTH_ENABLED=false (404 of the
+# metadata, a plain 401, the token still works) and back. The tls mode is
+# checked as a configuration of Caddy (its routes, no trusted proxies). Images
+# of v0.30.0 and later, and images of a branch (a pin variable set).
+#
 # The routes of Caddy (CLAB-267): the admin API of Caddy lists the upstreams
 # of the Caddyfile of the package; a Caddyfile of the administrator routing
 # to ui:81, mounted by compose.override.yml, makes the site answer 502, and
@@ -885,6 +896,9 @@ check "tls mode listens on :443" contains "$tls_json" '":443"'
 check "tls mode serves the domain" contains "$tls_json" '"cadence.example.com"'
 check "tls mode issues the certificate with ACME" contains "$tls_json" '"module":"acme"'
 check "MCP is proxied without buffering" contains "$tls_json" '"flush_interval":-1'
+check "tls mode routes /mcp, /mcp/* and the two OAuth documents of /.well-known to the API, nothing else of /.well-known" \
+  contains "$tls_json" '"/mcp","/mcp/*","/webhooks/*","/healthz","/readyz","/.well-known/oauth-authorization-server","/.well-known/oauth-protected-resource","/.well-known/oauth-protected-resource/*"'
+check "tls mode trusts no proxy for X-Forwarded-Proto" lacks "$tls_json" 'trusted_proxies'
 
 # --- instance ------------------------------------------------------------------------------
 info "instance"
@@ -905,6 +919,106 @@ check "clab project create --team" "$clab" --host "$base" project create CHECK -
 mcp="$(curl -s "${auth[@]}" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$base/mcp/projects/CHECK")"
 check "MCP tools/list on /mcp/projects/CHECK lists sdlc_claim_task" contains "$mcp" '"sdlc_claim_task"'
+
+# --- sign-in of MCP clients by OAuth, through Caddy (CLAB-487) -------------------------
+# The metadata and the 401 of MCP reach the API through the routes of the
+# Caddyfile (/.well-known/oauth-* and /mcp), the issuer follows the scheme of
+# the proxy in front (X-Forwarded-Proto of a private address, trusted_proxies
+# of the proxy mode), and the switch SDLC_OAUTH_ENABLED=false takes the
+# sign-in away and leaves the tokens. Images of v0.30.0 and later, and images
+# of a branch (a pin variable set), whatever VERSION says. The host name is
+# the one a proxy would pass (Host: cadence.example.com): a loopback address
+# would give no warning of the API about http.
+if version_lt "$version" v0.30.0 && [ -z "${CADENCE_BACKEND_DIGEST+set}" ]; then
+  info "skipped: the images of $version have no OAuth sign-in (v0.30.0+); images of a branch are checked with CADENCE_BACKEND_DIGEST="
+else
+  info "OAuth sign-in of MCP clients through Caddy"
+  oauth_host="cadence.example.com"
+  # reaches_api STATUS-LINE CONTENT-TYPE HEADERS: not what the UI answers to a
+  # POST (405, Allow: GET, HEAD) or to a GET (HTML).
+  reaches_api() {
+    [ "$(awk '{print $2}' <<<"$1")" != 405 ] && ! grep -qF text/html <<<"$2" && ! grep -qiF 'allow: get, head' <<<"$3"
+  }
+  oauth_get() { curl -s -H "Host: $oauth_host" "$@"; }
+  oauth_head() { curl -s -D - -o /dev/null -H "Host: $oauth_host" "$@"; }
+  mcp_list='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  # No header of the proxy: the scheme is that of the connection, http, and
+  # the API writes one warning line to its log (once per process).
+  meta_plain="$(oauth_get "$base/.well-known/oauth-authorization-server")"
+  check "GET /.well-known/oauth-authorization-server through Caddy: JSON of the API with the issuer" \
+    [ "$(jq -r '.issuer | type' <<<"$meta_plain" 2>/dev/null)" = string ]
+  check "...without X-Forwarded-Proto the issuer is http://$oauth_host" \
+    [ "$(jq -r '.issuer' <<<"$meta_plain" 2>/dev/null)" = "http://$oauth_host" ]
+  check "...and the API warns once to set SDLC_PUBLIC_URL or pass X-Forwarded-Proto" \
+    api_log_has "SDLC_PUBLIC_URL или передайте X-Forwarded-Proto"
+  # The proxy in front says https. The request comes from the gateway of the
+  # Docker network, a private address: Caddy keeps the header.
+  meta_https="$(oauth_get -H 'X-Forwarded-Proto: https' "$base/.well-known/oauth-authorization-server")"
+  check "with X-Forwarded-Proto: https from a private address the issuer is https://$oauth_host (trusted_proxies)" \
+    [ "$(jq -r '.issuer' <<<"$meta_https" 2>/dev/null)" = "https://$oauth_host" ]
+  res="$(oauth_get -H 'X-Forwarded-Proto: https' "$base/.well-known/oauth-protected-resource/mcp/projects/CHECK")"
+  check "GET /.well-known/oauth-protected-resource/mcp/projects/CHECK: resource https://$oauth_host/mcp/projects/CHECK" \
+    [ "$(jq -r '.resource' <<<"$res" 2>/dev/null)" = "https://$oauth_host/mcp/projects/CHECK" ]
+  check "...and authorization_servers starts with https://$oauth_host" \
+    [ "$(jq -r '.authorization_servers[0]' <<<"$res" 2>/dev/null)" = "https://$oauth_host" ]
+  # Only the two documents go to the API; the rest of /.well-known is the UI.
+  oidc_head="$(oauth_head "$base/.well-known/openid-configuration")"
+  check "GET /.well-known/openid-configuration is the UI (HTML), not a JSON of the API" \
+    contains "$(tr '[:upper:]' '[:lower:]' <<<"$oidc_head")" "content-type: text/html"
+  # MCP without a token: 401 with the metadata of the resource.
+  mcp_head="$(oauth_head -X POST -H 'X-Forwarded-Proto: https' -H 'Content-Type: application/json' -d "$mcp_list" "$base/mcp/projects/CHECK")"
+  check "POST /mcp/projects/CHECK without a token: 401" contains "$(head -n 1 <<<"$mcp_head")" " 401"
+  check "...with WWW-Authenticate: Bearer resource_metadata=\"https://$oauth_host/.well-known/oauth-protected-resource/mcp/projects/CHECK\"" \
+    contains "$(tr -d '\r' <<<"$mcp_head")" "resource_metadata=\"https://$oauth_host/.well-known/oauth-protected-resource/mcp/projects/CHECK\""
+  # /mcp without a slash is a path of its own for Caddy (/mcp/* does not
+  # catch it): it has to reach the API, not the UI. The API answers it by its
+  # own rules (the address of the instance from the version that has it, else
+  # its 404); the UI answers a POST with 405 and "Allow: GET, HEAD", and a GET
+  # with HTML, the page of the single-page app.
+  inst_head="$(oauth_head -X POST -H 'X-Forwarded-Proto: https' -H 'Content-Type: application/json' -d "$mcp_list" "$base/mcp")"
+  inst_line="$(head -n 1 <<<"$inst_head" | tr -d '\r')"
+  inst_type="$(tr -d '\r' <<<"$inst_head" | tr '[:upper:]' '[:lower:]' | sed -n 's/^content-type: *//p' | head -n 1)"
+  check "POST /mcp (no slash) reaches the API, not the UI: no 405 of the UI, no HTML ($inst_line, ${inst_type:-no content type})" \
+    reaches_api "$inst_line" "$inst_type" "$inst_head"
+  if [ "$(awk '{print $2}' <<<"$inst_line")" = 401 ]; then
+    check "...the address of the instance answers 401 with resource_metadata" \
+      contains "$(tr -d '\r' <<<"$inst_head")" "resource_metadata="
+  else
+    info "/mcp answers $inst_line here: these images have no address of the instance, its 401 is checked from the version that has it"
+  fi
+  # A token is still enough: the address of the project and /v1.
+  tools_with_token() {
+    curl -s "${auth[@]}" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$mcp_list" "$base/mcp/projects/CHECK" |
+      grep -q sdlc_claim_task
+  }
+  check "the token still signs in: tools/list on /mcp/projects/CHECK" tools_with_token
+  check "/readyz of the proxy mode answers 200 with SDLC_PUBLIC_URL empty" [ "$(http_code "$base/readyz")" = 200 ]
+
+  # The switch: SDLC_OAUTH_ENABLED=false in .env and a restart. The metadata
+  # is gone (404), MCP answers a plain 401 without resource_metadata, the
+  # tokens work. Then the line goes back out of .env and the stack as it was.
+  # compose reads the line from .env itself: no load_env, which would export
+  # the installation name again where the check has unset it.
+  info "SDLC_OAUTH_ENABLED=false"
+  env_set SDLC_OAUTH_ENABLED false
+  docker compose up -d >/dev/null 2>&1 || true
+  check "the stack is ready with the sign-in switched off" wait_ready 180
+  check "GET /.well-known/oauth-authorization-server: 404" \
+    [ "$(http_code -H "Host: $oauth_host" "$base/.well-known/oauth-authorization-server")" = 404 ]
+  check "GET /.well-known/oauth-protected-resource/mcp/projects/CHECK: 404" \
+    [ "$(http_code -H "Host: $oauth_host" "$base/.well-known/oauth-protected-resource/mcp/projects/CHECK")" = 404 ]
+  off_head="$(oauth_head -X POST -H 'Content-Type: application/json' -d "$mcp_list" "$base/mcp/projects/CHECK")"
+  check "POST /mcp/projects/CHECK without a token: 401" contains "$(head -n 1 <<<"$off_head")" " 401"
+  check "...without resource_metadata" lacks "$(tr '[:upper:]' '[:lower:]' <<<"$off_head")" "resource_metadata"
+  check "the administrator token still works: /v1/auth/me is_admin" \
+    contains "$(curl -s "${auth[@]}" "$base/v1/auth/me")" '"is_admin":true'
+  check "...and tools/list on /mcp/projects/CHECK" tools_with_token
+  sed -i.bak '/^SDLC_OAUTH_ENABLED=/d' .env && rm -f .env.bak
+  docker compose up -d >/dev/null 2>&1 || true
+  check "the stack is ready again with the sign-in on (the default)" wait_ready 180
+  check "...and the metadata is back: 200" \
+    [ "$(http_code -H "Host: $oauth_host" "$base/.well-known/oauth-authorization-server")" = 200 ]
+fi
 
 # --- first cycle and roles: the starter bundle (docs/admin.md, "First cycle and roles") ------
 info "starter bundle"
